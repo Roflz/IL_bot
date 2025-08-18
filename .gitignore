@@ -1,0 +1,67 @@
+/data/xp_crops_labeled/ -f
+/bot_runelite_IL/data/
+
+# Environment variables (contains sensitive data like API tokens)
+.env
+.env.local
+.env.*.local
+
+# YOLO model weight files
+*.pt
+*.onnx
+*.weights
+
+# JIRA integration files
+jira_issues.json
+jira_input.txt
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Generated data files
+data/features/
+data/gamestates/
+data/runelite_gamestates/
+data/runelite_screenshots/
+data/actions.csv
+*.npy
+*.json
+!config.json
+!settings.json
+
+# Model files
+*.pth
+models/trained/
+models/*.pth
+models/*.png
+
+# Logs and reports
+logs/
+*.log
+feature_analysis_report.json
+
+# Temporary/Test files
+test_*.py
+*_test.py
+*.tmp
+*.temp
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
