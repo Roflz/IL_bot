@@ -9,7 +9,7 @@ import glob
 import datetime
 import os
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import tkinter as tk
 from tkinter import ttk
 from queue import Queue, Empty, Full
@@ -21,6 +21,7 @@ from .services.feature_pipeline import FeaturePipeline
 from .services.predictor import PredictorService
 from .services.mapping_service import MappingService
 from .services.window_finder import WindowFinder
+from .services.actions_service import ActionsService
 
 # Import views
 from .ui.views.live_features_view import LiveFeaturesView
@@ -94,6 +95,9 @@ class BotController:
 
             # Window finder
             self.window_finder = WindowFinder()
+
+            # Actions service
+            self.actions_service = ActionsService(self)
 
             # Live source (use watchdog for instant file detection)
             gamestates_dir = Path(f"data/{self.ui_state.bot_mode}/gamestates")
@@ -412,6 +416,9 @@ class BotController:
             self._schema_set = False
             self._feature_schema_set = False
             
+            # Start actions recording
+            self.actions_service.start_recording()
+            
             # Start watcher thread
             self._watcher_thread = threading.Thread(
                 target=self._watcher_worker,
@@ -442,18 +449,15 @@ class BotController:
     def stop_live_mode(self):
         """Stop live mode by setting stop event and waiting for threads to finish"""
         try:
-            LOG.info("Stopping live mode...")
             self._stop.set()
             
             # Wait for threads to finish
             if hasattr(self, '_watcher_thread') and self._watcher_thread.is_alive():
-                LOG.debug("Waiting for watcher thread to finish...")
                 self._watcher_thread.join(timeout=2.0)
                 if self._watcher_thread.is_alive():
                     LOG.warning("Watcher thread did not stop cleanly")
             
             if hasattr(self, '_feature_thread') and self._feature_thread.is_alive():
-                LOG.debug("Waiting for feature thread to finish...")
                 self._feature_thread.join(timeout=2.0)
                 if self._feature_thread.is_alive():
                     LOG.warning("Feature thread did not stop cleanly")
@@ -471,10 +475,11 @@ class BotController:
                 except:
                     pass
             
+            # Stop actions recording
+            self.actions_service.stop_recording()
+            
             # Reset stop event for next start
             self._stop.clear()
-            
-            LOG.info("Live mode stopped and cleaned up")
             
         except Exception as e:
             LOG.exception("Failed to stop live mode")
@@ -521,9 +526,7 @@ class BotController:
                 # Push the window into the view
                 self.live_features_view.update_from_window(window, changed_mask)
                 
-                # Log frame info
-                changed_count = np.sum(changed_mask)
-                LOG.debug("UI_PUMP: table_update processed, changed=%d cells", changed_count)
+
                 
             except Exception as e:
                 LOG.exception("UI apply failed")
@@ -550,7 +553,6 @@ class BotController:
         last = None
         while not self._stop.is_set():
             frame_start = time.time()
-            LOG.debug("controller: watcher wait start last=%s", last)
             
             # Time detect→load
             detect_start = time.time()
@@ -568,15 +570,7 @@ class BotController:
             except Exception:
                 self._last_gs_path = None
             
-            # DEBUG: Log gamestate data before putting in queue
-            gs_keys = list(gs.keys())
-            gs_size = len(gs)
-            LOG.info("WATCHER: Detected new gamestate file=%s, keys=%d, sample_keys=%s", 
-                    Path(path).name, gs_size, gs_keys[:5])
-            
             self.gs_queue.put(gs)
-            LOG.debug("controller: watcher OK path=%s gs_keys=%d detect=%.1f load=%.1f", 
-                     path, len(gs), detect_time, load_time)
             # Store timing info for feature worker
             gs['_timing'] = {'detect': detect_time, 'load': load_time}
             
@@ -597,7 +591,6 @@ class BotController:
             LOG.debug("controller: feature thread started")
             
             while not self._stop.is_set():
-                LOG.debug("controller: feature process start")
                 gs = self.gs_queue.get()           # blocks
                 
                 # Push into pipeline (extract + buffer + warm window)
@@ -618,21 +611,8 @@ class BotController:
                         (window, changed_mask, feature_names, feature_groups)
                     ))
                     
-                    # DEBUG: Log UI queue message sent
-                    LOG.info(
-                        "FEATURE_WORKER: Sent table_update to UI (window=%s, changed_true=%d)",
-                        window.shape, int(changed_mask.sum())
-                    )
                 
-                # Get timing info from gamestate
-                timing = gs.get('_timing', {})
-                detect_time = timing.get('detect', 0.0)
-                load_time = timing.get('load', 0.0)
-                
-                # Log comprehensive frame timing
-                LOG.debug("frame: io=%.1f extract=0.0 ui=0.0", detect_time + load_time)
-                
-                LOG.debug("controller: feature OK gs_keys=%d", len(gs))
+
                     
         except Exception as e:
             LOG.exception("Fatal error in feature worker")
@@ -659,3 +639,9 @@ class BotController:
 
         except Exception as e:
             LOG.exception("Error during shutdown")
+    
+    def get_action_features(self) -> List[float]:
+        """Get current action features for display"""
+        if hasattr(self, 'actions_service'):
+            return self.actions_service.get_action_features()
+        return [0.0] * 8

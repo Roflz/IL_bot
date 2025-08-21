@@ -78,12 +78,8 @@ class FeaturePipeline:
             ValueError: If NaN/Inf values detected
         """
         try:
-            LOG.info("Starting feature extraction...")
-            
             # Initialize session timing before the first extraction
             if not self.session_timing_initialized:
-                LOG.info("Initializing session timing for live mode...")
-                
                 # For live mode, we want relative timestamps starting from 0
                 # The first gamestate becomes time 0
                 self.session_start_time = gamestate.get('timestamp', 0)
@@ -92,13 +88,9 @@ class FeaturePipeline:
                 # Initialize the feature extractor with this session timing
                 self.feature_extractor.initialize_session_timing([gamestate])
                 self.session_timing_initialized = True
-                
-                LOG.info(f"FeatureExtractor session timing initialized on first gamestate: start_time={self.session_start_time}, live_mode_start={self.live_mode_start_time}")
             
             # Extract features using the properly initialized extractor
-            LOG.info("Extracting features from gamestate...")
             features = self.feature_extractor.extract_features_from_gamestate(gamestate)
-            LOG.info(f"Features extracted: {len(features) if features is not None else 'None'}")
             
             if features is None or len(features) != 128:
                 error_msg = f"Invalid features extracted: {len(features) if features is not None else 'None'}"
@@ -135,48 +127,22 @@ class FeaturePipeline:
             
             # Save ID mappings to disk for persistence
             try:
-                LOG.info("Saving ID mappings to disk...")
                 # Use absolute path to ensure correct location
                 import os
                 save_path = os.path.abspath("data/05_mappings/live_id_mappings.json")
-                LOG.info(f"Save path: {save_path}")
                 self.feature_extractor.save_id_mappings(save_path)
-                LOG.info("ID mappings saved successfully")
                 
                 # Hot-reload mappings so new live IDs are visible immediately
                 try:
                     if hasattr(self.controller, "mapping_service") and self.controller.mapping_service:
                         self.controller.mapping_service.reload()
-                        LOG.info("MappingService reloaded after saving live mappings")
                 except Exception:
-                    LOG.exception("Failed to hot-reload MappingService")
+                    pass
                     
             except Exception as e:
-                LOG.exception("Failed to save ID mappings")
+                pass
             
-            # READABLE LOGGING: Show what we actually extracted
-            LOG.info("=== FEATURE EXTRACTION SUMMARY ===")
-            LOG.info("Total features extracted: %d", len(features))
-            LOG.info("Window shape: %s", self.window.shape)
-            
-            # Show some key features with readable names
-            key_features = [
-                (0, "player_x"),
-                (1, "player_y"), 
-                (8, "time_since_interaction"),
-                (65, "phase_duration"),
-                (66, "gamestates_in_phase"),
-                (127, "timestamp")
-            ]
-            
-            for idx, name in key_features:
-                if idx < len(features):
-                    value = features[idx]
-                    LOG.info("  %s (idx=%d): %s", name, idx, value)
-                else:
-                    LOG.warning("  %s (idx=%d): OUT OF BOUNDS", name, idx)
-            
-            LOG.info("=== END FEATURE EXTRACTION ===")
+
             
             return self.window, self.feature_names, self.feature_groups
             

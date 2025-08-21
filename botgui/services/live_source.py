@@ -6,7 +6,7 @@ import time
 import os
 import threading
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 from queue import Queue
 import logging
 
@@ -264,10 +264,8 @@ class LiveSource:
                         # File not stable, try one more time after a short delay
                         time.sleep(0.1)
                         if not self._is_file_stable(file_path):
-                            LOG.debug("File not stable: %s", file_path)
                             continue
                     
-                    LOG.debug(f"live_source: new file {file_path} ({file_size} bytes)")
                     return file_path
                             
             except Exception as e:
@@ -316,13 +314,9 @@ class LiveSource:
             # Check if candidate is the latest
             if latest['is_numeric'] is not None:
                 if candidate_numeric < latest['name_numeric']:
-                    LOG.debug("live_source: stale file %s < newest %s; skipping", 
-                             candidate_numeric, latest['name_numeric'])
                     last_seen = file_path
                     continue  # DO NOT RAISE - skip stale and continue
                 else:
-                    LOG.info("live_source: processing file %s (newest=%s)", 
-                            candidate_numeric, latest['name_numeric'])
                     return file_path
             else:
                 # Latest file is non-numeric, allow candidate through
@@ -350,7 +344,6 @@ class LiveSource:
         if not os.access(path, os.R_OK):
             raise RuntimeError(f"file not readable: {path}")
         
-        LOG.debug("live_source: load start path=%s", path)
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -375,15 +368,6 @@ class LiveSource:
                 LOG.exception("live_source: failed to attach source metadata")
                 raise
             
-            # Log detailed information about the loaded file
-            gs_keys = list(data.keys())
-            detect_time = time.time()
-            load_time = detect_time - mtime if mtime else 0
-            
-            LOG.debug("live_source: candidates=N, newest=name_numeric=%s, mtime=%s, path=%s", 
-                     data.get("_source_name_numeric"), mtime, path)
-            LOG.debug("live_source OK path=%s gs_keys=%s detect=%.3fms load=%.3fms", 
-                     path, gs_keys, detect_time * 1000, load_time * 1000)
             return data
             
         except json.JSONDecodeError as e:
@@ -392,6 +376,42 @@ class LiveSource:
         except Exception as e:
             LOG.exception("Failed to load JSON from %s", path)
             raise RuntimeError(f"Cannot read file {path}: {e}")
+    
+    def get_recent_gamestates(self, count: int = 10) -> List[Dict[str, Any]]:
+        """
+        Get the most recent gamestates.
+        
+        Args:
+            count: Number of recent gamestates to return
+            
+        Returns:
+            List of recent gamestate dictionaries, most recent first
+        """
+        try:
+            # Get all JSON files in the directory
+            json_files = list(self.dir_path.glob("*.json"))
+            if not json_files:
+                return []
+            
+            # Sort by filename (timestamp) in descending order
+            json_files.sort(key=lambda x: x.name, reverse=True)
+            
+            # Load the most recent files
+            recent_gamestates = []
+            for file_path in json_files[:count]:
+                try:
+                    gamestate = self.load_json(str(file_path))
+                    if gamestate:
+                        recent_gamestates.append(gamestate)
+                except Exception as e:
+                    LOG.debug(f"Failed to load gamestate from {file_path}: {e}")
+                    continue
+            
+            return recent_gamestates
+            
+        except Exception as e:
+            LOG.error(f"Error getting recent gamestates: {e}")
+            return []
     
     def shutdown(self):
         """Shutdown the live source and cleanup resources"""

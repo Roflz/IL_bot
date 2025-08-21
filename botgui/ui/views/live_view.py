@@ -10,6 +10,7 @@ from typing import Optional, Tuple
 import time
 import logging
 from ..styles import create_dark_canvas, create_dark_stringvar, create_dark_booleanvar
+from ...services.window_finder import WindowFinder
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,10 @@ class LiveView(ttk.Frame):
         self.controller = controller
         self.show_toolbar = show_toolbar
         
+        # Window detection
+        self.window_finder = WindowFinder()
+        self.detected_window = None
+        
         # Image state
         self.current_image: Optional[np.ndarray] = None
         self.photo_image: Optional[ImageTk.PhotoImage] = None
@@ -29,35 +34,44 @@ class LiveView(ttk.Frame):
         
         # Display state
         self.auto_refresh = True
-        self.refresh_interval = 100  # ms
+        self.refresh_interval = 33  # ms (30 FPS instead of 10 FPS)
         self.last_refresh = 0
+        
+        # Performance optimizations
+        self.skip_frames = 0  # Skip every Nth frame for performance
+        self.frame_count = 0
         
         # UI elements
         self.canvas: Optional[tk.Canvas] = None
         self.status_label: Optional[ttk.Label] = None
+        self.window_status_label: Optional[ttk.Label] = None
         
         self._setup_ui()
         self._bind_events()
         
         # Debug logging
-        logger.info(f"LiveView initialized with show_toolbar={self.show_toolbar}")
-        logger.info(f"Initial region: {self.region}")
-        logger.info(f"Auto-refresh: {self.auto_refresh}")
+        # logger.info(f"LiveView initialized with show_toolbar={self.show_toolbar}")
+        # logger.info(f"Initial region: {self.region}")
+        # logger.info(f"Auto-refresh: {self.auto_refresh}")
+        
+        # Don't auto-detect window - wait for user to click Detect Window button
     
     def _setup_ui(self):
         """Setup the user interface"""
-        # Configure grid weights: status (0), canvas (1)
-        self.grid_rowconfigure(0, weight=0)  # status line - no expansion
-        self.grid_rowconfigure(1, weight=1)  # canvas - expands to fill
+        # Configure grid weights: window detection (0), status (1), canvas (2)
+        self.grid_rowconfigure(0, weight=0)  # window detection - no expansion
+        self.grid_rowconfigure(1, weight=0)  # status line - no expansion
+        self.grid_rowconfigure(2, weight=1)  # canvas - expands to fill
         self.grid_columnconfigure(0, weight=1)  # full width
         
         # Determine row positions based on toolbar setting
         if self.show_toolbar:
-            # With toolbar: toolbar(0), status(1), canvas(2)
+            # With toolbar: toolbar(0), window detection(1), status(2), canvas(3)
             toolbar_row = 0
-            status_row = 1
-            canvas_row = 2
-            self.grid_rowconfigure(2, weight=1)  # canvas expands
+            window_detection_row = 1
+            status_row = 2
+            canvas_row = 3
+            self.grid_rowconfigure(3, weight=1)  # canvas expands
             
             # Build toolbar frame
             toolbar_frame = ttk.Frame(self)
@@ -80,11 +94,34 @@ class LiveView(ttk.Frame):
             self.auto_refresh_var = create_dark_booleanvar(self, value=True)
             ttk.Checkbutton(toolbar_frame, text="Auto-refresh", 
                            variable=self.auto_refresh_var).grid(row=0, column=4)
+            
+            # FPS controls
+            ttk.Label(toolbar_frame, text="FPS:").grid(row=0, column=5, padx=(12, 4))
+            self.fps_var = create_dark_stringvar(self, value="30")
+            fps_combo = ttk.Combobox(toolbar_frame, textvariable=self.fps_var, 
+                                   values=["15", "30", "60"], width=5, state="readonly")
+            fps_combo.grid(row=0, column=6, padx=(0, 8))
+            fps_combo.bind("<<ComboboxSelected>>", self._on_fps_changed)
         else:
-            # No toolbar: status(0), canvas(1)
-            status_row = 0
-            canvas_row = 1
+            # No toolbar: window detection(0), status(1), canvas(2)
+            window_detection_row = 0
+            status_row = 1
+            canvas_row = 2
             # No toolbar frame created at all
+        
+        # Window detection frame - always present
+        window_detection_frame = ttk.Frame(self)
+        window_detection_frame.grid(row=window_detection_row, column=0, sticky="ew", padx=8, pady=(0, 4))
+        window_detection_frame.grid_columnconfigure(1, weight=1)
+        
+        # Detect window button
+        ttk.Button(window_detection_frame, text="🔍 Detect Window", 
+                  command=self._detect_runelite_window).grid(row=0, column=0, padx=(0, 8))
+        
+        # Window status display
+        self.window_status_label = ttk.Label(window_detection_frame, text="Status: No window detected", 
+                                           font=("Arial", 9))
+        self.window_status_label.grid(row=0, column=1, sticky="w")
         
         # Status line - always present
         self.status_label = ttk.Label(self, text="Status: Ready | Region: 800x600 | FPS: 0", 
@@ -98,13 +135,13 @@ class LiveView(ttk.Frame):
         # Ensure canvas fills available space completely
         self.canvas.config(width=800, height=400)  # Set minimum size
         
+        # Show initial placeholder
+        self._show_placeholder()
+        
         # Bind canvas events
         self.canvas.bind('<Button-1>', self._on_canvas_click)
         self.canvas.bind('<B1-Motion>', self._on_canvas_drag)
         self.canvas.bind('<ButtonRelease-1>', self._on_canvas_release)
-        
-        # Initial display
-        self._show_placeholder()
     
     def _bind_events(self):
         """Bind UI events"""
@@ -131,20 +168,105 @@ class LiveView(ttk.Frame):
             self._schedule_refresh()
     
     def _show_placeholder(self):
-        """Show placeholder when no image is available"""
-        if self.canvas:
-            # Create a simple placeholder
-            width, height = 400, 300
-            self.canvas.config(width=width, height=height)
+        """Show placeholder text when no window is detected"""
+        if not self.canvas or not self.canvas.winfo_exists():
+            return
+        
+        # Clear canvas
+        self.canvas.delete("all")
+        
+        # Get canvas dimensions
+        width = self.canvas.winfo_width()
+        height = self.canvas.winfo_height()
+        
+        if width <= 1 or height <= 1:
+            # Canvas not sized yet, use default
+            width = 800
+            height = 400
+        
+        # Draw placeholder text
+        self.canvas.create_text(
+            width // 2, height // 2,
+            text="No window detected\nClick '🔍 Detect Window' to find Runelite windows",
+            font=("Arial", 14),
+            fill="#888888",
+            justify="center"
+        )
+        
+        # Draw a border around the canvas
+        self.canvas.create_rectangle(
+            2, 2, width-2, height-2,
+            outline="#444444",
+            width=2
+        )
+    
+    def _detect_runelite_window(self):
+        """Detect Runelite windows and update the region"""
+        try:
+            # Find Runelite windows
+            runelite_windows = self.window_finder.find_runelite_windows()
             
-            # Draw placeholder text
-            self.canvas.create_text(
-                width // 2, height // 2,
-                text="No image available\nClick 'Capture' to take a screenshot",
-                font=("Arial", 12),
-                fill="gray",
-                justify="center"
-            )
+            if not runelite_windows:
+                self.window_status_label.config(text="Status: No Runelite windows found")
+                self.detected_window = None
+                logger.info("No Runelite windows detected")
+                return
+            
+            # Get the active window or first available
+            active_window = self.window_finder.get_active_runelite_window()
+            
+            if active_window:
+                self.detected_window = active_window
+                
+                # Update region to match the detected window
+                left = active_window['left']
+                top = active_window['top']
+                width = active_window['width']
+                height = active_window['height']
+                
+                # Calculate aspect ratio
+                aspect_ratio = width / height if height > 0 else 0
+                
+                # Update the region
+                self.region = (left, top, left + width, top + height)
+                
+                # Update UI
+                if hasattr(self, 'region_var'):
+                    self.region_var.set(f"{width}x{height}")
+                
+                # Update status display
+                status_text = f"Status: {active_window['title']} | Pos: ({left}, {top}) | Size: {width}x{height} | Aspect: {aspect_ratio:.2f}"
+                self.window_status_label.config(text=status_text)
+                
+                # Auto-capture screenshot if auto-refresh is enabled
+                if self.auto_refresh:
+                    # Clear placeholder and start live capture
+                    self.canvas.delete("all")
+                    self._capture_screenshot()
+                    self._schedule_refresh()
+            else:
+                self.window_status_label.config(text="Status: No active Runelite windows")
+                self.detected_window = None
+                # logger.warning("No active Runelite windows found")
+                
+        except Exception as e:
+            error_msg = f"Failed to detect Runelite window: {e}"
+            self.window_status_label.config(text=f"Status: Error - {error_msg}")
+            logger.error(error_msg)
+    
+    def _update_window_status(self):
+        """Update the window status display"""
+        if self.detected_window:
+            left = self.detected_window['left']
+            top = self.detected_window['top']
+            width = self.detected_window['width']
+            height = self.detected_window['height']
+            aspect_ratio = width / height if height > 0 else 0
+            
+            status_text = f"Status: {self.detected_window['title']} | Pos: ({left}, {top}) | Size: {width}x{height} | Aspect: {aspect_ratio:.2f}"
+            self.window_status_label.config(text=status_text)
+        else:
+            self.window_status_label.config(text="Status: No window detected")
     
     def _capture_screenshot(self):
         """Capture a screenshot of the current region"""
@@ -159,13 +281,21 @@ class LiveView(ttk.Frame):
                 print(f"ERROR: {error_msg}")
                 raise RuntimeError(error_msg)
             
-            # Get region coordinates
-            left, top, right, bottom = self.region
-            width = right - left
-            height = bottom - top
-            
+            # Use detected window region if available, otherwise use default
+            if self.detected_window:
+                left = self.detected_window['left']
+                top = self.detected_window['top']
+                width = self.detected_window['width']
+                height = self.detected_window['height']
+                region = (left, top, left + width, top + height)
+            else:
+                # Use the stored region
+                left, top, right, bottom = self.region
+                width = right - left
+                height = bottom - top
+                region = (left, top, width, height)
 
-            logger.debug(f"Capturing screenshot for region: {left}, {top}, {width}x{height}")
+            # logger.debug(f"Capturing screenshot for region: {region}")
             
             # Validate region dimensions
             if width <= 0 or height <= 0:
@@ -176,7 +306,7 @@ class LiveView(ttk.Frame):
             
             # Take screenshot
             screenshot = pyautogui.screenshot(region=(left, top, width, height))
-            logger.debug(f"Screenshot captured successfully: {screenshot.size}")
+            # logger.debug(f"Screenshot captured successfully: {screenshot.size}")
             
             # Convert to numpy array
             self.current_image = np.array(screenshot)
@@ -189,8 +319,9 @@ class LiveView(ttk.Frame):
             
             # Update status
             self._update_status()
+            self._update_window_status()
             
-            logger.debug("Screenshot processing completed")
+            # logger.debug("Screenshot processing completed")
             
         except Exception as e:
             logger.error(f"Failed to capture screenshot: {e}")
@@ -280,6 +411,9 @@ class LiveView(ttk.Frame):
         
         if self.status_label:
             self.status_label.config(text=status)
+        
+        # Also update window status
+        self._update_window_status()
     
     def _calculate_fps(self) -> float:
         """Calculate current FPS"""
@@ -292,14 +426,64 @@ class LiveView(ttk.Frame):
             self.last_refresh = current_time
             return 0.0
     
+    def _optimize_refresh_rate(self):
+        """Dynamically optimize refresh rate based on performance"""
+        if not self.detected_window:
+            return
+        
+        # Calculate current FPS
+        current_fps = self._calculate_fps()
+        
+        # Adjust refresh interval based on performance
+        if current_fps < 15:  # If we're getting less than 15 FPS
+            self.refresh_interval = min(100, self.refresh_interval + 10)  # Slow down
+            # logger.debug(f"Performance low ({current_fps:.1f} FPS), slowing down to {self.refresh_interval}ms")
+        elif current_fps > 25 and self.refresh_interval > 33:  # If we're getting good FPS
+            self.refresh_interval = max(33, self.refresh_interval - 5)  # Speed up
+            # logger.debug(f"Performance good ({current_fps:.1f} FPS), speeding up to {self.refresh_interval}ms")
+        
+        # Skip frames if performance is still poor
+        if current_fps < 10:
+            self.skip_frames = 2  # Skip every 3rd frame
+        elif current_fps < 20:
+            self.skip_frames = 1  # Skip every 2nd frame
+        else:
+            self.skip_frames = 0  # No frame skipping
+    
     def _schedule_refresh(self):
         """Schedule the next refresh if auto-refresh is enabled"""
         if self.auto_refresh:
             self.after(self.refresh_interval, self._refresh_display)
+            
+            # Also refresh window detection every 5 seconds
+            self.after(5000, self._refresh_window_detection)
+    
+    def _refresh_window_detection(self):
+        """Periodically refresh window detection"""
+        if self.auto_refresh and self.detected_window:
+            # Check if the window still exists and update if needed
+            try:
+                current_windows = self.window_finder.find_runelite_windows()
+                window_still_exists = any(
+                    w['title'] == self.detected_window['title'] 
+                    for w in current_windows
+                )
+                
+                if not window_still_exists:
+                    # logger.info("Previously detected window no longer exists, re-detecting...")
+                    self._detect_runelite_window()
+                else:
+                    # Update window status (position might have changed)
+                    self._update_window_status()
+            except Exception as e:
+                logger.debug(f"Window detection refresh failed: {e}")
+            
+            # Schedule next refresh
+            self.after(5000, self._refresh_window_detection)
     
     def _refresh_display(self):
         """Refresh the display"""
-        logger.info(f"_refresh_display called, auto_refresh: {self.auto_refresh}")
+        # logger.info(f"_refresh_display called, auto_refresh: {self.auto_refresh}")
         
         if self.auto_refresh:
             # Check if the window is ready before attempting to capture
@@ -320,13 +504,30 @@ class LiveView(ttk.Frame):
                 if self.canvas and self.canvas.winfo_exists():
                     canvas_width = self.canvas.winfo_width()
                     canvas_height = self.canvas.winfo_height()
-                    logger.debug(f"Canvas dimensions: {canvas_width}x{canvas_height}")
+                    # logger.debug(f"Canvas dimensions: {canvas_width}x{canvas_height}")
                     
                     # Only proceed if canvas has valid dimensions
                     if canvas_width > 1 and canvas_height > 1:
-                        logger.debug("Canvas ready, capturing screenshot...")
-                        self._capture_screenshot()
-                        self._schedule_refresh()
+                        # logger.debug("Canvas ready, capturing screenshot...")
+                        
+                        # Only capture if we have a detected window
+                        if self.detected_window:
+                            # Implement frame skipping for performance
+                            if self.frame_count % (self.skip_frames + 1) == 0:
+                                self._capture_screenshot()
+                                self._schedule_refresh()
+                                
+                                # Optimize refresh rate every 10 frames
+                                if self.frame_count % 10 == 0:
+                                    self._optimize_refresh_rate()
+                            else:
+                                # Skip this frame, but still schedule the next
+                                self._schedule_refresh()
+                            
+                            self.frame_count += 1
+                        else:
+                            # Show placeholder text when no window is detected
+                            self._show_placeholder()
                     else:
                         # Canvas not ready - show error and fail
                         error_msg = f"Canvas dimensions invalid: {canvas_width}x{canvas_height}"
@@ -341,7 +542,8 @@ class LiveView(ttk.Frame):
                 logger.error(f"Canvas refresh failed: {e}")
                 raise
         else:
-            logger.debug("Auto-refresh is disabled, not refreshing")
+            # logger.debug("Auto-refresh is disabled, not refreshing")
+            pass
         
 
     
@@ -388,6 +590,25 @@ class LiveView(ttk.Frame):
         """Handle canvas release"""
         # TODO: Implement region selection
         pass
+    
+    def _on_fps_changed(self, event=None):
+        """Handle FPS selection change"""
+        try:
+            fps = int(self.fps_var.get())
+            self.refresh_interval = int(1000 / fps)  # Convert FPS to milliseconds
+            logger.info(f"FPS changed to {fps} ({self.refresh_interval}ms interval)")
+            
+            # Reset frame skipping
+            self.skip_frames = 0
+            self.frame_count = 0
+            
+        except ValueError:
+            logger.error(f"Invalid FPS value: {self.fps_var.get()}")
+    
+    def set_fps(self, fps: int):
+        """Set the target FPS manually"""
+        self.fps_var.set(str(fps))
+        self._on_fps_changed()
     
     def set_region(self, region: Tuple[int, int, int, int]):
         """Set the capture region"""

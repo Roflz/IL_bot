@@ -43,6 +43,7 @@ class MouseRecorder:
         # Threading
         self.stop_event = threading.Event()
         self.recording_thread = None
+        self.action_lock = threading.Lock()  # Thread safety for action recording
 
     def find_runelite_window(self):
         """Find the Runelite window"""
@@ -170,17 +171,19 @@ class MouseRecorder:
         self.recording_thread.daemon = True
         self.recording_thread.start()
         
-        # Start listeners
+        # Start listeners with non-blocking mode to prevent interference
         self.mouse_listener = mouse.Listener(
             on_move=self.on_mouse_move,
             on_click=self.on_mouse_click,
-            on_scroll=self.on_mouse_scroll
+            on_scroll=self.on_mouse_scroll,
+            suppress=False  # Don't suppress events
         )
         self.mouse_listener.start()
         
         self.keyboard_listener = keyboard.Listener(
             on_press=self.on_key_press,
-            on_release=self.on_key_release
+            on_release=self.on_key_release,
+            suppress=False  # Don't suppress events
         )
         self.keyboard_listener.start()
         
@@ -227,8 +230,9 @@ class MouseRecorder:
             current_time = time.time()
             # Throttle mouse move events to avoid flooding (10ms)
             if current_time - self.last_move_time > self.move_threshold:
-                self.mouse_move_count += 1
-                self.last_move_time = current_time
+                with self.action_lock:
+                    self.mouse_move_count += 1
+                    self.last_move_time = current_time
                 
                 # Get relative coordinates
                 rel_x, rel_y = self.get_relative_coordinates(x, y)
@@ -246,7 +250,8 @@ class MouseRecorder:
                     'modifiers': '',
                     'active_keys': ''
                 }
-                self.click_queue.append(event_data)
+                with self.action_lock:
+                    self.click_queue.append(event_data)
                 
         except Exception as e:
             # Continue recording even if this event fails
@@ -264,7 +269,9 @@ class MouseRecorder:
             
             # Only record button presses, not releases
             if pressed:
-                self.click_count += 1
+                with self.action_lock:
+                    self.click_count += 1
+                
                 btn_name = str(button).split('.')[-1]
                 
                 # Get relative coordinates
@@ -293,7 +300,8 @@ class MouseRecorder:
                     'modifiers': modifiers,
                     'active_keys': active_keys
                 }
-                self.click_queue.append(event_data)
+                with self.action_lock:
+                    self.click_queue.append(event_data)
                 
         except Exception as e:
             # Continue recording even if this event fails
@@ -309,7 +317,8 @@ class MouseRecorder:
             if not self.check_window_focus():
                 return
             
-            self.scroll_count += 1
+            with self.action_lock:
+                self.scroll_count += 1
             
             # Get relative coordinates
             rel_x, rel_y = self.get_relative_coordinates(x, y)
@@ -325,7 +334,7 @@ class MouseRecorder:
             except:
                 active_keys = ''
             
-            self.click_queue.append({
+            event_data = {
                 'timestamp': int(time.time() * 1000),
                 'event_type': 'scroll',
                 'x_in_window': rel_x,
@@ -336,7 +345,9 @@ class MouseRecorder:
                 'scroll_dy': dy,
                 'modifiers': modifiers,
                 'active_keys': active_keys
-            })
+            }
+            with self.action_lock:
+                self.click_queue.append(event_data)
             
         except Exception as e:
             # Continue recording even if this event fails
@@ -364,14 +375,17 @@ class MouseRecorder:
             if not key_char or key_char == 'None':
                 key_char = str(key)
             
-            self.key_press_count += 1
+            with self.action_lock:
+                self.key_press_count += 1
             
             # Track modifier keys
             if key in [Key.shift, Key.ctrl, Key.alt, Key.cmd]:
-                self.modifier_state.add(str(key))
+                with self.action_lock:
+                    self.modifier_state.add(str(key))
             
             # Track key hold times
-            self.key_hold_times[key] = time.time()
+            with self.action_lock:
+                self.key_hold_times[key] = time.time()
             
             # Safely get modifier and active keys strings
             try:
@@ -384,7 +398,7 @@ class MouseRecorder:
             except:
                 active_keys = ''
             
-            self.key_queue.append({
+            event_data = {
                 'timestamp': int(time.time() * 1000),
                 'event_type': 'key_press',
                 'x_in_window': 0,
@@ -395,14 +409,16 @@ class MouseRecorder:
                 'scroll_dy': 0,
                 'modifiers': modifiers,
                 'active_keys': active_keys
-            })
+            }
+            with self.action_lock:
+                self.key_queue.append(event_data)
             
         except Exception as e:
             # Log the error but continue recording
             print(f"Key press recording error: {e}, key: {key}")
             # Still record the key event with fallback
             fallback_key = str(key) if key else "unknown"
-            self.key_queue.append({
+            event_data = {
                 'timestamp': int(time.time() * 1000),
                 'event_type': 'key_press',
                 'x_in_window': 0,
@@ -413,7 +429,9 @@ class MouseRecorder:
                 'scroll_dy': 0,
                 'modifiers': '',
                 'active_keys': ''
-            })
+            }
+            with self.action_lock:
+                self.key_queue.append(event_data)
 
     def on_key_release(self, key):
         """Handle key release events"""
@@ -437,15 +455,18 @@ class MouseRecorder:
             if not key_char or key_char == 'None':
                 key_char = str(key)
             
-            self.key_release_count += 1
+            with self.action_lock:
+                self.key_release_count += 1
             
             # Remove modifier keys
-            if str(key) in self.modifier_state:
-                self.modifier_state.discard(str(key))
+            with self.action_lock:
+                if str(key) in self.modifier_state:
+                    self.modifier_state.discard(str(key))
             
             # Remove from hold times
-            if key in self.key_hold_times:
-                del self.key_hold_times[key]
+            with self.action_lock:
+                if key in self.key_hold_times:
+                    del self.key_hold_times[key]
             
             # Safely get modifier and active keys strings
             try:
@@ -458,7 +479,7 @@ class MouseRecorder:
             except:
                 active_keys = ''
             
-            self.key_queue.append({
+            event_data = {
                 'timestamp': int(time.time() * 1000),
                 'event_type': 'key_release',
                 'x_in_window': 0,
@@ -469,14 +490,16 @@ class MouseRecorder:
                 'scroll_dy': 0,
                 'modifiers': modifiers,
                 'active_keys': active_keys
-            })
+            }
+            with self.action_lock:
+                self.key_queue.append(event_data)
             
         except Exception as e:
             # Log the error but continue recording
             print(f"Key release recording error: {e}, key: {key}")
             # Still record the key event with fallback
             fallback_key = str(key) if key else "unknown"
-            self.key_queue.append({
+            event_data = {
                 'timestamp': int(time.time() * 1000),
                 'event_type': 'key_release',
                 'x_in_window': 0,
@@ -487,7 +510,9 @@ class MouseRecorder:
                 'scroll_dy': 0,
                 'modifiers': '',
                 'active_keys': ''
-            })
+            }
+            with self.action_lock:
+                self.key_queue.append(event_data)
 
     def get_modifier_string(self):
         """Get string representation of currently pressed modifier keys"""
@@ -526,40 +551,42 @@ class MouseRecorder:
         while not self.stop_event.is_set():
             try:
                 # Process mouse events
-                while self.click_queue and not self.stop_event.is_set():
-                    event = self.click_queue.pop(0)
-                    if self.csv_writer and self.csvf:
-                        self.csv_writer.writerow([
-                            event['timestamp'],
-                            event['event_type'],
-                            event['x_in_window'],
-                            event['y_in_window'],
-                            event['btn'],
-                            event['key'],
-                            event['scroll_dx'],
-                            event['scroll_dy'],
-                            event['modifiers'],
-                            event['active_keys']
-                        ])
-                        self.csvf.flush()  # Ensure data is written immediately
+                with self.action_lock:
+                    while self.click_queue and not self.stop_event.is_set():
+                        event = self.click_queue.pop(0)
+                        if self.csv_writer and self.csvf:
+                            self.csv_writer.writerow([
+                                event['timestamp'],
+                                event['event_type'],
+                                event['x_in_window'],
+                                event['y_in_window'],
+                                event['btn'],
+                                event['key'],
+                                event['scroll_dx'],
+                                event['scroll_dy'],
+                                event['modifiers'],
+                                event['active_keys']
+                            ])
+                            self.csvf.flush()  # Ensure data is written immediately
                 
                 # Process keyboard events
-                while self.key_queue and not self.stop_event.is_set():
-                    event = self.key_queue.pop(0)
-                    if self.csv_writer and self.csvf:
-                        self.csv_writer.writerow([
-                            event['timestamp'],
-                            event['event_type'],
-                            event['x_in_window'],
-                            event['y_in_window'],
-                            event['btn'],
-                            event['key'],
-                            event['scroll_dx'],
-                            event['scroll_dy'],
-                            event['modifiers'],
-                            event['active_keys']
-                        ])
-                        self.csvf.flush()  # Ensure data is written immediately
+                with self.action_lock:
+                    while self.key_queue and not self.stop_event.is_set():
+                        event = self.key_queue.pop(0)
+                        if self.csv_writer and self.csvf:
+                            self.csv_writer.writerow([
+                                event['timestamp'],
+                                event['event_type'],
+                                event['x_in_window'],
+                                event['y_in_window'],
+                                event['btn'],
+                                event['key'],
+                                event['scroll_dx'],
+                                event['scroll_dy'],
+                                event['modifiers'],
+                                event['active_keys']
+                            ])
+                            self.csvf.flush()  # Ensure data is written immediately
                 
                 # Small sleep to prevent busy waiting
                 time.sleep(0.01)
@@ -569,13 +596,14 @@ class MouseRecorder:
 
     def get_action_type_counts(self):
         """Get current action type counts"""
-        return {
-            'move': self.mouse_move_count,
-            'click': self.click_count,
-            'scroll': self.scroll_count,
-            'key_press': self.key_press_count,
-            'key_release': self.key_release_count
-        }
+        with self.action_lock:
+            return {
+                'move': self.mouse_move_count,
+                'click': self.click_count,
+                'scroll': self.scroll_count,
+                'key_press': self.key_press_count,
+                'key_release': self.key_release_count
+            }
 
 class RecorderGUI:
     def __init__(self):

@@ -995,30 +995,7 @@ class FeatureExtractor:
         with open(output_path, 'w') as f:
             json.dump(self.id_mappings, f, indent=2)
         
-        print(f"ID mappings saved to {output_path}")
-        
-        # Print mapping summary
-        total_mappings = 0
-        for group_name, group_data in self.id_mappings.items():
-            if isinstance(group_data, dict):
-                for mapping_type, mappings in group_data.items():
-                    if isinstance(mappings, dict):
-                        total_mappings += len(mappings)
-        
-        print(f"Total ID mappings: {total_mappings}")
-        
-        # Print group summary
-        print("\nID Mapping Structure Summary:")
-        print("=" * 50)
-        for group_name, group_data in self.id_mappings.items():
-            if isinstance(group_data, dict):
-                group_count = 0
-                for mapping_type, mappings in group_data.items():
-                    if isinstance(mappings, dict):
-                        group_count += len(mappings)
-                if group_count > 0:
-                    print(f"{group_name:20} : {group_count:3d} mappings")
-        print("=" * 50)
+
 
 
 def extract_features_from_gamestate(gamestate: Dict, session_start_time: Optional[int] = None, 

@@ -6,7 +6,7 @@ from tkinter import ttk
 import numpy as np
 import logging
 import threading
-from typing import Optional, List
+from typing import Dict, List, Optional, Set, Tuple, Any
 from ...util.formatting import format_value_for_display
 from ..styles import create_dark_stringvar, create_dark_booleanvar
 
@@ -72,8 +72,8 @@ class LiveFeaturesView(ttk.Frame):
         # Load favorites from file
         self._load_favorites()
         
-        # Initialize some groups as expanded by default
-        self.expanded_groups = {"Player", "Inventory", "Skills"}  # Common groups to show initially
+        # Initialize groups as collapsed by default (empty set means all collapsed)
+        self.expanded_groups = set()  # All feature groups collapsed initially
         
         LOG.info("LiveFeaturesView: initialized with tksheet")
     
@@ -207,8 +207,6 @@ class LiveFeaturesView(ttk.Frame):
         robustly parsing the event argument (dict or tuple).
         """
         try:
-            LOG.debug("sheet click event: type=%s, value=%r", type(event).__name__, event)
-            
             # tksheet >= 6.x typically passes a dict, older may pass a tuple/list
             row = col = None
             if isinstance(event, dict):
@@ -223,21 +221,19 @@ class LiveFeaturesView(ttk.Frame):
             elif isinstance(event, (tuple, list)) and len(event) >= 2:
                 row, col = event[0], event[1]
 
-            LOG.debug("sheet click: row=%r col=%r; group_rows keys=%s", row, col, list(self.group_rows.keys()))
             if row is None:
-                LOG.debug("sheet click: no row info, event format not supported")
                 return
 
-            # Only toggle when the click is on a header row; we optionally restrict to column 0
-            if row in self.group_rows and (col in (None, 0)):
-                group_name = self.group_rows[row]
-                LOG.info("group header clicked: row=%d group=%s (expanded=%s)", row, group_name,
-                         group_name in self.expanded_groups)
+            # Check if click is on a group header row
+            group_name = None
+            for gname, ginfo in self.group_rows.items():
+                if ginfo['header_row'] == row:
+                    group_name = gname
+                    break
+            
+            if group_name and (col in (None, 0)):
                 self.toggle_group(group_name)  # this calls _refresh_table and logs new state
                 return "break"  # prevent tksheet changing selection focus further on this click
-            else:
-                LOG.debug("sheet click: not on header row (row=%r, col=%r, in_group_rows=%s)", 
-                         row, col, row in self.group_rows)
         except Exception:
             LOG.exception("_on_sheet_cell_click failed")
     
@@ -263,14 +259,14 @@ class LiveFeaturesView(ttk.Frame):
         self.feature_names = list(feature_names)
         self.feature_groups = list(feature_groups)
         
-        # Seed 128 rows (feature name + group) and blank t0..t9 cells
-        self._realize_all_rows()
-        
         # Initialize color bits
         self._color_bits = np.zeros((10, 128), dtype=bool)
         
         # Mark schema as set
         self._schema_set = True
+        
+        # Build the collapsible table
+        self._refresh_table()
         
         LOG.info("Schema set: %d feature names, %d feature groups", len(feature_names), len(feature_groups))
     
@@ -343,13 +339,18 @@ class LiveFeaturesView(ttk.Frame):
         # Iterate features, update all 10 time columns for changed positions
         updated = 0
         for f_idx in range(128):
+            # Find the actual row in the sheet for this feature
+            sheet_row = self._get_feature_sheet_row(f_idx)
+            if sheet_row is None:
+                continue  # Feature is hidden (collapsed group)
+            
             for t_idx in range(10):  # t0..t9 LEFT→RIGHT
                 if not changed_mask[t_idx, f_idx]:
                     continue
 
                 value = window[t_idx, f_idx]
                 
-                # write value (row=f_idx, col=3+t_idx)
+                # write value (row=sheet_row, col=3+t_idx)
                 # Columns: 0=Feature, 1=Index, 2=Group, time starts at col=3
                 col = 3 + t_idx
 
@@ -361,7 +362,7 @@ class LiveFeaturesView(ttk.Frame):
                         group_hint = None
                         if hasattr(self, "sheet"):
                             try:
-                                group_hint = self.sheet.get_cell_data(f_idx, 2)
+                                group_hint = self.sheet.get_cell_data(sheet_row, 2)
                             except Exception:
                                 group_hint = None
 
@@ -371,12 +372,12 @@ class LiveFeaturesView(ttk.Frame):
 
                 # Prefer mapped label when available; otherwise show the raw number
                 text = mapped if (mapped is not None and mapped != "") else f"{value:.0f}"
-                self.sheet.set_cell_data(f_idx, col, text)
+                self.sheet.set_cell_data(sheet_row, col, text)
 
                 # flip color on each change
                 self._color_bits[t_idx, f_idx] = ~self._color_bits[t_idx, f_idx]
                 new_color = "#00b3b3" if self._color_bits[t_idx, f_idx] else "#ffffff"
-                self.sheet.highlight_cells(row=f_idx, column=col, fg=new_color, redraw=False)
+                self.sheet.highlight_cells(row=sheet_row, column=col, fg=new_color, redraw=False)
 
                 updated += 1
 
@@ -386,20 +387,94 @@ class LiveFeaturesView(ttk.Frame):
         # Store last window for next comparison
         self._last_window = window.copy()
         
-        LOG.info("update_from_window: updated_cells=%d", updated)
+        # Update Actions group if it exists
+        self._update_actions_group()
+    
+    def _update_actions_group(self):
+        """Update the Actions group with current values"""
+        if "Actions" not in self.group_rows:
+            return
+        
+        try:
+            # Get current action tensors from controller
+            action_tensors = self.controller.get_action_features()
+            if not action_tensors or len(action_tensors) < 10:
+                LOG.debug("No action tensors available for update")
+                return
+            
+            # Update each action feature row
+            for row_idx in self.group_rows["Actions"]['feature_rows']:
+                # Get the feature name to determine which action type to count
+                feature_name = self.sheet.get_cell_data(row_idx, 0)
+                
+                # Update T0-T9 columns with aggregated values from each timestep's tensor
+                for t in range(10):
+                    col_idx = 3 + t  # T0 starts at column 3
+                    if t < len(action_tensors):
+                        timestep_tensor = action_tensors[t]
+                        if len(timestep_tensor) > 0:
+                            if feature_name == "Action Count":
+                                # Action count is always first element
+                                value = timestep_tensor[0] if len(timestep_tensor) > 0 else 0
+                                self.sheet.set_cell_data(row_idx, col_idx, f"{int(value)}")
+                            else:
+                                # For other features, count occurrences in the tensor
+                                count = self._count_action_type_in_tensor(timestep_tensor, feature_name.lower().replace(" ", "_"))
+                                self.sheet.set_cell_data(row_idx, col_idx, f"{count}")
+                        else:
+                            self.sheet.set_cell_data(row_idx, col_idx, "0")
+                    else:
+                        self.sheet.set_cell_data(row_idx, col_idx, "0")
+            
+            
+        except Exception as e:
+            LOG.error(f"Error updating Actions group: {e}")
+    
+    def _get_feature_sheet_row(self, feature_idx: int) -> Optional[int]:
+        """
+        Get the actual sheet row for a feature index, considering collapsed groups.
+        
+        Args:
+            feature_idx: The feature index (0-127)
+            
+        Returns:
+            Sheet row number if feature is visible, None if hidden (collapsed group)
+        """
+        if not self._schema_set or feature_idx >= len(self.feature_groups):
+            return None
+        
+        group_name = self.feature_groups[feature_idx]
+        
+        # Check if group is expanded
+        if group_name not in self.expanded_groups:
+            return None
+        
+        # Find the group in group_rows
+        if group_name not in self.group_rows:
+            return None
+        
+        group_info = self.group_rows[group_name]
+        if not group_info['expanded']:
+            return None
+        
+        # Find the feature row within the group
+        feature_name = self.feature_names[feature_idx]
+        for row_idx in group_info['feature_rows']:
+            try:
+                if self.sheet.get_cell_data(row_idx, 0) == feature_name:
+                    return row_idx
+            except Exception as e:
+                continue
+        
+        return None
     
     def _refresh_table(self):
         """Refresh the feature table with collapsible groups and favorites"""
         self._assert_main_thread("_refresh_table")
         try:
-            LOG.info("LiveFeaturesView: _refresh_table called")
-            
             if not self._schema_set:
                 LOG.error("LiveFeaturesView: CRITICAL ERROR - schema not set in _refresh_table")
                 return
-            
-            LOG.info(f"LiveFeaturesView: _refresh_table - feature_names count: {len(self.feature_names)}")
-            LOG.info(f"LiveFeaturesView: _refresh_table - feature_groups count: {len(self.feature_groups)}")
             
             # Update group combo with unique groups
             if self.feature_groups:
@@ -410,15 +485,262 @@ class LiveFeaturesView(ttk.Frame):
                     self.feature_group_filter = "All"
                     self.group_combo.set("All")
             
-            # For now, just refresh the sheet to show current data
+            # Clear the sheet and rebuild with collapsible groups
             if hasattr(self, 'sheet'):
-                self.sheet.refresh()
+                self.sheet.clear()
+                self._build_collapsible_table()
             
-            LOG.info("LiveFeaturesView: _refresh_table completed")
-        
+            # If we have current data, update the table with it
+            if hasattr(self, '_last_window') and self._last_window is not None:
+                try:
+                    # Force an update with the current window data
+                    mask = np.ones_like(self._last_window, dtype=bool)
+                    self.update_from_window(self._last_window, changed_mask=mask)
+                except Exception as e:
+                    pass
+            
         except Exception as e:
             LOG.exception("LiveFeaturesView: _refresh_table failed with error")
             # Don't re-raise - just log and return gracefully
+    
+    def _build_collapsible_table(self):
+        """Build the table with collapsible feature groups"""
+        if not self.feature_names or not self.feature_groups:
+            LOG.debug("_build_collapsible_table: no feature names or groups")
+            return
+        
+        LOG.info(f"_build_collapsible_table: building table with {len(self.feature_names)} features in {len(set(self.feature_groups))} groups")
+        
+        # Group features by their feature group
+        grouped_features = {}
+        for i, (name, group) in enumerate(zip(self.feature_names, self.feature_groups)):
+            if group not in grouped_features:
+                grouped_features[group] = []
+            grouped_features[group].append((i, name, group))
+        
+        # Sort groups by their first feature index (Player first, then Interaction, Camera, etc.)
+        def get_group_order(group_name):
+            if group_name == "Player":
+                return 0
+            elif group_name == "Interaction":
+                return 1
+            elif group_name == "Camera":
+                return 2
+            elif group_name == "Inventory":
+                return 3
+            elif group_name == "Bank":
+                return 4
+            elif group_name == "Phase Context":
+                return 5
+            elif group_name == "Game Objects":
+                return 6
+            elif group_name == "NPCs":
+                return 7
+            elif group_name == "Tabs":
+                return 8
+            elif group_name == "Skills":
+                return 9
+            elif group_name == "Timestamp":
+                return 10
+            elif group_name == "Actions":
+                return 11
+            else:
+                return 999  # Unknown groups go last
+        
+        # Ensure Actions group is always included
+        all_groups = set(grouped_features.keys())
+        all_groups.add("Actions")  # Actions group is always available
+        
+        sorted_groups = sorted(all_groups, key=get_group_order)
+        
+        row_idx = 0
+        self.group_rows = {}  # Track which rows belong to which groups
+        
+        for group_name in sorted_groups:
+            # Skip Actions group here - it will be handled separately
+            if group_name == "Actions":
+                continue
+                
+            features = grouped_features[group_name]
+            
+            # Check if group should be shown based on filter
+            if self.feature_group_filter != "All" and group_name != self.feature_group_filter:
+                continue
+            
+            # Check if group should be shown based on search
+            if self.search_text:
+                group_has_match = any(self.search_text in name.lower() for _, name, _ in features)
+                if not group_has_match:
+                    continue
+            
+            # Add group header row
+            is_expanded = group_name in self.expanded_groups
+            expand_icon = "▼" if is_expanded else "▶"
+            group_header = [f"{expand_icon} {group_name}", "", "", "", "", "", "", "", "", "", "", "", ""]
+            
+            self.sheet.insert_row(group_header, idx=row_idx)
+            
+            # Style the group header row
+            self.sheet.highlight_cells(row=row_idx, column=0, bg="#4a5568", fg="#ffffff")
+            self.sheet.highlight_cells(row=row_idx, column=1, bg="#4a5568", fg="#ffffff")
+            self.sheet.highlight_cells(row=row_idx, column=2, bg="#4a5568", fg="#ffffff")
+            
+            # Store group row info
+            self.group_rows[group_name] = {
+                'header_row': row_idx,
+                'feature_rows': [],
+                'expanded': is_expanded
+            }
+            
+            row_idx += 1
+            
+            # Add feature rows if group is expanded
+            if is_expanded:
+                for feature_idx, name, group in features:
+                    # Check if feature matches search
+                    if self.search_text and self.search_text not in name.lower():
+                        continue
+                    
+                    # Create feature row data with current values
+                    feature_row = [name, str(feature_idx), group]
+                    
+                    # Fill in current feature values if available
+                    if hasattr(self, '_last_window') and self._last_window is not None:
+                        try:
+                            # Get the current value for this feature from the last window
+                            current_value = self._last_window[-1, feature_idx]  # Use the most recent timestep
+                            # Try to translate the value if translations are enabled
+                            mapped = None
+                            if getattr(self, "show_translations", False):
+                                try:
+                                    mapped = self.controller.mapping_service.translate(feature_idx, current_value, group_hint=group_name)
+                                except Exception:
+                                    mapped = None
+                            # Use translated value if available, otherwise raw value
+                            display_value = mapped if (mapped is not None and mapped != "") else f"{current_value:.0f}"
+                            feature_row.extend([display_value] * 10)  # T0-T9 columns all show current value
+                        except Exception as e:
+                            feature_row.extend([""] * 10)  # T0-T9 columns
+                    else:
+                        feature_row.extend([""] * 10)  # T0-T9 columns
+                    
+                    # Insert feature row
+                    self.sheet.insert_row(feature_row, idx=row_idx)
+                    
+                    # Style favorite features
+                    if feature_idx in self.favorite_features:
+                        self.sheet.highlight_cells(row=row_idx, column=0, bg="#2c5282", fg="#ffffff")
+                    
+                    # Store feature row info
+                    self.group_rows[group_name]['feature_rows'].append(row_idx)
+                    
+                    row_idx += 1
+        
+        # Add Actions group if it's in the sorted groups
+        if "Actions" in sorted_groups:
+            self._add_actions_group(row_idx)
+    
+    def _add_actions_group(self, start_row_idx: int):
+        """Add the Actions group to the table"""
+        
+        row_idx = start_row_idx
+        
+        # Add Actions group header
+        expand_icon = "▼" if "Actions" in self.expanded_groups else "▶"
+        group_header = [f"{expand_icon} Actions", "", "", "", "", "", "", "", "", "", "", "", ""]
+        
+        self.sheet.insert_row(group_header, idx=row_idx)
+        
+        # Style the group header row
+        self.sheet.highlight_cells(row=row_idx, column=0, bg="#4a5568", fg="#ffffff")
+        self.sheet.highlight_cells(row=row_idx, column=1, bg="#4a5568", fg="#ffffff")
+        self.sheet.highlight_cells(row=row_idx, column=2, bg="#4a5568", fg="#ffffff")
+        
+        # Store group row info
+        self.group_rows["Actions"] = {
+            'header_row': row_idx,
+            'feature_rows': [],
+            'expanded': "Actions" in self.expanded_groups
+        }
+        
+        row_idx += 1
+        
+        # Add action feature rows only if group is expanded
+        if "Actions" in self.expanded_groups:
+            # Define meaningful action features based on aggregated counts
+            action_features = [
+                ("Action Count", "count"),           # Total actions in window
+                ("Mouse Movements", "mouse_movements"), # Sum of mouse movements in window
+                ("Clicks", "clicks"),               # Sum of clicks in window
+                ("Key Presses", "key_presses"),     # Sum of key presses in window
+                ("Key Releases", "key_releases"),   # Sum of key releases in window
+                ("Scrolls", "scrolls")              # Sum of scrolls in window
+            ]
+            
+            for feature_name, feature_key in action_features:
+                # Create action feature row
+                feature_row = [feature_name, f"action_{feature_key}", "Actions"]
+                
+                # Get current action tensors from controller
+                try:
+                    action_tensors = self.controller.get_action_features()
+                    if len(action_tensors) >= 10:  # Should have 10 timesteps (T0-T9)
+                        # Fill T0-T9 columns with aggregated values from each timestep's tensor
+                        for t in range(10):
+                            if t < len(action_tensors):
+                                timestep_tensor = action_tensors[t]
+                                if len(timestep_tensor) > 0:
+                                    if feature_key == "count":
+                                        # Action count is always first element
+                                        value = timestep_tensor[0] if len(timestep_tensor) > 0 else 0
+                                        feature_row.append(f"{int(value)}")
+                                    else:
+                                        # For other features, count occurrences in the tensor
+                                        count = self._count_action_type_in_tensor(timestep_tensor, feature_key)
+                                        feature_row.append(f"{count}")
+                                else:
+                                    feature_row.append("0")
+                            else:
+                                feature_row.append("0")
+                    else:
+                        feature_row.extend(["0"] * 10)
+                except Exception as e:
+                    feature_row.extend(["0"] * 10)
+                
+                # Insert action feature row
+                self.sheet.insert_row(feature_row, idx=row_idx)
+                
+                # Store feature row info
+                self.group_rows["Actions"]['feature_rows'].append(row_idx)
+                
+                row_idx += 1
+    
+    def _count_action_type_in_tensor(self, tensor: List[float], action_type: str) -> int:
+        """Count occurrences of a specific action type in an action tensor"""
+        if not tensor or len(tensor) < 1:
+            return 0
+        
+        count = 0
+        # Action tensor structure: [count, timestamp1, type1, x1, y1, button1, key1, scroll_dx1, scroll_dy1, timestamp2, type2, x2, y2, button2, key2, scroll_dx2, scroll_dy2, ...]
+        # Action types: 0=move, 1=click, 2=key_press, 3=key_release, 4=scroll
+        
+        # Start from index 2 (first action type) and step by 8 (each action has 8 elements)
+        for i in range(2, len(tensor), 8):
+            if i < len(tensor):
+                action_type_code = int(tensor[i])
+                
+                if action_type == "mouse_movements" and action_type_code == 0:
+                    count += 1
+                elif action_type == "clicks" and action_type_code == 1:
+                    count += 1
+                elif action_type == "key_presses" and action_type_code == 2:
+                    count += 1
+                elif action_type == "key_releases" and action_type_code == 3:
+                    count += 1
+                elif action_type == "scrolls" and action_type_code == 4:
+                    count += 1
+        
+        return count
     
     def _insert_feature_row(self, feature_idx: int, name: str, group: str, translate_func, row_idx: int):
         """Insert a single feature row into the sheet"""
@@ -489,23 +811,16 @@ class LiveFeaturesView(ttk.Frame):
     
     def _expand_all_groups(self):
         """Expand all feature groups"""
-        LOG.info("EXPAND ALL GROUPS CLICKED - Before: expanded_groups=%s", self.expanded_groups)
         if self.feature_groups:
             unique_groups = set(self.feature_groups)
-            LOG.info("EXPAND ALL GROUPS - Unique groups found: %s", unique_groups)
             for group_name in unique_groups:
                 self.expanded_groups.add(group_name)
-            LOG.info("EXPAND ALL GROUPS - After: expanded_groups=%s", self.expanded_groups)
             self._refresh_table()
             self._update_summary()
-        else:
-            LOG.error("EXPAND ALL GROUPS - No feature_groups available!")
     
     def _collapse_all_groups(self):
         """Collapse all feature groups"""
-        LOG.info("COLLAPSE ALL GROUPS CLICKED - Before: expanded_groups=%s", self.expanded_groups)
         self.expanded_groups.clear()
-        LOG.info("COLLAPSE ALL GROUPS - After: expanded_groups=%s", self.expanded_groups)
         self._refresh_table()
         self._update_summary()
     

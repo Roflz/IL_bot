@@ -33,11 +33,11 @@ class WindowFinder:
         try:
             # Get all windows
             all_windows = gw.getAllWindows()
-            logger.info(f"Total windows found: {len(all_windows)}")
+            # logger.info(f"Total windows found: {len(all_windows)}")
             
             # Log all window titles for debugging
-            for i, window in enumerate(all_windows):
-                logger.info(f"Window {i}: '{window.title}' (active: {window.isActive}, minimized: {window.isMinimized})")
+            # for i, window in enumerate(all_windows):
+            #     logger.info(f"Window {i}: '{window.title}' (active: {window.isActive}, minimized: {window.isMinimized})")
             
             runelite_windows = []
             search_term = "RuneLite"  # Capital R and L
@@ -56,13 +56,14 @@ class WindowFinder:
                         'is_active': window.isActive,
                         'is_minimized': window.isMinimized
                     })
-                    logger.info(f"Found Runelite window: {title}")
+                    # logger.info(f"Found Runelite window: {title}")
                 else:
                     # Log filtered windows for debugging
-                    logger.debug(f"Filtered out non-Runelite window: {title}")
+                    # logger.debug(f"Filtered out non-Runelite window: {title}")
+                    pass
             
-            logger.info(f"Search term used: '{search_term}'")
-            logger.info(f"Found {len(runelite_windows)} Runelite window(s)")
+            # logger.info(f"Search term used: '{search_term}'")
+            # logger.info(f"Found {len(runelite_windows)} Runelite window(s)")
             return runelite_windows
             
         except Exception as e:
