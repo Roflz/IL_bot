@@ -113,105 +113,150 @@ class ActionsService:
             List of action tensors, one per timestep, in format:
             [action_count, timestamp1, type1, x1, y1, button1, key1, scroll_dx1, scroll_dy1, ...]
         """
-        if not self.is_recording or not self.actions:
+        # DEBUG: Show what we're working with
+        print(f"DEBUG: get_action_features called")
+        print(f"DEBUG: is_recording = {self.is_recording}")
+        print(f"DEBUG: actions list length = {len(self.actions) if self.actions else 0}")
+        if self.actions:
+            print(f"DEBUG: First 3 actions in memory: {self.actions[:3]}")
+            print(f"DEBUG: Last 3 actions in memory: {self.actions[-3:] if len(self.actions) >= 3 else self.actions}")
+        
+        # FIXED: Only check if actions exist, not if recording is active
+        # We should be able to access previously recorded actions even when recording is stopped
+        if not self.actions:
+            print(f"DEBUG: No actions in memory, returning empty tensors")
             return [[0.0]] * 10  # Return 10 empty tensors for T0-T9
         
-        # Get the current gamestate timestamps from the controller
-        gamestate_timestamps = []
-        try:
-            if hasattr(self.controller, 'live_source') and self.controller.live_source:
-                # Get the most recent gamestate timestamps
-                gamestates = self.controller.live_source.get_recent_gamestates(10)
-                if gamestates:
-                    # Extract timestamps and sort by timestamp (most recent first)
-                    gamestate_timestamps = [gs.get('timestamp', 0) for gs in gamestates if gs.get('timestamp')]
-                    gamestate_timestamps.sort(reverse=True)  # Most recent first
-        except Exception as e:
-            LOG.warning(f"Could not get current gamestate timestamps: {e}")
+        print(f"DEBUG: Processing {len(self.actions)} actions in memory (recording status: {self.is_recording})")
         
-        if not gamestate_timestamps or len(gamestate_timestamps) < 10:
-            # Fallback: return empty tensors
+        # FIXED: Use action timestamps instead of current gamestate timestamps
+        # The actions were recorded at specific times, so we need to use those timestamps
+        # not current gamestate timestamps which are from the current time
+        
+        # Get the timestamp range of recorded actions
+        if not self.actions:
+            print(f"DEBUG: No actions to process")
             return [[0.0]] * 10
+        
+        action_timestamps = [action.get('timestamp', 0) for action in self.actions]
+        min_timestamp = min(action_timestamps)
+        max_timestamp = max(action_timestamps)
+        
+        print(f"DEBUG: Action timestamp range: {min_timestamp} to {max_timestamp}")
+        print(f"DEBUG: Total time span: {max_timestamp - min_timestamp}ms")
+        
+        # Create 10 evenly spaced timesteps within the action time range
+        # T0 = most recent actions, T9 = oldest actions
+        timestep_duration = (max_timestamp - min_timestamp) // 10  # Duration per timestep
+        
+        print(f"DEBUG: Creating 10 timesteps, each {timestep_duration}ms long")
         
         # Create 10 timesteps (T0-T9) with 600ms windows
         action_tensors = []
         for i in range(10):
-            if i < len(gamestate_timestamps):
-                # Use the actual gamestate timestamp for this timestep
-                gamestate_timestamp = gamestate_timestamps[i]
-                
-                # Calculate the 600ms window BEFORE this gamestate timestamp
-                window_start = gamestate_timestamp - 600  # 600ms before gamestate
-                window_end = gamestate_timestamp          # Up to gamestate timestamp
-                
-                # Get actions in this window
-                window_actions = []
-                for action in self.actions:
-                    action_timestamp = action.get('timestamp', 0)
-                    if window_start <= action_timestamp <= window_end:
-                        window_actions.append(action)
-                
-                # Sort actions by timestamp
-                window_actions.sort(key=lambda a: a.get('timestamp', 0))
-                
-                # Convert to action tensor format: [count, timestamp1, type1, x1, y1, button1, key1, scroll_dx1, scroll_dy1, ...]
-                action_tensor = [len(window_actions)]  # Start with action count
-                
-                for action in window_actions:
-                    # Timestamp (relative to window start)
-                    rel_timestamp = action.get('timestamp', 0) - window_start
-                    action_tensor.append(float(rel_timestamp))
-                    
-                    # Action type (encode as: 0=move, 1=click, 2=key_press, 3=key_release, 4=scroll)
-                    event_type = action.get('event_type', 'move')
-                    if event_type == 'move':
-                        action_type = 0
-                    elif event_type == 'click':
-                        action_type = 1
-                    elif event_type == 'key_press':
-                        action_type = 2
-                    elif event_type == 'key_release':
-                        action_type = 3
-                    elif event_type == 'scroll':
-                        action_type = 4
-                    else:
-                        action_type = 0
-                    action_tensor.append(float(action_type))
-                    
-                    # Coordinates
-                    action_tensor.append(float(action.get('x_in_window', 0)))
-                    action_tensor.append(float(action.get('y_in_window', 0)))
-                    
-                    # Button (encode as: 0=none, 1=left, 2=right, 3=middle)
-                    button = action.get('btn', '')
-                    if button == 'left':
-                        button_code = 1
-                    elif button == 'right':
-                        button_code = 2
-                    elif button == 'middle':
-                        button_code = 3
-                    else:
-                        button_code = 0
-                    action_tensor.append(float(button_code))
-                    
-                    # Key (simple hash for now)
-                    key = action.get('key', '')
-                    key_code = hash(key) % 10000 if key else 0
-                    action_tensor.append(float(key_code))
-                    
-                    # Scroll deltas
-                    action_tensor.append(float(action.get('scroll_dx', 0)))
-                    action_tensor.append(float(action.get('scroll_dy', 0)))
-                
-                action_tensors.append(action_tensor)
+            # Calculate the center timestamp for this timestep
+            # T0 = most recent (max_timestamp), T9 = oldest (min_timestamp)
+            if i == 0:
+                # T0: center around most recent actions
+                center_timestamp = max_timestamp - (timestep_duration // 2)
+            elif i == 9:
+                # T9: center around oldest actions  
+                center_timestamp = min_timestamp + (timestep_duration // 2)
             else:
-                # No gamestate for this timestep, use empty tensor
-                action_tensors.append([0.0])
+                # T1-T8: evenly spaced between oldest and newest
+                center_timestamp = max_timestamp - (i * timestep_duration) - (timestep_duration // 2)
+            
+            # Calculate the 600ms window around this center timestamp
+            window_start = center_timestamp - 300  # 300ms before center
+            window_end = center_timestamp + 300    # 300ms after center
+            
+            print(f"DEBUG: Timestep {i}: center_timestamp={center_timestamp}, window={window_start}-{window_end}")
+            
+            # Get actions in this window
+            window_actions = []
+            for action in self.actions:
+                action_timestamp = action.get('timestamp', 0)
+                if window_start <= action_timestamp <= window_end:
+                    window_actions.append(action)
+            
+            print(f"DEBUG: Timestep {i}: Found {len(window_actions)} actions in window")
+            if window_actions:
+                print(f"DEBUG: Timestep {i}: Window actions: {window_actions}")
+            
+            # Sort actions by timestamp
+            window_actions.sort(key=lambda a: a.get('timestamp', 0))
+            
+            # Convert to action tensor format: [count, timestamp1, type1, x1, y1, button1, key1, scroll_dx1, scroll_dy1, ...]
+            action_tensor = [len(window_actions)]  # Start with action count
+            
+            for action in window_actions:
+                # Timestamp (relative to window start)
+                rel_timestamp = action.get('timestamp', 0) - window_start
+                action_tensor.append(float(rel_timestamp))
+                
+                # Action type (encode as: 0=move, 1=click, 2=key_press, 3=key_release, 4=scroll)
+                event_type = action.get('event_type', 'move')
+                if event_type == 'move':
+                    action_type = 0
+                elif event_type == 'click':
+                    action_type = 1
+                elif event_type == 'key_press':
+                    action_type = 2
+                elif event_type == 'key_release':
+                    action_type = 3
+                elif event_type == 'scroll':
+                    action_type = 4
+                else:
+                    action_type = 0
+                action_tensor.append(float(action_type))
+                
+                # Coordinates
+                action_tensor.append(float(action.get('x_in_window', 0)))
+                action_tensor.append(float(action.get('y_in_window', 0)))
+                
+                # Button (encode as: 0=none, 1=left, 2=right, 3=middle)
+                button = action.get('btn', '')
+                if button == 'left':
+                    button_code = 1
+                elif button == 'right':
+                    button_code = 2
+                elif button == 'middle':
+                    button_code = 3
+                else:
+                    button_code = 0
+                action_tensor.append(float(button_code))
+                
+                # Key (simple hash for now)
+                key = action.get('key', '')
+                key_code = hash(key) % 10000 if key else 0
+                action_tensor.append(float(key_code))
+                
+                # Scroll deltas
+                action_tensor.append(float(action.get('scroll_dx', 0)))
+                action_tensor.append(float(action.get('scroll_dy', 0)))
+            
+            print(f"DEBUG: Timestep {i}: Created action tensor: {action_tensor}")
+            action_tensors.append(action_tensor)
+        
+        print(f"DEBUG: Final action_tensors: {action_tensors}")
+        
+        # Count non-empty tensors
+        non_empty_count = sum(1 for tensor in action_tensors if len(tensor) > 1)  # > 1 because [0] is empty
+        print(f"DEBUG: SUCCESS: Created {non_empty_count}/10 non-empty action tensors")
         
         # T0 is already most recent (index 0), T9 is oldest (index 9)
         # No need to reverse since we sorted gamestate_timestamps in reverse order
         
         return action_tensors
+
+    def get_actions_in_window(self, window_start_ms: int, window_end_ms: int) -> List[Dict[str, Any]]:
+        actions_in_window = []
+        for action in self.actions:
+            ts = action.get('timestamp', 0)
+            if window_start_ms <= ts <= window_end_ms:
+                actions_in_window.append(action)
+        actions_in_window.sort(key=lambda a: a.get('timestamp', 0))
+        return actions_in_window
     
     def get_action_summary(self) -> Dict[str, int]:
         """Get summary of recorded actions."""
@@ -418,6 +463,10 @@ class ActionsService:
             self.actions.append(action)
             self.action_counts['mouse_movements'] += 1
             self.action_counts['total_actions'] += 1
+            
+            # DEBUG: Log what we're actually recording
+            print(f"DEBUG: RECORDED MOUSE MOVE: {action}")
+            print(f"DEBUG: Total actions in memory: {len(self.actions)}")
     
     def _on_mouse_click(self, x, y, button, pressed):
         """Handle mouse click events."""
@@ -449,6 +498,10 @@ class ActionsService:
             self.actions.append(action)
             self.action_counts['clicks'] += 1
             self.action_counts['total_actions'] += 1
+            
+            # DEBUG: Log what we're actually recording
+            print(f"DEBUG: RECORDED MOUSE CLICK: {action}")
+            print(f"DEBUG: Total actions in memory: {len(self.actions)}")
     
     def _on_mouse_scroll(self, x, y, dx, dy):
         """Handle mouse scroll events."""
@@ -474,6 +527,10 @@ class ActionsService:
             self.actions.append(action)
             self.action_counts['scrolls'] += 1
             self.action_counts['total_actions'] += 1
+            
+            # DEBUG: Log what we're actually recording
+            print(f"DEBUG: RECORDED MOUSE SCROLL: {action}")
+            print(f"DEBUG: Total actions in memory: {len(self.actions)}")
     
     def _on_key_press(self, key):
         """Handle key press events."""
@@ -499,6 +556,10 @@ class ActionsService:
             self.actions.append(action)
             self.action_counts['key_presses'] += 1
             self.action_counts['total_actions'] += 1
+            
+            # DEBUG: Log what we're actually recording
+            print(f"DEBUG: RECORDED KEY PRESS: {action}")
+            print(f"DEBUG: Total actions in memory: {len(self.actions)}")
     
     def _on_key_release(self, key):
         """Handle key release events."""
@@ -524,6 +585,10 @@ class ActionsService:
             self.actions.append(action)
             self.action_counts['key_releases'] += 1
             self.action_counts['total_actions'] += 1
+            
+            # DEBUG: Log what we're actually recording
+            print(f"DEBUG: RECORDED KEY RELEASE: {action}")
+            print(f"DEBUG: Total actions in memory: {len(self.actions)}")
     
     def save_actions(self, filepath: str = "data/actions.csv"):
         """Save recorded actions to CSV file."""

@@ -596,6 +596,19 @@ class BotController:
                 # Push into pipeline (extract + buffer + warm window)
                 window, changed_mask, feature_names, feature_groups = self.feature_pipeline.push(gs)
                 
+                # Also build synchronized action window for this gamestate timestamp
+                try:
+                    if hasattr(self, 'actions_service') and self.actions_service:
+                        ts = gs.get('timestamp')
+                        if ts:
+                            window_start = ts - 600
+                            window_end = ts
+                            actions = self.actions_service.get_actions_in_window(window_start, window_end)
+                            if actions is not None:
+                                self.feature_pipeline.record_action_window_from_actions(actions)
+                except Exception:
+                    pass
+                
                 # DEBUG: Log pipeline state after processing
                 if window is None:
                     LOG.error("feature worker: window is None after extract")

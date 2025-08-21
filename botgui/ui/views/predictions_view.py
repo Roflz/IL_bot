@@ -61,10 +61,14 @@ class PredictionsView(ttk.Frame):
                   command=self._load_model).grid(row=0, column=2, padx=(0, 12))
         
         # Right controls
+        ttk.Button(controls_frame, text="Sample Gamestate Input Sequence", 
+                  command=self._save_gamestate_sample).grid(row=0, column=3, padx=(0, 6))
+        ttk.Button(controls_frame, text="Sample Action Input Sequence", 
+                  command=self._save_actions_sample).grid(row=0, column=4, padx=(0, 6))
         ttk.Button(controls_frame, text="Clear", 
-                  command=self._clear_predictions).grid(row=0, column=3, padx=(0, 6))
+                  command=self._clear_predictions).grid(row=0, column=5, padx=(0, 6))
         ttk.Button(controls_frame, text="Export CSV", 
-                  command=self._export_to_csv).grid(row=0, column=4, padx=(0, 6))
+                  command=self._export_to_csv).grid(row=0, column=6, padx=(0, 6))
         
         # Status line
         self.status_label = ttk.Label(self, text="Status: Ready | Predictions: 0", 
@@ -248,6 +252,279 @@ class PredictionsView(ttk.Frame):
         self.predictions.clear()
         self.prediction_tree.clear()
         self._update_status()
+    
+    def _save_gamestate_sample(self):
+        """Save a sample of the current gamestate feature data as numpy array"""
+        try:
+            import logging
+            LOG = logging.getLogger(__name__)
+            
+            print("DEBUG: _save_gamestate_sample: Starting...")
+            LOG.info("_save_gamestate_sample: Starting gamestate sample save...")
+            
+            # Get current feature window from the controller
+            print("DEBUG: Checking controller attributes...")
+            if not hasattr(self.controller, 'feature_pipeline'):
+                error_msg = "Controller has no feature_pipeline attribute"
+                print(f"ERROR: {error_msg}")
+                LOG.error(f"_save_gamestate_sample: {error_msg}")
+                from tkinter import messagebox
+                messagebox.showwarning("No Data", "No feature pipeline available.", parent=self)
+                return
+                
+            print("DEBUG: Checking feature pipeline window...")
+            if self.controller.feature_pipeline.window is None:
+                error_msg = "Feature pipeline window is None"
+                print(f"ERROR: {error_msg}")
+                LOG.error(f"_save_gamestate_sample: {error_msg}")
+                from tkinter import messagebox
+                messagebox.showwarning("No Data", "No feature data available. Collect some data first by running live mode.", parent=self)
+                return
+            
+            # Get current feature window (10, 128)
+            print("DEBUG: Getting feature window...")
+            feature_window = self.controller.feature_pipeline.window
+            LOG.info(f"_save_gamestate_sample: Got feature window with shape: {feature_window.shape}")
+            
+            # Fix sequence order: Index 0 should be oldest (T-9), Index 9 should be newest (T0)
+            print("DEBUG: Fixing sequence order...")
+            import numpy as np
+            feature_window = np.flipud(feature_window)  # Reverse the order
+            print(f"DEBUG: Sequence order fixed: Index 0 = oldest, Index 9 = newest")
+            
+            # Use shared pipeline methods to properly process gamestate features
+            print("DEBUG: Using shared pipeline methods to process gamestate features...")
+            try:
+                from shared_pipeline.normalize import normalize_features
+                from shared_pipeline.feature_map import load_feature_mappings
+                from shared_pipeline.features import FeatureExtractor
+                
+                # Load feature mappings for normalization
+                feature_mappings = load_feature_mappings("data/features/feature_mappings.json")
+                print(f"DEBUG: Loaded feature mappings for {len(feature_mappings)} features")
+                
+                # Normalize using the exact same method as the pipeline
+                normalized_features = normalize_features(feature_window, "data/features/feature_mappings.json")
+                print(f"DEBUG: Features normalized successfully")
+                
+                # Use normalized features for saving
+                feature_window = normalized_features
+                
+            except Exception as norm_error:
+                print(f"ERROR: Failed to process gamestate features using shared pipeline: {norm_error}")
+                LOG.error(f"_save_gamestate_sample: Failed to process features: {norm_error}")
+                from tkinter import messagebox
+                messagebox.showerror("Error", f"Failed to process gamestate features: {norm_error}", parent=self)
+                return
+            
+            # Auto-save to sample_data directory
+            import os
+            sample_data_dir = "sample_data"
+            os.makedirs(sample_data_dir, exist_ok=True)
+            
+            filename = os.path.join(sample_data_dir, "sample_gamestate_input_sequence.npy")
+            print(f"DEBUG: Auto-saving to: {filename}")
+            LOG.info(f"_save_gamestate_sample: Auto-saving to {filename}")
+            
+            import numpy as np
+            print("DEBUG: About to call np.save...")
+            np.save(filename, feature_window)
+            print("DEBUG: np.save completed successfully")
+            
+            LOG.info(f"_save_gamestate_sample: Successfully saved normalized gamestate features to {filename}")
+            
+            # Auto-open visualization
+            print("DEBUG: About to open visualization...")
+            import subprocess
+            try:
+                subprocess.Popen(["py", ".\\print_numpy_array.py", filename])
+                print("DEBUG: Visualization opened successfully")
+                LOG.info(f"_save_gamestate_sample: Opened visualization for {filename}")
+            except Exception as viz_error:
+                print(f"DEBUG: Failed to open visualization: {viz_error}")
+                LOG.warning(f"_save_gamestate_sample: Failed to open visualization: {viz_error}")
+            
+            # Show success message
+            print("DEBUG: Showing success message...")
+            from tkinter import messagebox
+            messagebox.showinfo("Success", f"Gamestate features processed and saved to:\n{filename}\n\n"
+                              f"Shape: {feature_window.shape}\n"
+                              f"Data type: {feature_window.dtype}\n"
+                              f"Order: Index 0 = oldest (T-9), Index 9 = newest (T0)\n"
+                              f"Processing: Using shared_pipeline normalization and feature mapping\n\n"
+                              f"Visualization opened automatically!", 
+                              parent=self)
+            print("DEBUG: _save_gamestate_sample: Completed successfully")
+            
+        except Exception as e:
+            import logging
+            import traceback
+            print(f"EXCEPTION in _save_gamestate_sample: {e}")
+            print(f"TRACEBACK: {traceback.format_exc()}")
+            
+            LOG = logging.getLogger(__name__)
+            LOG.error(f"_save_gamestate_sample: Exception occurred: {e}")
+            LOG.error(f"_save_gamestate_sample: Full traceback: {traceback.format_exc()}")
+            
+            from tkinter import messagebox
+            messagebox.showerror("Error", f"Failed to save gamestate sample: {e}", parent=self)
+    
+    def _save_actions_sample(self):
+        """Save a sample of the current action sequence data as numpy array"""
+        try:
+            import logging
+            import numpy as np
+            import time
+            LOG = logging.getLogger(__name__)
+            
+            LOG.info("_save_actions_sample: Starting actions sample save...")
+            
+            # Get synchronized action tensors from pipeline (last 10)
+            print("DEBUG: _save_actions_sample: Reading synchronized action windows from pipeline")
+            if not hasattr(self.controller, 'feature_pipeline'):
+                from tkinter import messagebox
+                messagebox.showwarning("No Data", "No feature pipeline available.", parent=self)
+                return
+            action_tensors = self.controller.feature_pipeline.get_last_action_windows(10)
+            print(f"DEBUG: _save_actions_sample: Raw action_tensors returned: {action_tensors}")
+            print(f"DEBUG: _save_actions_sample: action_tensors type: {type(action_tensors)}")
+            print(f"DEBUG: _save_actions_sample: action_tensors length: {len(action_tensors) if action_tensors else 0}")
+            
+            if action_tensors:
+                for i, tensor in enumerate(action_tensors):
+                    print(f"DEBUG: _save_actions_sample: Tensor {i}: {tensor}")
+                    print(f"DEBUG: _save_actions_sample: Tensor {i} type: {type(tensor)}, length: {len(tensor) if tensor else 0}")
+            
+            LOG.info(f"_save_actions_sample: Got action tensors, count: {len(action_tensors) if action_tensors else 0}")
+            
+            if not action_tensors or len(action_tensors) < 10:
+                error_msg = f"Insufficient action data: got {len(action_tensors) if action_tensors else 0} tensors, need 10"
+                LOG.error(f"_save_actions_sample: {error_msg}")
+                from tkinter import messagebox
+                messagebox.showwarning("No Data", "No action data available. Collect some data first by running live mode.", parent=self)
+                return
+            
+            # Use shared pipeline methods to properly process actions
+            print("DEBUG: Using shared pipeline methods to process actions...")
+            try:
+                from shared_pipeline.actions import convert_raw_actions_to_tensors
+                from shared_pipeline.encodings import ActionEncoder
+                
+                # Create action encoder and convert to proper training format
+                encoder = ActionEncoder()
+                
+                # Process each timestep to ensure proper (100, 8) format
+                print(f"DEBUG: Processing {len(action_tensors)} action tensors...")
+                
+                # Process each timestep to ensure proper (100, 8) format
+                processed_actions = []
+                max_actions_per_timestep = 100
+                
+                for timestep_idx, action_tensor in enumerate(action_tensors):
+                    print(f"DEBUG: Processing timestep {timestep_idx}")
+                    
+                    if not action_tensor or len(action_tensor) < 1:
+                        # No actions in this timestep
+                        timestep_actions = np.zeros((max_actions_per_timestep, 8))
+                        processed_actions.append(timestep_actions)
+                        continue
+                    
+                    # Create timestep array (100, 8)
+                    timestep_actions = np.zeros((max_actions_per_timestep, 8))
+                    
+                    # Parse the flattened action tensor: [action_count, timestamp1, type1, x1, y1, button1, key1, scroll_dx1, scroll_dy1, ...]
+                    if len(action_tensor) >= 1:
+                        action_count = int(action_tensor[0])
+                        print(f"DEBUG: Timestep {timestep_idx} has {action_count} actions")
+                        
+                        if action_count > 0:
+                            # Each action has 8 features
+                            for action_idx in range(min(action_count, max_actions_per_timestep)):
+                                start_idx = 1 + action_idx * 8
+                                if start_idx + 7 < len(action_tensor):
+                                    # Extract the 8 action features
+                                    action_features = action_tensor[start_idx:start_idx + 8]
+                                    timestep_actions[action_idx] = action_features
+                                    print(f"DEBUG: Timestep {timestep_idx}, Action {action_idx}: {action_features}")
+                    
+                    processed_actions.append(timestep_actions)
+                
+                # Convert to numpy array (10, 100, 8)
+                action_array = np.array(processed_actions)
+                print(f"DEBUG: Created action array with shape: {action_array.shape}")
+                
+            except Exception as e:
+                print(f"ERROR: Failed to process actions using shared pipeline: {e}")
+                LOG.error(f"_save_actions_sample: Failed to process actions: {e}")
+                from tkinter import messagebox
+                messagebox.showerror("Error", f"Failed to process actions: {e}", parent=self)
+                return
+            
+            # Save as JSON (as you've been doing in your workflow)
+            import os
+            import json
+            
+            sample_data_dir = "sample_data"
+            os.makedirs(sample_data_dir, exist_ok=True)
+            
+            filename = os.path.join(sample_data_dir, "sample_action_input_sequence.json")
+            print(f"DEBUG: Auto-saving actions to: {filename}")
+            LOG.info(f"_save_actions_sample: Auto-saving actions to {filename}")
+            
+            # Save as JSON with metadata
+            action_data = {
+                "action_sequence": action_tensors,
+                "processed_actions": action_array.tolist(),
+                "metadata": {
+                    "timesteps": len(action_tensors),
+                    "tensor_lengths": [len(tensor) for tensor in action_tensors],
+                    "max_tensor_length": max(len(tensor) for tensor in action_tensors),
+                    "processed_shape": action_array.shape,
+                    "timestamp": time.time()
+                }
+            }
+            
+            with open(filename, 'w') as f:
+                json.dump(action_data, f, indent=2)
+            
+            LOG.info(f"_save_actions_sample: Successfully saved action sequence to {filename}")
+            
+            # Save processed actions as numpy array for visualization
+            viz_filename = os.path.join(sample_data_dir, "sample_action_input_sequence.npy")
+            np.save(viz_filename, action_array)
+            print(f"DEBUG: Saved processed actions to: {viz_filename}")
+            
+            # Auto-open visualization
+            print("DEBUG: About to open visualization...")
+            import subprocess
+            try:
+                subprocess.Popen(["py", ".\\print_numpy_array.py", viz_filename])
+                print("DEBUG: Visualization opened successfully")
+                LOG.info(f"_save_actions_sample: Opened visualization for {viz_filename}")
+            except Exception as viz_error:
+                print(f"DEBUG: Failed to open visualization: {viz_error}")
+                LOG.warning(f"_save_actions_sample: Failed to open visualization: {viz_error}")
+            
+                        # Show success message
+            from tkinter import messagebox
+            messagebox.showinfo("Success", f"Action sequence processed and saved to:\n{filename}\n\n"
+                               f"JSON format with {len(action_tensors)} timesteps\n"
+                               f"Processed shape: {action_array.shape}\n"
+                               f"Max actions per timestep: {max_actions_per_timestep}\n"
+                               f"Action features: [count, timestamp, type, x, y, button, key, scroll_dx, scroll_dy]\n"
+                               f"Processing: Using shared_pipeline ActionEncoder and action processing\n\n"
+                               f"Visualization opened automatically!", 
+                               parent=self)
+            
+        except Exception as e:
+            import logging
+            import traceback
+            LOG = logging.getLogger(__name__)
+            LOG.error(f"_save_actions_sample: Exception occurred: {e}")
+            LOG.error(f"_save_actions_sample: Full traceback: {traceback.format_exc()}")
+            
+            from tkinter import messagebox
+            messagebox.showerror("Error", f"Failed to save actions sample: {e}", parent=self)
     
     def _export_to_csv(self):
         """Export predictions to CSV file"""

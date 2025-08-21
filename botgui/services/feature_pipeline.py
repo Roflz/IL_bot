@@ -12,7 +12,8 @@ import logging
 try:
     from shared_pipeline.features import extract_features_from_gamestate, FeatureExtractor
     from shared_pipeline.feature_map import load_feature_mappings
-    from shared_pipeline.actions import flatten_action_window
+    from shared_pipeline.actions import flatten_action_window, convert_raw_actions_to_tensors
+    from shared_pipeline.normalize import normalize_features, normalize_action_data
     from shared_pipeline.encodings import ActionEncoder
 except ImportError as e:
     logging.error(f"Failed to import shared pipeline modules: {e}")
@@ -33,6 +34,7 @@ class FeaturePipeline:
         self.feature_names: list[str] = []              # len 128
         self.feature_groups: list[str] = []             # len 128
         self._deque: deque[np.ndarray] = deque(maxlen=10)
+        self._action_windows: deque[List[float]] = deque(maxlen=20)
         
         # Load feature mappings
         try:
@@ -62,6 +64,9 @@ class FeaturePipeline:
         self.session_start_time = None
         self.session_timing_initialized = False
         self.live_mode_start_time = None  # When live mode started (for relative timing)
+        
+        # Action window processing utilities
+        self._encoder = self.action_encoder
     
     def extract_window(self, gamestate: Dict[str, Any]) -> Tuple[np.ndarray, List[str], List[str]]:
         """
@@ -243,7 +248,8 @@ class FeaturePipeline:
             'is_warm': deque_count >= 10,
             'session_timing_initialized': self.session_timing_initialized,
             'session_start_time': self.session_start_time,
-            'live_mode_start_time': self.live_mode_start_time
+            'live_mode_start_time': self.live_mode_start_time,
+            'action_windows_count': len(self._action_windows)
         }
     
     def clear_buffers(self):
@@ -283,3 +289,69 @@ class FeaturePipeline:
         if 0 <= index < len(self.feature_mappings):
             return self.feature_mappings[index]
         return None
+
+    def build_action_frame(self, actions: List[Dict[str, Any]]) -> List[float]:
+        # Use shared pipeline normalization workflow:
+        # 1) Build raw_action_data structure for a single gamestate window
+        # 2) Normalize via normalize_action_data
+        # 3) Convert to tensors via convert_raw_actions_to_tensors
+        raw_action_data = [{
+            'mouse_movements': [
+                {
+                    'timestamp': a.get('timestamp', 0),
+                    'x': a.get('x_in_window', 0),
+                    'y': a.get('y_in_window', 0)
+                }
+                for a in actions if a.get('event_type') == 'move'
+            ],
+            'clicks': [
+                {
+                    'timestamp': a.get('timestamp', 0),
+                    'x': a.get('x_in_window', 0),
+                    'y': a.get('y_in_window', 0),
+                    'button': a.get('btn', '')
+                }
+                for a in actions if a.get('event_type') == 'click'
+            ],
+            'key_presses': [
+                {
+                    'timestamp': a.get('timestamp', 0),
+                    'key': a.get('key', '')
+                }
+                for a in actions if a.get('event_type') == 'key_press'
+            ],
+            'key_releases': [
+                {
+                    'timestamp': a.get('timestamp', 0),
+                    'key': a.get('key', '')
+                }
+                for a in actions if a.get('event_type') == 'key_release'
+            ],
+            'scrolls': [
+                {
+                    'timestamp': a.get('timestamp', 0),
+                    'dx': a.get('scroll_dx', 0),
+                    'dy': a.get('scroll_dy', 0)
+                }
+                for a in actions if a.get('event_type') == 'scroll'
+            ]
+        }]
+
+        # Normalize action data using shared pipeline (non-None gate)
+        normalized_raw = normalize_action_data(raw_action_data, normalized_features=np.zeros((1,1)))
+
+        # Convert to training tensors using shared pipeline
+        tensors = convert_raw_actions_to_tensors(normalized_raw, self._encoder)
+
+        frame = tensors[0] if tensors else [0]
+        return frame
+
+    def record_action_window_from_actions(self, actions: List[Dict[str, Any]]) -> None:
+        frame = self.build_action_frame(actions)
+        self._action_windows.append(frame)
+
+    def get_last_action_windows(self, count: int = 10) -> List[List[float]]:
+        if count <= 0:
+            return []
+        items = list(self._action_windows)[-count:]
+        return list(reversed(items))
