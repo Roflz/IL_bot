@@ -175,11 +175,43 @@ class OSRSDataset(Dataset):
         
         return action_array  # Shape: (10, 100, 8)
 
+def optimize_batch_size_for_cuda(device: torch.device, base_batch_size: int = 8) -> int:
+    """Optimize batch size based on available CUDA memory"""
+    if not torch.cuda.is_available():
+        return base_batch_size
+    
+    # Get available CUDA memory
+    total_memory = torch.cuda.get_device_properties(0).total_memory
+    available_memory = total_memory * 0.8  # Use 80% of available memory
+    
+    # Estimate memory per sample (rough estimate for the model)
+    # Model has ~5.7M parameters, each sample is ~10 timesteps × 128 features + actions
+    estimated_memory_per_sample = 50 * 1024 * 1024  # 50 MB per sample (conservative estimate)
+    
+    # Calculate optimal batch size
+    optimal_batch_size = int(available_memory / estimated_memory_per_sample)
+    
+    # Ensure batch size is reasonable
+    optimal_batch_size = max(1, min(optimal_batch_size, base_batch_size * 4))
+    
+    print(f"CUDA memory optimization:")
+    print(f"  Total memory: {total_memory / 1024**3:.1f} GB")
+    print(f"  Available memory: {available_memory / 1024**3:.1f} GB")
+    print(f"  Estimated memory per sample: {estimated_memory_per_sample / 1024**2:.1f} MB")
+    print(f"  Optimal batch size: {optimal_batch_size}")
+    
+    return optimal_batch_size
+
 def create_data_loaders(dataset: OSRSDataset, 
                        train_split: float = 0.8,
                        batch_size: int = 8,
-                       shuffle: bool = True) -> Tuple[DataLoader, DataLoader]:
+                       shuffle: bool = True,
+                       device: torch.device = None) -> Tuple[DataLoader, DataLoader]:
     """Create train and validation data loaders"""
+    
+    # Optimize batch size for CUDA if available
+    if device and torch.cuda.is_available():
+        batch_size = optimize_batch_size_for_cuda(device, batch_size)
     
     # Split dataset
     n_train = int(len(dataset) * train_split)
@@ -193,7 +225,7 @@ def create_data_loaders(dataset: OSRSDataset,
         batch_size=batch_size, 
         shuffle=shuffle,
         num_workers=0,  # Set to 0 for Windows compatibility
-        pin_memory=True if torch.cuda.is_available() else False
+        pin_memory=torch.cuda.is_available()  # Enable pin_memory for CUDA
     )
     
     val_loader = DataLoader(
@@ -201,12 +233,13 @@ def create_data_loaders(dataset: OSRSDataset,
         batch_size=batch_size, 
         shuffle=False,
         num_workers=0,
-        pin_memory=True if torch.cuda.is_available() else False
+        pin_memory=torch.cuda.is_available()  # Enable pin_memory for CUDA
     )
     
     print(f"Data loaders created:")
     print(f"  Train: {len(train_loader)} batches ({len(train_dataset)} samples)")
     print(f"  Validation: {len(val_loader)} batches ({len(val_dataset)} samples)")
+    print(f"  Batch size: {batch_size}")
     
     return train_loader, val_loader
 
@@ -295,23 +328,47 @@ def test_model_compatibility(model: ImitationHybridModel,
         print(f"  Output shape: {output.shape}")
         
         print(f"  ✓ Model compatibility test passed!")
+        
+        # CUDA memory info if available
+        if torch.cuda.is_available():
+            print(f"  CUDA memory after test: {torch.cuda.memory_allocated(0) / 1024**2:.1f} MB allocated")
+            torch.cuda.empty_cache()
+        
         return True
         
     except Exception as e:
         print(f"  ✗ Model compatibility test failed: {e}")
         return False
 
+def optimize_cuda_settings():
+    """Optimize CUDA settings for better performance"""
+    if torch.cuda.is_available():
+        # Enable cuDNN benchmarking for faster convolutions
+        torch.backends.cudnn.benchmark = True
+        # Enable cuDNN deterministic mode for reproducibility
+        torch.backends.cudnn.deterministic = False
+        print("CUDA optimizations enabled")
+
 def main():
     """Main setup function"""
     print("OSRS Imitation Learning Training Setup")
     print("=" * 60)
     
+    # Optimize CUDA settings
+    optimize_cuda_settings()
+    
     # Check CUDA availability
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    if torch.cuda.is_available():
+        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        print(f"CUDA compute capability: {torch.cuda.get_device_capability(0)}")
+    else:
+        print("CUDA not available, using CPU")
+    print(f"Device: {device}")
     
     # Data file paths
-    data_dir = Path("data/final_training_data")
+    data_dir = Path("data/06_final_training_data")
     gamestate_file = data_dir / "gamestate_sequences.npy"
     action_input_file = data_dir / "action_input_sequences.json"
     action_targets_file = data_dir / "action_targets.json"
@@ -340,7 +397,8 @@ def main():
         dataset=dataset,
         train_split=0.8,
         batch_size=8,
-        shuffle=True
+        shuffle=True,
+        device=device
     )
     
     # Setup model
@@ -381,7 +439,7 @@ def main():
         print(f"\nTraining configuration:")
         print(f"  Model: ImitationHybridModel")
         print(f"  Dataset: {len(dataset)} sequences")
-        print(f"  Batch size: 8")
+        print(f"  Batch size: {train_loader.batch_size}")
         print(f"  Learning rate: 0.001")
         print(f"  Device: {device}")
         
@@ -391,7 +449,7 @@ def main():
             'dataset_size': len(dataset),
             'train_size': len(train_loader.dataset),
             'val_size': len(val_loader.dataset),
-            'batch_size': 8,
+            'batch_size': train_loader.batch_size,
             'learning_rate': 0.001,
             'weight_decay': 1e-4,
             'device': str(device),

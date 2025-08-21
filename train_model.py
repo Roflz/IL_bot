@@ -15,6 +15,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     """Train the model"""
     
     print(f"Starting training on {device}")
+    if torch.cuda.is_available():
+        print(f"CUDA device: {torch.cuda.get_device_name(0)}")
+        print(f"Initial CUDA memory: {torch.cuda.memory_allocated(0) / 1024**2:.1f} MB allocated, {torch.cuda.memory_reserved(0) / 1024**2:.1f} MB reserved")
+    
     print(f"Training samples: {len(train_loader.dataset)}")
     print(f"Validation samples: {len(val_loader.dataset)}")
     print(f"Epochs: {num_epochs}")
@@ -82,6 +86,13 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         print(f"Epoch {epoch+1} Summary:")
         print(f"  Training Loss: {avg_train_loss:.4f}")
         print(f"  Validation Loss: {avg_val_loss:.4f}")
+        
+        # CUDA memory management
+        if torch.cuda.is_available():
+            print(f"  CUDA Memory: {torch.cuda.memory_allocated(0) / 1024**2:.1f} MB allocated, {torch.cuda.memory_reserved(0) / 1024**2:.1f} MB reserved")
+            # Clear cache to free up memory
+            torch.cuda.empty_cache()
+        
         print("-" * 40)
     
     return train_losses, val_losses
@@ -112,21 +123,39 @@ def save_training_results(model, train_losses, val_losses, config):
     print(f"Training results saved to {results_dir}/")
     print(f"Model weights saved to {results_dir}/model_weights.pth")
 
+def optimize_cuda_settings():
+    """Optimize CUDA settings for better performance"""
+    if torch.cuda.is_available():
+        # Enable cuDNN benchmarking for faster convolutions
+        torch.backends.cudnn.benchmark = True
+        # Enable cuDNN deterministic mode for reproducibility
+        torch.backends.cudnn.deterministic = False
+        print("CUDA optimizations enabled")
+
 def main():
     """Main training function"""
     
     print("OSRS Imitation Learning Model Training")
     print("=" * 60)
     
+    # Optimize CUDA settings
+    optimize_cuda_settings()
+    
     # Check device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    if torch.cuda.is_available():
+        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        print(f"CUDA compute capability: {torch.cuda.get_device_capability(0)}")
+    else:
+        print("CUDA not available, using CPU")
+    print(f"Device: {device}")
     
     # Load training setup
     print("Loading training setup...")
     
     # Create dataset and data loaders
-    data_dir = Path("data/final_training_data")
+    data_dir = Path("data/06_final_training_data")
     gamestate_file = data_dir / "gamestate_sequences.npy"
     action_input_file = data_dir / "action_input_sequences.json"
     action_targets_file = data_dir / "action_targets.json"
@@ -144,11 +173,12 @@ def main():
         dataset=dataset,
         train_split=0.8,
         batch_size=8,
-        shuffle=True
+        shuffle=True,
+        device=device
     )
     
     # Create model and setup training components
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Device already set above, reuse it
     model = setup_model(
         device=device,
         gamestate_dim=128,
@@ -176,7 +206,7 @@ def main():
     config = {
         'num_epochs': 10,
         'learning_rate': 0.001,
-        'batch_size': 8,
+        'batch_size': train_loader.batch_size,
         'device': str(device)
     }
     
@@ -200,6 +230,9 @@ def main():
     print(f"Final training loss: {train_losses[-1]:.4f}")
     print(f"Final validation loss: {val_losses[-1]:.4f}")
     print(f"Best validation loss: {min(val_losses):.4f}")
+    
+    if torch.cuda.is_available():
+        print(f"Final CUDA memory: {torch.cuda.memory_allocated(0) / 1024**2:.1f} MB allocated, {torch.cuda.memory_reserved(0) / 1024**2:.1f} MB reserved")
 
 if __name__ == "__main__":
     main()
