@@ -448,3 +448,154 @@ def analyze_action_distribution(action_targets: List[List[float]]) -> Dict:
     
     print("Action distribution analysis completed")
     return analysis
+
+
+def convert_live_features_to_sequence_format(feature_window: np.ndarray) -> np.ndarray:
+    """
+    Convert live feature window from botgui to the format expected by create_temporal_sequences.
+    
+    Args:
+        feature_window: Array of shape (10, 128) from live feature pipeline
+        
+    Returns:
+        Array of shape (10, 128) ready for sequence processing
+    """
+    if feature_window.shape != (10, 128):
+        raise ValueError(f"Expected feature window shape (10, 128), got {feature_window.shape}")
+    
+    # The live data is already in the right format, just ensure correct dtype
+    return feature_window.astype(np.float64)
+
+
+def convert_live_actions_to_raw_format(action_tensors: List[List[float]], 
+                                     gamestate_timestamps: List[int]) -> List[Dict]:
+    """
+    Convert live action tensors from botgui to the raw format expected by convert_raw_actions_to_tensors.
+    
+    Args:
+        action_tensors: List of 10 action tensors from live actions service
+        gamestate_timestamps: List of 10 timestamps corresponding to each action tensor
+        
+    Returns:
+        List of raw action data dictionaries in the format expected by existing pipeline methods
+    """
+    if len(action_tensors) != 10:
+        raise ValueError(f"Expected 10 action tensors, got {len(action_tensors)}")
+    
+    if len(gamestate_timestamps) != 10:
+        raise ValueError(f"Expected 10 timestamps, got {len(gamestate_timestamps)}")
+    
+    raw_action_data = []
+    
+    for i, (action_tensor, timestamp) in enumerate(zip(action_tensors, gamestate_timestamps)):
+        if not action_tensor or len(action_tensor) == 0:
+            # No actions in this timestep
+            action_sequence = {
+                'gamestate_index': i,
+                'gamestate_timestamp': timestamp,
+                'action_count': 0,
+                'actions': []
+            }
+        else:
+            # Parse the action tensor to extract individual actions
+            actions = []
+            action_count = int(action_tensor[0]) if len(action_tensor) > 0 else 0
+            
+            # The action tensor format is: [count, Δt_ms, type, x, y, button, key, scroll_dx, scroll_dy × count]
+            if action_count > 0 and len(action_tensor) >= 8:
+                # Extract the first action (simplified - you may need to adjust based on your actual tensor format)
+                action_data = {
+                    'timestamp': timestamp,
+                    'event_type': _convert_action_type_code(int(action_tensor[2])),
+                    'x_in_window': int(action_tensor[3]),
+                    'y_in_window': int(action_tensor[4]),
+                    'btn': _convert_button_code(int(action_tensor[5])),
+                    'key': _convert_key_code(int(action_tensor[6])),
+                    'scroll_dx': int(action_tensor[7]),
+                    'scroll_dy': 0  # Assuming single scroll value
+                }
+                actions.append(action_data)
+            
+            action_sequence = {
+                'gamestate_index': i,
+                'gamestate_timestamp': timestamp,
+                'action_count': action_count,
+                'actions': actions
+            }
+        
+        raw_action_data.append(action_sequence)
+    
+    return raw_action_data
+
+
+def _convert_action_type_code(code: int) -> str:
+    """Convert action type code to string"""
+    action_types = {
+        0: 'move',
+        1: 'click', 
+        2: 'key_press',
+        3: 'key_release',
+        4: 'scroll'
+    }
+    return action_types.get(code, 'unknown')
+
+
+def _convert_button_code(code: int) -> str:
+    """Convert button code to string"""
+    button_types = {
+        0: '',
+        1: 'left',
+        2: 'right',
+        3: 'middle'
+    }
+    return button_types.get(code, '')
+
+
+def _convert_key_code(code: int) -> str:
+    """Convert key code to string"""
+    if code == 0:
+        return ''
+    # You may want to expand this based on your actual key encoding
+    return str(code)
+
+
+def create_live_training_sequences(feature_window: np.ndarray, 
+                                 action_tensors: List[List[float]],
+                                 gamestate_timestamps: List[int]) -> Tuple[np.ndarray, List[List[float]], List[List[List[float]]]]:
+    """
+    Create training sequences directly from live data using existing pipeline methods.
+    
+    This is a convenience function that combines the conversion methods above with
+    the existing sequence creation logic.
+    
+    Args:
+        feature_window: Array of shape (10, 128) from live feature pipeline
+        action_tensors: List of 10 action tensors from live actions service  
+        gamestate_timestamps: List of 10 timestamps corresponding to each action tensor
+        
+    Returns:
+        Tuple of (input_sequences, target_sequences, action_input_sequences) ready for training
+    """
+    # Convert live data to pipeline format
+    features = convert_live_features_to_sequence_format(feature_window)
+    raw_actions = convert_live_actions_to_raw_format(action_tensors, gamestate_timestamps)
+    
+    # Use existing pipeline methods
+    from .encodings import derive_encodings_from_data
+    
+    # Note: You'll need to provide a path to existing training data to derive encodings
+    # This is a limitation since the encoder needs to be trained on existing data
+    try:
+        encoder = derive_encodings_from_data("data/training_data/action_targets.json")
+        action_targets = convert_raw_actions_to_tensors(raw_actions, encoder)
+    except FileNotFoundError:
+        # Fallback: create dummy action targets if no encoder available
+        print("Warning: No action encoder found, using dummy targets")
+        action_targets = [[] for _ in range(len(raw_actions))]
+    
+    # Create sequences using existing method
+    input_sequences, target_sequences, action_input_sequences = create_temporal_sequences(
+        features, action_targets, sequence_length=10
+    )
+    
+    return input_sequences, target_sequences, action_input_sequences

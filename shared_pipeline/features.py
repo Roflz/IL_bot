@@ -503,8 +503,15 @@ class FeatureExtractor:
         relative_phase_start = self.to_relative_timestamp(phase_start_time)
         features.append(relative_phase_start)
         
-        # Feature 60: Phase duration (raw milliseconds)
-        features.append(float(phase_duration_ms))
+        # Feature 60: Phase duration (convert to relative time for consistent normalization)
+        # The phase duration should also be relative to session start for consistent scaling
+        if phase_duration_ms > 0:
+            # Convert to relative time by subtracting from current time
+            current_time = gamestate.get('timestamp', 0)
+            relative_phase_duration = current_time - phase_start_time
+            features.append(float(relative_phase_duration))
+        else:
+            features.append(0.0)
         
         # Feature 61: Gamestates in phase (raw count)
         features.append(float(gamestates_in_phase))

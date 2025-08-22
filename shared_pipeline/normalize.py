@@ -60,8 +60,9 @@ def normalize_features(features: np.ndarray, feature_mappings_file: str = "data/
         elif data_type == 'screen_coordinate':
             screen_coord_features.append(feature_idx)
         
-        # Other continuous features
-        elif data_type in ['time_ms', 'duration_ms']:
+        # Time features: All time-related features should be normalized consistently
+        elif (data_type in ['time_ms', 'duration_ms'] or 
+              feature_name in ['time_since_interaction', 'phase_start_time', 'phase_duration']):
             time_features.append(feature_idx)
         
         # Categorical features (IDs, booleans, counts, slots, etc.)

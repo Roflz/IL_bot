@@ -186,7 +186,7 @@ class CrossAttention(nn.Module):
         return cross_features
 
 class ActionDecoder(nn.Module):
-    """Decoder for OSRS action tensors with action count at index 0"""
+    """Decoder for OSRS action tensors with discrete categorical outputs"""
     
     def __init__(self, input_dim: int = 256, max_actions: int = 100):
         super().__init__()
@@ -199,20 +199,85 @@ class ActionDecoder(nn.Module):
             nn.Dropout(0.2)
         )
         
-        # Single action tensor decoder - outputs 8 features per action including count at index 0
+        # Split into separate heads for different feature types
         # Features: [timestamp, type, x, y, button, key, scroll_dx, scroll_dy]
-        # Index 0: [action_count, 0, 0, 0, 0, 0, 0, 0] (count + padding)
-        # Index 1+: actual actions with 8 features each
-        self.action_tensor_head = nn.Linear(input_dim, (max_actions + 1) * 8)
+        
+        # Time head (continuous) - keep as linear
+        self.time_head = nn.Linear(input_dim, max_actions + 1)
+        
+        # Action type head (categorical: 0,1,2,3) - 4 categories
+        self.action_type_head = nn.Linear(input_dim, (max_actions + 1) * 4)
+        
+        # Coordinate heads (discrete integers) - use sigmoid + rounding
+        self.x_coord_head = nn.Linear(input_dim, max_actions + 1)
+        self.y_coord_head = nn.Linear(input_dim, max_actions + 1)
+        
+        # Button head (categorical: 0,1,2,3) - 4 categories  
+        self.button_head = nn.Linear(input_dim, (max_actions + 1) * 4)
+        
+        # Key head (categorical) - use key categories
+        self.key_head = nn.Linear(input_dim, (max_actions + 1) * 4)  # Assuming 4 key categories
+        
+        # Scroll heads (categorical: -1,0,1) - use tanh + sign
+        self.scroll_x_head = nn.Linear(input_dim, max_actions + 1)
+        self.scroll_y_head = nn.Linear(input_dim, max_actions + 1)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         shared = self.shared_features(x)
+        batch_size = x.size(0)
         
-        # Decode action tensor (8 features per action, including count at index 0)
-        action_tensor_flat = self.action_tensor_head(shared)
-        action_tensor = action_tensor_flat.view(-1, self.max_actions + 1, 8)
+        # Decode each feature type separately
         
-        return action_tensor  # (batch_size, max_actions + 1, 8)
+        # 1. Time (continuous) - keep as is
+        time_output = self.time_head(shared)  # (batch_size, max_actions + 1)
+        
+        # 2. Action type (categorical: 0,1,2,3)
+        action_type_logits = self.action_type_head(shared)  # (batch_size, (max_actions + 1) * 4)
+        action_type_logits = action_type_logits.view(batch_size, self.max_actions + 1, 4)
+        action_type_probs = F.softmax(action_type_logits, dim=-1)
+        action_type_output = torch.argmax(action_type_probs, dim=-1).float()  # (batch_size, max_actions + 1)
+        
+        # 3. Coordinates (discrete integers) - use sigmoid + rounding
+        x_coord_raw = torch.sigmoid(self.x_coord_head(shared))  # (batch_size, max_actions + 1)
+        y_coord_raw = torch.sigmoid(self.y_coord_head(shared))  # (batch_size, max_actions + 1)
+        
+        # Scale to reasonable coordinate range (e.g., 0-800 for screen coordinates)
+        x_coord_output = torch.round(x_coord_raw * 800).float()  # (batch_size, max_actions + 1)
+        y_coord_output = torch.round(y_coord_raw * 600).float()  # (batch_size, max_actions + 1)
+        
+        # 4. Button (categorical: 0,1,2,3)
+        button_logits = self.button_head(shared)  # (batch_size, (max_actions + 1) * 4)
+        button_logits = button_logits.view(batch_size, self.max_actions + 1, 4)
+        button_probs = F.softmax(button_logits, dim=-1)
+        button_output = torch.argmax(button_probs, dim=-1).float()  # (batch_size, max_actions + 1)
+        
+        # 5. Key (categorical) - use key categories
+        key_logits = self.key_head(shared)  # (batch_size, (max_actions + 1) * 4)
+        key_logits = key_logits.view(batch_size, self.max_actions + 1, 4)
+        key_probs = F.softmax(key_logits, dim=-1)
+        key_output = torch.argmax(key_probs, dim=-1).float()  # (batch_size, max_actions + 1)
+        
+        # 6. Scroll (categorical: -1,0,1) - use tanh + sign
+        scroll_x_raw = torch.tanh(self.scroll_x_head(shared))  # (batch_size, max_actions + 1)
+        scroll_y_raw = torch.tanh(self.scroll_y_head(shared))  # (batch_size, max_actions + 1)
+        
+        # Convert to -1, 0, 1
+        scroll_x_output = torch.sign(scroll_x_raw)  # (batch_size, max_actions + 1)
+        scroll_y_output = torch.sign(scroll_y_raw)  # (batch_size, max_actions + 1)
+        
+        # Stack all features: [time, type, x, y, button, key, scroll_x, scroll_y]
+        action_tensor = torch.stack([
+            time_output,        # (batch_size, max_actions + 1)
+            action_type_output, # (batch_size, max_actions + 1)
+            x_coord_output,     # (batch_size, max_actions + 1)
+            y_coord_output,     # (batch_size, max_actions + 1)
+            button_output,      # (batch_size, max_actions + 1)
+            key_output,         # (batch_size, max_actions + 1)
+            scroll_x_output,    # (batch_size, max_actions + 1)
+            scroll_y_output     # (batch_size, max_actions + 1)
+        ], dim=-1)  # (batch_size, max_actions + 1, 8)
+        
+        return action_tensor
 
 class ImitationHybridModel(nn.Module):
     """Complete hybrid model combining Transformer + CNN + LSTM with action sequence input"""

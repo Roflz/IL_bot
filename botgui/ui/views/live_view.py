@@ -41,10 +41,15 @@ class LiveView(ttk.Frame):
         self.skip_frames = 0  # Skip every Nth frame for performance
         self.frame_count = 0
         
+        # Pending operation IDs for cancellation
+        self._pending_refresh_id = None
+        self._pending_window_refresh_id = None
+        
         # UI elements
         self.canvas: Optional[tk.Canvas] = None
         self.status_label: Optional[ttk.Label] = None
         self.window_status_label: Optional[ttk.Label] = None
+        self.live_status_label: Optional[ttk.Label] = None
         
         self._setup_ui()
         self._bind_events()
@@ -66,15 +71,32 @@ class LiveView(ttk.Frame):
         
         # Determine row positions based on toolbar setting
         if self.show_toolbar:
-            # With toolbar: toolbar(0), window detection(1), status(2), canvas(3)
-            toolbar_row = 0
-            window_detection_row = 1
-            status_row = 2
-            canvas_row = 3
-            self.grid_rowconfigure(3, weight=1)  # canvas expands
+            # With toolbar: live toggle(0), toolbar(1), window detection(2), status(3), canvas(4)
+            live_toggle_row = 0
+            toolbar_row = 1
+            window_detection_row = 2
+            status_row = 3
+            canvas_row = 4
+            self.grid_rowconfigure(4, weight=1)  # canvas expands
+            
+            # Live view toggle frame
+            live_toggle_frame = ttk.Frame(self, style="Toolbar.TFrame")
+            live_toggle_frame.grid(row=live_toggle_row, column=0, sticky="ew", padx=8, pady=(4, 0))
+            live_toggle_frame.grid_columnconfigure(1, weight=1)
+            
+            # Live view toggle
+            self.live_view_enabled = create_dark_booleanvar(self, value=False)
+            ttk.Checkbutton(live_toggle_frame, text="🟢 Live View Active", 
+                           variable=self.live_view_enabled,
+                           command=self._on_live_view_toggle).grid(row=0, column=0, padx=(0, 12))
+            
+            # Status indicator
+            self.live_status_label = ttk.Label(live_toggle_frame, text="Live view is OFF", 
+                                             font=("Arial", 9), foreground="#a9b2bd")
+            self.live_status_label.grid(row=0, column=1, sticky="w")
             
             # Build toolbar frame
-            toolbar_frame = ttk.Frame(self)
+            toolbar_frame = ttk.Frame(self, style="Toolbar.TFrame")
             toolbar_frame.grid(row=toolbar_row, column=0, sticky="ew", padx=8, pady=(0, 4))
             toolbar_frame.grid_columnconfigure(2, weight=1)
             
@@ -102,12 +124,45 @@ class LiveView(ttk.Frame):
                                    values=["15", "30", "60"], width=5, state="readonly")
             fps_combo.grid(row=0, column=6, padx=(0, 8))
             fps_combo.bind("<<ComboboxSelected>>", self._on_fps_changed)
+            
+            # Target FPS control (when toolbar is shown)
+            ttk.Label(toolbar_frame, text="Target FPS:", font=("Arial", 9)).grid(row=0, column=7, padx=(12, 4))
+            self.target_fps_var = create_dark_stringvar(self, value="30")
+            target_fps_combo = ttk.Combobox(toolbar_frame, textvariable=self.target_fps_var, 
+                                          values=["5", "10", "15", "20", "30", "60"], width=5, state="readonly")
+            target_fps_combo.grid(row=0, column=8, padx=(0, 8))
+            target_fps_combo.bind("<<ComboboxSelected>>", self._on_target_fps_changed)
         else:
-            # No toolbar: window detection(0), status(1), canvas(2)
-            window_detection_row = 0
-            status_row = 1
-            canvas_row = 2
-            # No toolbar frame created at all
+            # No toolbar: live toggle(0), window detection(1), status(2), canvas(3)
+            live_toggle_row = 0
+            window_detection_row = 1
+            status_row = 2
+            canvas_row = 3
+            self.grid_rowconfigure(3, weight=1)  # canvas expands
+            
+            # Live view toggle frame
+            live_toggle_frame = ttk.Frame(self, style="Toolbar.TFrame")
+            live_toggle_frame.grid(row=live_toggle_row, column=0, sticky="ew", padx=8, pady=(4, 0))
+            live_toggle_frame.grid_columnconfigure(1, weight=1)
+            
+            # Live view toggle
+            self.live_view_enabled = create_dark_booleanvar(self, value=False)
+            ttk.Checkbutton(live_toggle_frame, text="🟢 Live View Active", 
+                           variable=self.live_view_enabled,
+                           command=self._on_live_view_toggle).grid(row=0, column=0, padx=(0, 12))
+            
+            # Status indicator
+            self.live_status_label = ttk.Label(live_toggle_frame, text="Live view is OFF", 
+                                             font=("Arial", 9), foreground="#a9b2bd")
+            self.live_status_label.grid(row=0, column=1, sticky="w")
+            
+            # Target FPS control
+            ttk.Label(live_toggle_frame, text="Target FPS:", font=("Arial", 9)).grid(row=0, column=2, padx=(20, 4))
+            self.target_fps_var = create_dark_stringvar(self, value="30")
+            target_fps_combo = ttk.Combobox(live_toggle_frame, textvariable=self.target_fps_var, 
+                                          values=["5", "10", "15", "20", "30", "60"], width=5, state="readonly")
+            target_fps_combo.grid(row=0, column=3, padx=(0, 8))
+            target_fps_combo.bind("<<ComboboxSelected>>", self._on_target_fps_changed)
         
         # Window detection frame - always present
         window_detection_frame = ttk.Frame(self)
@@ -166,6 +221,83 @@ class LiveView(ttk.Frame):
         self.auto_refresh = self.auto_refresh_var.get()
         if self.auto_refresh:
             self._schedule_refresh()
+    
+    def _on_target_fps_changed(self, *args):
+        """Handle target FPS change"""
+        try:
+            target_fps = int(self.target_fps_var.get())
+            # Calculate refresh interval in milliseconds
+            self.refresh_interval = int(1000 / target_fps)  # Convert FPS to milliseconds
+            logger.info(f"Target FPS changed to {target_fps} (refresh interval: {self.refresh_interval}ms)")
+        except ValueError:
+            logger.warning(f"Invalid FPS value: {self.target_fps_var.get()}")
+            # Reset to default
+            self.target_fps_var.set("30")
+            self.refresh_interval = 33
+    
+    def _on_live_view_toggle(self):
+        """Handle live view toggle change"""
+        is_enabled = self.live_view_enabled.get()
+        
+        if is_enabled:
+            # Turn on live view
+            self.live_status_label.config(text="Live view is ON", foreground="#51cf66")
+            self._start_live_view()
+        else:
+            # Turn off live view
+            self.live_status_label.config(text="Live view is OFF", foreground="#a9b2bd")
+            self._stop_live_view()
+    
+    def _start_live_view(self):
+        """Start the live view functionality"""
+        # Only start if we have a detected window
+        if not self.detected_window:
+            self.live_status_label.config(text="Live view is OFF - No window detected", foreground="#ffa500")
+            self.live_view_enabled.set(False)  # Turn off the toggle
+            logger.warning("Cannot start live view: no window detected")
+            return
+        
+        # Enable auto-refresh
+        if hasattr(self, 'auto_refresh_var'):
+            self.auto_refresh_var.set(True)
+            self.auto_refresh = True
+        
+        # Start the refresh cycle
+        self._schedule_refresh()
+        
+        # Update status
+        self._update_status()
+        logger.info("Live view started")
+    
+    def _stop_live_view(self):
+        """Stop the live view functionality"""
+        # Disable auto-refresh
+        if hasattr(self, 'auto_refresh_var'):
+            self.auto_refresh_var.set(False)
+            self.auto_refresh = False
+        
+        # Cancel any pending refresh operations
+        try:
+            # Cancel any pending display refresh
+            if hasattr(self, '_pending_refresh_id'):
+                self.after_cancel(self._pending_refresh_id)
+                self._pending_refresh_id = None
+            
+            # Cancel any pending window detection refresh
+            if hasattr(self, '_pending_window_refresh_id'):
+                self.after_cancel(self._pending_window_refresh_id)
+                self._pending_window_refresh_id = None
+        except Exception as e:
+            logger.warning(f"Error canceling pending operations: {e}")
+        
+        # Clear the current image and show placeholder
+        self.current_image = None
+        self.photo_image = None
+        self._show_placeholder()
+        
+        # Update status
+        self._update_status()
+        logger.info("Live view stopped")
     
     def _show_placeholder(self):
         """Show placeholder text when no window is detected"""
@@ -238,12 +370,9 @@ class LiveView(ttk.Frame):
                 status_text = f"Status: {active_window['title']} | Pos: ({left}, {top}) | Size: {width}x{height} | Aspect: {aspect_ratio:.2f}"
                 self.window_status_label.config(text=status_text)
                 
-                # Auto-capture screenshot if auto-refresh is enabled
-                if self.auto_refresh:
-                    # Clear placeholder and start live capture
-                    self.canvas.delete("all")
-                    self._capture_screenshot()
-                    self._schedule_refresh()
+                # Update the live view toggle status - no screenshot when live mode is off
+                if hasattr(self, 'live_status_label'):
+                    self.live_status_label.config(text="Live view is OFF - Window detected, toggle to start", foreground="#a9b2bd")
             else:
                 self.window_status_label.config(text="Status: No active Runelite windows")
                 self.detected_window = None
@@ -403,11 +532,13 @@ class LiveView(ttk.Frame):
     def _update_status(self):
         """Update the status label"""
         if self.current_image is None:
-            status = "Status: Ready | Region: 800x600 | FPS: 0"
+            target_fps = int(1000 / self.refresh_interval) if self.refresh_interval > 0 else 0
+            status = f"Status: Ready | Region: 800x600 | Target FPS: {target_fps}"
         else:
             height, width = self.current_image.shape[:2]
             fps = self._calculate_fps()
-            status = f"Status: Active | Region: {width}x{height} | FPS: {fps:.1f}"
+            target_fps = int(1000 / self.refresh_interval) if self.refresh_interval > 0 else 0
+            status = f"Status: Active | Region: {width}x{height} | FPS: {fps:.1f} | Target: {target_fps}"
         
         if self.status_label:
             self.status_label.config(text=status)
@@ -453,10 +584,10 @@ class LiveView(ttk.Frame):
     def _schedule_refresh(self):
         """Schedule the next refresh if auto-refresh is enabled"""
         if self.auto_refresh:
-            self.after(self.refresh_interval, self._refresh_display)
+            self._pending_refresh_id = self.after(self.refresh_interval, self._refresh_display)
             
             # Also refresh window detection every 5 seconds
-            self.after(5000, self._refresh_window_detection)
+            self._pending_window_refresh_id = self.after(5000, self._refresh_window_detection)
     
     def _refresh_window_detection(self):
         """Periodically refresh window detection"""
@@ -479,7 +610,7 @@ class LiveView(ttk.Frame):
                 logger.debug(f"Window detection refresh failed: {e}")
             
             # Schedule next refresh
-            self.after(5000, self._refresh_window_detection)
+            self._pending_window_refresh_id = self.after(5000, self._refresh_window_detection)
     
     def _refresh_display(self):
         """Refresh the display"""
@@ -515,16 +646,19 @@ class LiveView(ttk.Frame):
                             # Implement frame skipping for performance
                             if self.frame_count % (self.skip_frames + 1) == 0:
                                 self._capture_screenshot()
-                                self._schedule_refresh()
                                 
                                 # Optimize refresh rate every 10 frames
                                 if self.frame_count % 10 == 0:
                                     self._optimize_refresh_rate()
                             else:
-                                # Skip this frame, but still schedule the next
-                                self._schedule_refresh()
+                                # Skip this frame
+                                pass
                             
                             self.frame_count += 1
+                            
+                            # Schedule next refresh (but only if still enabled)
+                            if self.auto_refresh:
+                                self._pending_refresh_id = self.after(self.refresh_interval, self._refresh_display)
                         else:
                             # Show placeholder text when no window is detected
                             self._show_placeholder()

@@ -110,6 +110,65 @@ class ModelRunner:
         except Exception as e:
             logger.error(f"Prediction failed: {e}")
             return None
+
+    def predict_from_sample_data(self, gamestate_file: str, action_file: str) -> Optional[np.ndarray]:
+        """
+        Run prediction using saved sample data files.
+        
+        Args:
+            gamestate_file: Path to normalized_gamestate_sequence.npy
+            action_file: Path to normalized_action_sequence.npy
+            
+        Returns:
+            Predicted action frame or None if failed
+        """
+        if not self.loaded or self.model is None:
+            logger.error("Model not loaded")
+            return None
+        
+        try:
+            # Load sample data
+            gamestate_features = np.load(gamestate_file)  # (10, 128)
+            action_features = np.load(action_file)        # (10, 101, 8) - now with count at index 0
+            
+            # Add batch dimension to gamestate
+            gamestate_tensor = torch.FloatTensor(gamestate_features).unsqueeze(0).to(self.device)  # (1, 10, 128)
+            
+            # Actions are already in the correct format (10, 101, 8) with count at index 0
+            # Just add batch dimension
+            action_tensor = torch.FloatTensor(action_features).unsqueeze(0).to(self.device)  # (1, 10, 101, 8)
+            
+            logger.info(f"Sample data loaded - Gamestate: {gamestate_features.shape}, Actions: {action_features.shape}")
+            logger.info(f"Converted to model format - Gamestate: {gamestate_tensor.shape}, Actions: {action_tensor.shape}")
+            
+            # Run inference
+            with torch.no_grad():
+                prediction = self.model(gamestate_tensor, action_tensor)
+            
+            # Convert back to numpy and remove batch dimension
+            prediction_np = prediction.cpu().numpy()[0]  # (101, 8)
+            
+            # DEBUG: Show exact model output before any processing
+            logger.info(f"DEBUG: Raw model output shape: {prediction_np.shape}")
+            logger.info(f"DEBUG: Raw model output dtype: {prediction_np.dtype}")
+            logger.info(f"DEBUG: Expected shape: (101, 8)")
+            logger.info(f"DEBUG: Shape matches expected: {prediction_np.shape == (101, 8)}")
+            
+            if prediction_np.size > 0:
+                logger.info(f"DEBUG: prediction[0, 0] = {prediction_np[0, 0] if prediction_np.shape[0] > 0 and prediction_np.shape[1] > 0 else 'N/A'}")
+                if prediction_np.shape[0] > 0 and prediction_np.shape[1] > 0:
+                    logger.info(f"DEBUG: prediction[0, :5] = {prediction_np[0, :5]}")
+                    if prediction_np.shape[0] > 1:
+                        logger.info(f"DEBUG: prediction[1, :5] = {prediction_np[1, :5]}")
+            
+            logger.info(f"Prediction successful - Output shape: {prediction_np.shape}")
+            return prediction_np
+            
+        except Exception as e:
+            logger.error(f"Sample data prediction failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
     
     def is_ready(self) -> bool:
         """Check if the model is ready for predictions"""
@@ -168,6 +227,30 @@ class PredictorService:
             self.last_prediction_time = current_time
         
         return prediction
+
+    def predict_from_sample_data(self, gamestate_file: str, action_file: str) -> Optional[np.ndarray]:
+        """
+        Run prediction using saved sample data files.
+        
+        Args:
+            gamestate_file: Path to normalized_gamestate_sequence.npy
+            action_file: Path to normalized_action_sequence.npy
+            
+        Returns:
+            Predicted action frame or None if failed
+        """
+        if not self.model_runner or not self.model_runner.is_ready():
+            logger.warning("Model not ready for predictions")
+            return None
+        
+        try:
+            # Use the model runner's sample data prediction method
+            prediction = self.model_runner.predict_from_sample_data(gamestate_file, action_file)
+            return prediction
+            
+        except Exception as e:
+            logger.error(f"Sample data prediction failed: {e}")
+            return None
     
     def enable_predictions(self, enabled: bool):
         """Enable or disable predictions"""

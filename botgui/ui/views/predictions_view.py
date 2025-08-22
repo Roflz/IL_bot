@@ -2,12 +2,13 @@
 """Predictions View - displays predicted action frames"""
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import numpy as np
+import time
 from typing import Optional, List
+from pathlib import Path
 from ..widgets.tree_with_scrollbars import TreeWithScrollbars
 from ...util.formatting import format_prediction_summary
-from ..styles import create_dark_booleanvar
 
 
 class PredictionsView(ttk.Frame):
@@ -20,10 +21,6 @@ class PredictionsView(ttk.Frame):
         # Data
         self.predictions: List[dict] = []
         self.action_encoder = None
-        
-        # UI state
-        self.predictions_enabled = True
-        self.track_user_input = False
         
         self._setup_ui()
         self._bind_events()
@@ -42,32 +39,60 @@ class PredictionsView(ttk.Frame):
         ttk.Label(header_frame, text="Model Predictions", 
                  font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
         
-        # Controls frame
-        controls_frame = ttk.Frame(self)
+        # Controls frame - Simplified and better organized
+        controls_frame = ttk.Frame(self, style="Toolbar.TFrame")
         controls_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 4))
-        controls_frame.grid_columnconfigure(3, weight=1)
+        controls_frame.grid_columnconfigure(4, weight=1)
         
-        # Left controls
-        self.predictions_var = create_dark_booleanvar(self, value=True)
-        ttk.Checkbutton(controls_frame, text="Run Predictions", 
-                       variable=self.predictions_var).grid(row=0, column=0, padx=(0, 12))
+        # Row 1: Model selection and main actions
+        # Model selection
+        ttk.Label(controls_frame, text="Model:").grid(row=0, column=0, padx=(0, 6))
         
-        self.track_input_var = create_dark_booleanvar(self, value=False)
-        ttk.Checkbutton(controls_frame, text="Track My Input", 
-                       variable=self.track_input_var).grid(row=0, column=1, padx=(0, 12))
+        self.model_var = tk.StringVar()
+        self.model_dropdown = ttk.Combobox(controls_frame, textvariable=self.model_var, 
+                                          state="readonly", width=20)
+        self.model_dropdown.grid(row=0, column=1, padx=(0, 6))
         
-        # Center controls
-        ttk.Button(controls_frame, text="📁 Load Model", 
-                  command=self._load_model).grid(row=0, column=2, padx=(0, 12))
+        self.refresh_models_btn = ttk.Button(controls_frame, text="🔄", width=3,
+                                           command=self._refresh_models_list)
+        self.refresh_models_btn.grid(row=0, column=2, padx=(0, 12))
         
-        # Right controls
-        ttk.Button(controls_frame, text="Sample Gamestate Input Sequence", 
-                  command=self._save_gamestate_sample).grid(row=0, column=3, padx=(0, 6))
-        ttk.Button(controls_frame, text="Sample Action Input Sequence", 
-                  command=self._save_actions_sample).grid(row=0, column=4, padx=(0, 6))
+        # Main action buttons
+        ttk.Button(controls_frame, text="🤖 Run Prediction", 
+                  command=self._run_prediction_on_sample).grid(row=0, column=3, padx=(0, 6))
+        
+        # Raw Output button
+        self.raw_output_btn = ttk.Button(
+            controls_frame, 
+            text="🔍 Raw Output", 
+            command=self._show_raw_prediction,
+            style="Accent.TButton"
+        )
+        self.raw_output_btn.grid(row=0, column=4, padx=(0, 12))
+        
         ttk.Button(controls_frame, text="Clear", 
                   command=self._clear_predictions).grid(row=0, column=5, padx=(0, 6))
-        ttk.Button(controls_frame, text="Export CSV", 
+        
+        # Row 2: Data visualization buttons
+        data_frame = ttk.Frame(controls_frame)
+        data_frame.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(8, 0))
+        
+        ttk.Label(data_frame, text="View Data:").grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(data_frame, text="📊 Gamestate Sequence", 
+                  command=self._load_gamestate_sample).grid(row=0, column=1, padx=(0, 6))
+        ttk.Button(data_frame, text="📊 Action Sequence", 
+                  command=self._load_actions_sample).grid(row=0, column=2, padx=(0, 6))
+        
+        # Copy format selection
+        ttk.Label(data_frame, text="Copy Format:").grid(row=0, column=3, padx=(12, 6))
+        self.copy_format_var = tk.StringVar(value="tab")
+        copy_format_combo = ttk.Combobox(data_frame, textvariable=self.copy_format_var, 
+                                        values=["tab", "csv", "table"], state="readonly", width=8)
+        copy_format_combo.grid(row=0, column=4, padx=(0, 6))
+        
+        ttk.Button(data_frame, text="📋 Copy Table", 
+                  command=self._copy_table_to_clipboard).grid(row=0, column=5, padx=(0, 6))
+        ttk.Button(data_frame, text="Export CSV", 
                   command=self._export_to_csv).grid(row=0, column=6, padx=(0, 6))
         
         # Status line
@@ -75,13 +100,30 @@ class PredictionsView(ttk.Frame):
                                     font=("Arial", 9))
         self.status_label.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 4))
         
+        # Summary statistics frame
+        summary_frame = ttk.Frame(self, style="Toolbar.TFrame")
+        summary_frame.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 4))
+        summary_frame.grid_columnconfigure(3, weight=1)
+        
+        # Summary labels
+        self.total_predictions_label = ttk.Label(summary_frame, text="Predictions: 0", font=("Arial", 9))
+        self.total_predictions_label.grid(row=0, column=0, padx=(0, 12))
+        
+        self.total_actions_label = ttk.Label(summary_frame, text="Total Actions: 0", font=("Arial", 9))
+        self.total_actions_label.grid(row=0, column=1, padx=(0, 12))
+        
+        self.avg_actions_label = ttk.Label(summary_frame, text="Avg Actions: 0.0", font=("Arial", 9))
+        self.avg_actions_label.grid(row=0, column=2, padx=(0, 12))
+        
+        self.action_types_label = ttk.Label(summary_frame, text="Types: Click:0, Scroll:0, Key:0", font=("Arial", 9))
+        self.action_types_label.grid(row=0, column=3, padx=(0, 6))
+        
         # Table
         columns = [
             ("index", "#", 50),
-            ("timestamp", "Time", 100),
-            ("count", "Count", 60),
-            ("dt_ms", "Δt (ms)", 80),
             ("type", "Type", 80),
+            ("dt_ms", "Δt (ms)", 80),
+            ("action_type", "Action Type", 80),
             ("x", "X", 60),
             ("y", "Y", 60),
             ("button", "Button", 80),
@@ -91,26 +133,170 @@ class PredictionsView(ttk.Frame):
         ]
         
         self.prediction_tree = TreeWithScrollbars(self, columns, height=15)
-        self.prediction_tree.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.prediction_tree.grid(row=4, column=0, sticky="nsew", padx=8, pady=(0, 8))
         
         # Set alternating colors
         self.prediction_tree.set_alternating_colors()
+        
+        # Initialize models list
+        self._refresh_models_list()
+        
+        # Bind model selection change
+        self.model_var.trace("w", self._on_model_selection_change)
+        
+        # Start periodic status updates
+        self._schedule_status_update()
+    
+    def _schedule_status_update(self):
+        """Schedule periodic status updates"""
+        try:
+            # Update status every 2 seconds
+            self.check_model_status()
+            self.after(2000, self._schedule_status_update)
+        except Exception as e:
+            print(f"Error in status update: {e}")
+    
+    def refresh_view(self):
+        """Refresh the view and check for new models"""
+        try:
+            self._refresh_models_list()
+            self.check_model_status()
+        except Exception as e:
+            print(f"Error refreshing view: {e}")
     
     def _bind_events(self):
         """Bind UI events"""
-        self.predictions_var.trace("w", self._on_predictions_change)
-        self.track_input_var.trace("w", self._on_track_input_change)
+        pass
     
-    def _on_predictions_change(self, *args):
-        """Handle predictions toggle change"""
-        self.predictions_enabled = self.predictions_var.get()
-        if hasattr(self.controller, 'predictor_service'):
-            self.controller.predictor_service.enable_predictions(self.predictions_enabled)
+    def _refresh_models_list(self):
+        """Refresh the list of available models from the models folder"""
+        try:
+            import os
+            from pathlib import Path
+            
+            # Look for models in multiple possible locations
+            possible_model_dirs = [
+                "training_results",  # Current location
+                "models",            # Common models folder
+                "model",             # Alternative models folder
+                "checkpoints",       # Training checkpoints
+                "saved_models"       # Saved models folder
+            ]
+            
+            models_found = []
+            
+            for model_dir in possible_model_dirs:
+                if os.path.exists(model_dir):
+                    # Look for .pth files
+                    for file_path in Path(model_dir).glob("*.pth"):
+                        if file_path.is_file():
+                            # Create a display name (folder/filename)
+                            display_name = f"{model_dir}/{file_path.name}"
+                            models_found.append((display_name, str(file_path)))
+            
+            # If no models found in subdirectories, check current directory
+            if not models_found:
+                for file_path in Path(".").glob("*.pth"):
+                    if file_path.is_file():
+                        models_found.append((file_path.name, str(file_path)))
+            
+            # Update dropdown
+            if models_found:
+                # Sort by filename for consistent ordering
+                models_found.sort(key=lambda x: x[0])
+                
+                # Update dropdown values
+                self.model_dropdown['values'] = [model[0] for model in models_found]
+                
+                # Store the full paths for later use
+                self.model_paths = {model[0]: model[1] for model in models_found}
+                
+                # Select first model by default if none selected
+                if not self.model_var.get() and models_found:
+                    self.model_var.set(models_found[0][0])
+                    self._on_model_selection_change()
+                
+                print(f"Found {len(models_found)} models: {[m[0] for m in models_found]}")
+            else:
+                self.model_dropdown['values'] = ["No models found"]
+                self.model_var.set("No models found")
+                self.model_paths = {}
+                print("No model files found")
+                
+        except Exception as e:
+            print(f"Error refreshing models list: {e}")
+            self.model_dropdown['values'] = ["Error loading models"]
+            self.model_var.set("Error loading models")
     
-    def _on_track_input_change(self, *args):
-        """Handle track input toggle change"""
-        self.track_user_input = self.track_input_var.get()
-        # TODO: Implement user input tracking
+    def _on_model_selection_change(self, *args):
+        """Handle model selection change in dropdown"""
+        try:
+            from pathlib import Path
+            selected_model = self.model_var.get()
+            
+            if not selected_model or selected_model in ["No models found", "Error loading models"]:
+                return
+            
+            if hasattr(self, 'model_paths') and selected_model in self.model_paths:
+                model_path = Path(self.model_paths[selected_model])
+                
+                print(f"Loading selected model: {model_path}")
+                
+                # Load the model through the controller
+                success = self.controller.load_model(model_path)
+                
+                if success:
+                    # Update status
+                    self.status_label.config(text=f"Model Loaded: {Path(selected_model).name}")
+                    print(f"Successfully loaded model: {selected_model}")
+                else:
+                    # Reset selection on failure
+                    self.model_var.set("")
+                    self.status_label.config(text="Status: Failed to load model")
+                    print(f"Failed to load model: {selected_model}")
+                    
+                    # Show error message
+                    from tkinter import messagebox
+                    messagebox.showerror("Error", f"Failed to load model: {selected_model}", parent=self)
+            else:
+                print(f"Model path not found for: {selected_model}")
+                
+        except Exception as e:
+            print(f"Error in model selection change: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def check_model_status(self):
+        """Check if a model is currently loaded and update UI accordingly"""
+        try:
+            from pathlib import Path
+            if hasattr(self.controller, 'predictor_service') and self.controller.predictor_service.is_ready():
+                # Model is loaded and ready
+                if self.model_var.get() and self.model_var.get() not in ["No models found", "Error loading models"]:
+                    # Update status to show model is ready
+                    model_name = Path(self.model_var.get()).name
+                    self.status_label.config(text=f"✅ Model Ready: {model_name} | Predictions: {len(self.predictions)}")
+                else:
+                    # Model is ready but no selection in dropdown
+                    self.status_label.config(text=f"✅ Model Ready | Predictions: {len(self.predictions)}")
+            else:
+                # No model loaded
+                if self.model_var.get() and self.model_var.get() not in ["No models found", "Error loading models"]:
+                    # Selection exists but model not ready
+                    self.status_label.config(text="⏳ Loading model... | Predictions: 0")
+                else:
+                    # No model selected
+                    self.status_label.config(text="❌ No model loaded | Predictions: 0")
+        except Exception as e:
+            print(f"Error checking model status: {e}")
+            self.status_label.config(text="❌ Error checking model | Predictions: 0")
+    
+    def is_model_ready(self) -> bool:
+        """Check if model is ready for predictions"""
+        return (hasattr(self.controller, 'predictor_service') and 
+                self.controller.predictor_service.is_ready())
+    
+
     
     def update_prediction(self, prediction: np.ndarray, timestamp: float):
         """Update the view with a new prediction"""
@@ -172,7 +358,6 @@ class PredictionsView(ttk.Frame):
                 values = [
                     f"{pred_idx+1}.{action_idx+1}",  # Index
                     self._format_timestamp(prediction['timestamp']),  # Time
-                    prediction['count'],  # Count
                     f"{action['dt_ms']:.1f}",  # Δt
                     self._format_action_type(action['type']),  # Type
                     action['x'],  # X
@@ -180,7 +365,7 @@ class PredictionsView(ttk.Frame):
                     self._format_button_type(action['button']),  # Button
                     self._format_key_value(action['key']),  # Key
                     f"{action['scroll_dx']:.1f}",  # Scroll ΔX
-                    f"{action['scroll_dy']:.1f}"   # Scroll ΔY
+                    f"{action['scroll_dy']:.1f}"  # Scroll ΔY
                 ]
                 
                 # Insert row
@@ -239,13 +424,67 @@ class PredictionsView(ttk.Frame):
     
     def _update_status(self):
         """Update the status label"""
-        total_predictions = len(self.predictions)
-        total_actions = sum(pred['count'] for pred in self.predictions)
+        # Check model status first
+        self.check_model_status()
         
-        status = f"Status: {'Active' if self.predictions_enabled else 'Paused'} | "
-        status += f"Predictions: {total_predictions} | Actions: {total_actions}"
+        # Update predictions count in status if model is ready
+        if self.is_model_ready():
+            total_predictions = len(self.predictions)
+            total_actions = sum(pred['count'] for pred in self.predictions)
+            
+            current_status = self.status_label.cget("text")
+            if "Model Ready" in current_status:
+                new_status = current_status.replace(f" | Predictions: {total_predictions}", f" | Predictions: {total_predictions} | Actions: {total_actions}")
+                self.status_label.config(text=new_status)
         
-        self.status_label.config(text=status)
+        # Update summary statistics
+        self._update_summary_stats()
+    
+    def _update_summary_stats(self, prediction: np.ndarray = None):
+        """Update the summary statistics display"""
+        try:
+            if prediction is not None:
+                # Update stats based on the current prediction
+                if prediction.shape[0] > 0 and prediction.shape[1] == 8:
+                    action_count = int(prediction[0, 0]) if prediction.shape[0] > 0 else 0
+                    
+                    # Count action types from the prediction
+                    action_types = {"Click": 0, "Scroll": 0, "Key": 0}
+                    for i in range(1, min(action_count + 1, prediction.shape[0])):
+                        action_data = prediction[i]
+                        action_type = int(action_data[1]) if len(action_data) > 1 else 0
+                        if action_type == 1:
+                            action_types["Click"] += 1
+                        elif action_type == 2:
+                            action_types["Scroll"] += 1
+                        elif action_type == 3:
+                            action_types["Key"] += 1
+                    
+                    # Update labels
+                    self.total_predictions_label.config(text=f"Predictions: 1")
+                    self.total_actions_label.config(text=f"Total Actions: {action_count}")
+                    self.avg_actions_label.config(text=f"Avg Actions: {action_count:.1f}")
+                    self.action_types_label.config(text=f"Types: Click:{action_types['Click']}, Scroll:{action_types['Scroll']}, Key:{action_types['Key']}")
+                else:
+                    # Invalid prediction shape
+                    self.total_predictions_label.config(text="Predictions: 0")
+                    self.total_actions_label.config(text="Total Actions: 0")
+                    self.avg_actions_label.config(text="Avg Actions: 0.0")
+                    self.action_types_label.config(text="Types: Click:0, Scroll:0, Key:0")
+            else:
+                # No prediction provided, show zeros
+                self.total_predictions_label.config(text="Predictions: 0")
+                self.total_actions_label.config(text="Total Actions: 0")
+                self.avg_actions_label.config(text="Avg Actions: 0.0")
+                self.action_types_label.config(text="Types: Click:0, Scroll:0, Key:0")
+            
+        except Exception as e:
+            print(f"Error updating summary stats: {e}")
+            # Set default values on error
+            self.total_predictions_label.config(text="Predictions: 0")
+            self.total_actions_label.config(text="Total Actions: 0")
+            self.avg_actions_label.config(text="Avg Actions: 0.0")
+            self.action_types_label.config(text="Types: Click:0, Scroll:0, Key:0")
     
     def _clear_predictions(self):
         """Clear all predictions"""
@@ -253,278 +492,180 @@ class PredictionsView(ttk.Frame):
         self.prediction_tree.clear()
         self._update_status()
     
-    def _save_gamestate_sample(self):
-        """Save a sample of the current gamestate feature data as numpy array"""
+    def _load_gamestate_sample(self):
+        """Load and display the saved gamestate sequence from file"""
         try:
-            import logging
-            LOG = logging.getLogger(__name__)
-            
-            print("DEBUG: _save_gamestate_sample: Starting...")
-            LOG.info("_save_gamestate_sample: Starting gamestate sample save...")
-            
-            # Get current feature window from the controller
-            print("DEBUG: Checking controller attributes...")
-            if not hasattr(self.controller, 'feature_pipeline'):
-                error_msg = "Controller has no feature_pipeline attribute"
-                print(f"ERROR: {error_msg}")
-                LOG.error(f"_save_gamestate_sample: {error_msg}")
-                from tkinter import messagebox
-                messagebox.showwarning("No Data", "No feature pipeline available.", parent=self)
-                return
-                
-            print("DEBUG: Checking feature pipeline window...")
-            if self.controller.feature_pipeline.window is None:
-                error_msg = "Feature pipeline window is None"
-                print(f"ERROR: {error_msg}")
-                LOG.error(f"_save_gamestate_sample: {error_msg}")
-                from tkinter import messagebox
-                messagebox.showwarning("No Data", "No feature data available. Collect some data first by running live mode.", parent=self)
-                return
-            
-            # Get current feature window (10, 128)
-            print("DEBUG: Getting feature window...")
-            feature_window = self.controller.feature_pipeline.window
-            LOG.info(f"_save_gamestate_sample: Got feature window with shape: {feature_window.shape}")
-            
-            # Fix sequence order: Index 0 should be oldest (T-9), Index 9 should be newest (T0)
-            print("DEBUG: Fixing sequence order...")
-            import numpy as np
-            feature_window = np.flipud(feature_window)  # Reverse the order
-            print(f"DEBUG: Sequence order fixed: Index 0 = oldest, Index 9 = newest")
-            
-            # Use shared pipeline methods to properly process gamestate features
-            print("DEBUG: Using shared pipeline methods to process gamestate features...")
-            try:
-                from shared_pipeline.normalize import normalize_features
-                from shared_pipeline.feature_map import load_feature_mappings
-                from shared_pipeline.features import FeatureExtractor
-                
-                # Load feature mappings for normalization
-                feature_mappings = load_feature_mappings("data/features/feature_mappings.json")
-                print(f"DEBUG: Loaded feature mappings for {len(feature_mappings)} features")
-                
-                # Normalize using the exact same method as the pipeline
-                normalized_features = normalize_features(feature_window, "data/features/feature_mappings.json")
-                print(f"DEBUG: Features normalized successfully")
-                
-                # Use normalized features for saving
-                feature_window = normalized_features
-                
-            except Exception as norm_error:
-                print(f"ERROR: Failed to process gamestate features using shared pipeline: {norm_error}")
-                LOG.error(f"_save_gamestate_sample: Failed to process features: {norm_error}")
-                from tkinter import messagebox
-                messagebox.showerror("Error", f"Failed to process gamestate features: {norm_error}", parent=self)
-                return
-            
-            # Auto-save to sample_data directory
-            import os
-            sample_data_dir = "sample_data"
-            os.makedirs(sample_data_dir, exist_ok=True)
-            
-            filename = os.path.join(sample_data_dir, "sample_gamestate_input_sequence.npy")
-            print(f"DEBUG: Auto-saving to: {filename}")
-            LOG.info(f"_save_gamestate_sample: Auto-saving to {filename}")
-            
-            import numpy as np
-            print("DEBUG: About to call np.save...")
-            np.save(filename, feature_window)
-            print("DEBUG: np.save completed successfully")
-            
-            LOG.info(f"_save_gamestate_sample: Successfully saved normalized gamestate features to {filename}")
-            
-            # Auto-open visualization
-            print("DEBUG: About to open visualization...")
             import subprocess
-            try:
-                subprocess.Popen(["py", ".\\print_numpy_array.py", filename])
-                print("DEBUG: Visualization opened successfully")
-                LOG.info(f"_save_gamestate_sample: Opened visualization for {filename}")
-            except Exception as viz_error:
-                print(f"DEBUG: Failed to open visualization: {viz_error}")
-                LOG.warning(f"_save_gamestate_sample: Failed to open visualization: {viz_error}")
+            import os
             
-            # Show success message
-            print("DEBUG: Showing success message...")
-            from tkinter import messagebox
-            messagebox.showinfo("Success", f"Gamestate features processed and saved to:\n{filename}\n\n"
-                              f"Shape: {feature_window.shape}\n"
-                              f"Data type: {feature_window.dtype}\n"
-                              f"Order: Index 0 = oldest (T-9), Index 9 = newest (T0)\n"
-                              f"Processing: Using shared_pipeline normalization and feature mapping\n\n"
-                              f"Visualization opened automatically!", 
-                              parent=self)
-            print("DEBUG: _save_gamestate_sample: Completed successfully")
+            # Run the print_numpy_array.py script to show the visualization
+            script_path = os.path.join(os.getcwd(), "print_numpy_array.py")
+            file_path = os.path.join(os.getcwd(), "data", "sample_data", "normalized_gamestate_sequence.npy")
+            
+            subprocess.Popen(["py", script_path, file_path])
+            print(f"DEBUG: Opened visualization for {file_path}")
             
         except Exception as e:
-            import logging
-            import traceback
-            print(f"EXCEPTION in _save_gamestate_sample: {e}")
-            print(f"TRACEBACK: {traceback.format_exc()}")
-            
-            LOG = logging.getLogger(__name__)
-            LOG.error(f"_save_gamestate_sample: Exception occurred: {e}")
-            LOG.error(f"_save_gamestate_sample: Full traceback: {traceback.format_exc()}")
-            
+            print(f"EXCEPTION in _load_gamestate_sample: {e}")
             from tkinter import messagebox
-            messagebox.showerror("Error", f"Failed to save gamestate sample: {e}", parent=self)
+            messagebox.showerror("Error", f"Failed to open gamestate visualization: {e}", parent=self)
     
-    def _save_actions_sample(self):
-        """Save a sample of the current action sequence data as numpy array"""
+    def _load_actions_sample(self):
+        """Load and display the saved action sequence from file"""
         try:
-            import logging
-            import numpy as np
-            import time
-            LOG = logging.getLogger(__name__)
-            
-            LOG.info("_save_actions_sample: Starting actions sample save...")
-            
-            # Get synchronized action tensors from pipeline (last 10)
-            print("DEBUG: _save_actions_sample: Reading synchronized action windows from pipeline")
-            if not hasattr(self.controller, 'feature_pipeline'):
-                from tkinter import messagebox
-                messagebox.showwarning("No Data", "No feature pipeline available.", parent=self)
-                return
-            action_tensors = self.controller.feature_pipeline.get_last_action_windows(10)
-            print(f"DEBUG: _save_actions_sample: Raw action_tensors returned: {action_tensors}")
-            print(f"DEBUG: _save_actions_sample: action_tensors type: {type(action_tensors)}")
-            print(f"DEBUG: _save_actions_sample: action_tensors length: {len(action_tensors) if action_tensors else 0}")
-            
-            if action_tensors:
-                for i, tensor in enumerate(action_tensors):
-                    print(f"DEBUG: _save_actions_sample: Tensor {i}: {tensor}")
-                    print(f"DEBUG: _save_actions_sample: Tensor {i} type: {type(tensor)}, length: {len(tensor) if tensor else 0}")
-            
-            LOG.info(f"_save_actions_sample: Got action tensors, count: {len(action_tensors) if action_tensors else 0}")
-            
-            if not action_tensors or len(action_tensors) < 10:
-                error_msg = f"Insufficient action data: got {len(action_tensors) if action_tensors else 0} tensors, need 10"
-                LOG.error(f"_save_actions_sample: {error_msg}")
-                from tkinter import messagebox
-                messagebox.showwarning("No Data", "No action data available. Collect some data first by running live mode.", parent=self)
-                return
-            
-            # Use shared pipeline methods to properly process actions
-            print("DEBUG: Using shared pipeline methods to process actions...")
-            try:
-                from shared_pipeline.actions import convert_raw_actions_to_tensors
-                from shared_pipeline.encodings import ActionEncoder
-                
-                # Create action encoder and convert to proper training format
-                encoder = ActionEncoder()
-                
-                # Process each timestep to ensure proper (100, 8) format
-                print(f"DEBUG: Processing {len(action_tensors)} action tensors...")
-                
-                # Process each timestep to ensure proper (100, 8) format
-                processed_actions = []
-                max_actions_per_timestep = 100
-                
-                for timestep_idx, action_tensor in enumerate(action_tensors):
-                    print(f"DEBUG: Processing timestep {timestep_idx}")
-                    
-                    if not action_tensor or len(action_tensor) < 1:
-                        # No actions in this timestep
-                        timestep_actions = np.zeros((max_actions_per_timestep, 8))
-                        processed_actions.append(timestep_actions)
-                        continue
-                    
-                    # Create timestep array (100, 8)
-                    timestep_actions = np.zeros((max_actions_per_timestep, 8))
-                    
-                    # Parse the flattened action tensor: [action_count, timestamp1, type1, x1, y1, button1, key1, scroll_dx1, scroll_dy1, ...]
-                    if len(action_tensor) >= 1:
-                        action_count = int(action_tensor[0])
-                        print(f"DEBUG: Timestep {timestep_idx} has {action_count} actions")
-                        
-                        if action_count > 0:
-                            # Each action has 8 features
-                            for action_idx in range(min(action_count, max_actions_per_timestep)):
-                                start_idx = 1 + action_idx * 8
-                                if start_idx + 7 < len(action_tensor):
-                                    # Extract the 8 action features
-                                    action_features = action_tensor[start_idx:start_idx + 8]
-                                    timestep_actions[action_idx] = action_features
-                                    print(f"DEBUG: Timestep {timestep_idx}, Action {action_idx}: {action_features}")
-                    
-                    processed_actions.append(timestep_actions)
-                
-                # Convert to numpy array (10, 100, 8)
-                action_array = np.array(processed_actions)
-                print(f"DEBUG: Created action array with shape: {action_array.shape}")
-                
-            except Exception as e:
-                print(f"ERROR: Failed to process actions using shared pipeline: {e}")
-                LOG.error(f"_save_actions_sample: Failed to process actions: {e}")
-                from tkinter import messagebox
-                messagebox.showerror("Error", f"Failed to process actions: {e}", parent=self)
-                return
-            
-            # Save as JSON (as you've been doing in your workflow)
-            import os
-            import json
-            
-            sample_data_dir = "sample_data"
-            os.makedirs(sample_data_dir, exist_ok=True)
-            
-            filename = os.path.join(sample_data_dir, "sample_action_input_sequence.json")
-            print(f"DEBUG: Auto-saving actions to: {filename}")
-            LOG.info(f"_save_actions_sample: Auto-saving actions to {filename}")
-            
-            # Save as JSON with metadata
-            action_data = {
-                "action_sequence": action_tensors,
-                "processed_actions": action_array.tolist(),
-                "metadata": {
-                    "timesteps": len(action_tensors),
-                    "tensor_lengths": [len(tensor) for tensor in action_tensors],
-                    "max_tensor_length": max(len(tensor) for tensor in action_tensors),
-                    "processed_shape": action_array.shape,
-                    "timestamp": time.time()
-                }
-            }
-            
-            with open(filename, 'w') as f:
-                json.dump(action_data, f, indent=2)
-            
-            LOG.info(f"_save_actions_sample: Successfully saved action sequence to {filename}")
-            
-            # Save processed actions as numpy array for visualization
-            viz_filename = os.path.join(sample_data_dir, "sample_action_input_sequence.npy")
-            np.save(viz_filename, action_array)
-            print(f"DEBUG: Saved processed actions to: {viz_filename}")
-            
-            # Auto-open visualization
-            print("DEBUG: About to open visualization...")
             import subprocess
-            try:
-                subprocess.Popen(["py", ".\\print_numpy_array.py", viz_filename])
-                print("DEBUG: Visualization opened successfully")
-                LOG.info(f"_save_actions_sample: Opened visualization for {viz_filename}")
-            except Exception as viz_error:
-                print(f"DEBUG: Failed to open visualization: {viz_error}")
-                LOG.warning(f"_save_actions_sample: Failed to open visualization: {viz_error}")
+            import os
             
-                        # Show success message
-            from tkinter import messagebox
-            messagebox.showinfo("Success", f"Action sequence processed and saved to:\n{filename}\n\n"
-                               f"JSON format with {len(action_tensors)} timesteps\n"
-                               f"Processed shape: {action_array.shape}\n"
-                               f"Max actions per timestep: {max_actions_per_timestep}\n"
-                               f"Action features: [count, timestamp, type, x, y, button, key, scroll_dx, scroll_dy]\n"
-                               f"Processing: Using shared_pipeline ActionEncoder and action processing\n\n"
-                               f"Visualization opened automatically!", 
-                               parent=self)
+            # Run the print_numpy_array.py script to show the visualization
+            script_path = os.path.join(os.getcwd(), "print_numpy_array.py")
+            file_path = os.path.join(os.getcwd(), "data", "sample_data", "normalized_action_sequence.npy")
+            
+            subprocess.Popen(["py", script_path, file_path])
+            print(f"DEBUG: Opened visualization for {file_path}")
             
         except Exception as e:
-            import logging
-            import traceback
-            LOG = logging.getLogger(__name__)
-            LOG.error(f"_save_actions_sample: Exception occurred: {e}")
-            LOG.error(f"_save_actions_sample: Full traceback: {traceback.format_exc()}")
-            
+            print(f"EXCEPTION in _load_actions_sample: {e}")
             from tkinter import messagebox
-            messagebox.showerror("Error", f"Failed to save actions sample: {e}", parent=self)
+            messagebox.showerror("Error", f"Failed to open action visualization: {e}", parent=self)
+
+    def _run_prediction_on_sample(self):
+        """Run prediction on the saved sample data"""
+        try:
+            # Check if model is loaded
+            if not self.is_model_ready():
+                from tkinter import messagebox
+                messagebox.showwarning("No Model", "Please select and load a model from the dropdown first.", parent=self)
+                return
+            
+            # Check if sample data exists
+            import os
+            from pathlib import Path
+            
+            sample_data_dir = Path("data/sample_data")
+            gamestate_file = sample_data_dir / "normalized_gamestate_sequence.npy"
+            action_file = sample_data_dir / "normalized_action_sequence.npy"
+            
+            if not gamestate_file.exists() or not action_file.exists():
+                from tkinter import messagebox
+                messagebox.showwarning("No Sample Data", 
+                    "No sample data found. Run live mode first and then stop it to generate sample data.", parent=self)
+                return
+            
+            # Run prediction
+            print(f"DEBUG: Running prediction on sample data...")
+            print(f"DEBUG: Gamestate file: {gamestate_file}")
+            print(f"DEBUG: Action file: {action_file}")
+            
+            prediction = self.controller.predictor_service.predict_from_sample_data(
+                str(gamestate_file), str(action_file)
+            )
+            
+            if prediction is not None:
+                print(f"DEBUG: Prediction successful! Shape: {prediction.shape}")
+                
+                # Parse and display the prediction
+                self._display_prediction_result(prediction)
+                
+                # Show success message
+                from tkinter import messagebox
+                messagebox.showinfo("Prediction Success", 
+                    f"Prediction completed successfully!\n\n"
+                    f"Output shape: {prediction.shape}\n"
+                    f"Action count: {int(prediction[0, 0])}\n"
+                    f"Features per action: 8\n\n"
+                    f"Results displayed in the predictions table below.", parent=self)
+            else:
+                from tkinter import messagebox
+                messagebox.showerror("Prediction Failed", 
+                    "Failed to generate prediction. Check the console for error details.", parent=self)
+                
+        except Exception as e:
+            print(f"DEBUG: Exception in _run_prediction_on_sample: {e}")
+            import traceback
+            traceback.print_exc()
+            from tkinter import messagebox
+            messagebox.showerror("Error", f"Failed to run prediction: {e}", parent=self)
+
+    def _show_raw_prediction(self):
+        """Show the raw prediction output using print_numpy_array.py tool"""
+        import subprocess
+        subprocess.Popen(["python", "print_numpy_array.py", "data/sample_data/raw_prediction_output.npy"])
+
+    def _display_prediction_result(self, prediction: np.ndarray):
+        """Display the prediction result in the table"""
+        if prediction is None:
+            messagebox.showerror("Error", "No prediction result to display")
+            return
+        
+        # Store the last prediction for raw output access
+        self.last_prediction = prediction.copy()
+        
+        # Save the raw prediction to sample data directory
+        try:
+            sample_data_dir = Path("data/sample_data")
+            sample_data_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save raw prediction as numpy array
+            prediction_file = sample_data_dir / "raw_prediction_output.npy"
+            np.save(prediction_file, prediction)
+            
+            # Also save as text file for easy viewing
+            text_file = sample_data_dir / "raw_prediction_output.txt"
+            with open(text_file, 'w') as f:
+                f.write(f"Raw Model Prediction Output\n")
+                f.write(f"Shape: {prediction.shape}\n")
+                f.write(f"Dtype: {prediction.dtype}\n")
+                f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 50 + "\n\n")
+                
+                for i in range(prediction.shape[0]):
+                    f.write(f"Row {i}: ")
+                    for j in range(prediction.shape[1]):
+                        f.write(f"{prediction[i, j]} ")
+                    f.write("\n")
+            
+            print(f"✅ Raw prediction saved to:")
+            print(f"   NumPy: {prediction_file}")
+            print(f"   Text: {text_file}")
+            
+        except Exception as e:
+            print(f"⚠️ Warning: Could not save prediction: {e}")
+        
+        # Clear existing table
+        for item in self.prediction_tree.get_children():
+            self.prediction_tree.delete(item)
+        
+        # Parse the prediction array
+        # The model outputs (100, 8) or (101, 8) depending on training data
+        # Row 0 should contain the action count, rows 1+ contain the actual actions
+        if prediction.shape[0] > 0 and prediction.shape[1] == 8:
+            action_count = int(prediction[0, 0]) if prediction.shape[0] > 0 else 0
+            
+            # Insert action count row
+            self.prediction_tree.insert("", "end", values=(
+                "0", "COUNT", "", "", "", "", "", "", "", ""
+            ))
+            
+            # Insert actual actions - show ALL actions from the prediction
+            for i in range(1, prediction.shape[0]):  # Show all rows, not just first 10
+                action_data = prediction[i]
+                self.prediction_tree.insert("", "end", values=(
+                    str(i),
+                    "ACTION",
+                    f"{action_data[0]:.6f}",  # timing
+                    f"{action_data[1]:.6f}",  # type
+                    f"{action_data[2]:.6f}",  # x
+                    f"{action_data[3]:.6f}",  # y
+                    f"{action_data[4]:.6f}",  # button
+                    f"{action_data[5]:.6f}",  # key
+                    f"{action_data[6]:.6f}",  # scroll dx
+                    f"{action_data[7]:.6f}"   # scroll dy
+                ))
+            
+            # Update summary stats
+            self._update_summary_stats(prediction)
+        else:
+            messagebox.showerror("Error", f"Unexpected prediction shape: {prediction.shape}")
     
     def _export_to_csv(self):
         """Export predictions to CSV file"""
@@ -574,6 +715,78 @@ class PredictionsView(ttk.Frame):
         except Exception as e:
             print(f"Failed to export CSV: {e}")
     
+    def _copy_table_to_clipboard(self):
+        """Copy the current predictions table to clipboard"""
+        if not self.predictions:
+            from tkinter import messagebox
+            messagebox.showinfo("Info", "No predictions to copy.", parent=self)
+            return
+        
+        try:
+            copy_format = self.copy_format_var.get()
+            lines = []
+            
+            # Header
+            header = ["Prediction", "Action", "Timestamp", "Count", "Δt (ms)", 
+                     "Type", "X", "Y", "Button", "Key", "Scroll ΔX", "Scroll ΔY"]
+            
+            if copy_format == "tab":
+                # Tab-separated format (good for Excel)
+                lines.append("\t".join(header))
+                separator = "\t"
+            elif copy_format == "csv":
+                # Comma-separated format
+                lines.append(",".join(header))
+                separator = ","
+            else:  # table format
+                # Formatted table with aligned columns
+                lines.append(" | ".join(header))
+                separator = " | "
+            
+            # Data rows
+            for pred_idx, prediction in enumerate(self.predictions):
+                for action_idx, action in enumerate(prediction['actions']):
+                    row = [
+                        str(pred_idx + 1),
+                        str(action_idx + 1),
+                        str(prediction['timestamp']),
+                        str(prediction['count']),
+                        f"{action['dt_ms']:.1f}",
+                        str(action['type']),
+                        str(action['x']),
+                        str(action['y']),
+                        str(action['button']),
+                        str(action['key']),
+                        f"{action['scroll_dx']:.1f}",
+                        f"{action['scroll_dy']:.1f}"
+                    ]
+                    lines.append(separator.join(row))
+            
+            # Join all lines
+            table_text = "\n".join(lines)
+            
+            # Copy to clipboard
+            self.clipboard_clear()
+            self.clipboard_append(table_text)
+            
+            # Show success message
+            format_name = {"tab": "Tab-separated", "csv": "CSV", "table": "Formatted table"}[copy_format]
+            from tkinter import messagebox
+            messagebox.showinfo("Success", 
+                f"Table copied to clipboard as {format_name}!\n\n"
+                f"Copied {len(self.predictions)} predictions with "
+                f"{sum(pred['count'] for pred in self.predictions)} total actions.\n\n"
+                f"Format: {format_name}\n"
+                f"You can now paste this data into Excel, Google Sheets, or any text editor.",
+                parent=self)
+            
+            print(f"Table copied to clipboard as {format_name}: {len(lines)} rows")
+            
+        except Exception as e:
+            print(f"Failed to copy table to clipboard: {e}")
+            from tkinter import messagebox
+            messagebox.showerror("Error", f"Failed to copy table: {e}", parent=self)
+    
     def set_action_encoder(self, action_encoder):
         """Set the action encoder for formatting"""
         self.action_encoder = action_encoder
@@ -584,30 +797,195 @@ class PredictionsView(ttk.Frame):
         self.prediction_tree.clear()
         self._update_status()
 
-    def _load_model(self):
-        """Load a trained model"""
+
+
+    def _save_sample_input(self):
+        """Save a sample of the current model input data"""
         try:
+            import time
+            print("DEBUG: ===== SAMPLE INPUT BUTTON CLICKED =====")
+            
+            # Get current feature window from the controller
+            if not hasattr(self.controller, 'feature_pipeline') or self.controller.feature_pipeline.window is None:
+                from tkinter import messagebox
+                messagebox.showwarning("No Data", "No feature data available. Start live mode first to collect data.", parent=self)
+                return
+            
+            # Get current feature window (10, 128)
+            feature_window = self.controller.feature_pipeline.window
+            print(f"DEBUG: Feature window shape: {feature_window.shape}")
+            print(f"DEBUG: Feature window dtype: {feature_window.dtype}")
+            
+            # Check if all timesteps are identical (stale data issue)
+            if feature_window.shape[0] >= 2:
+                print("DEBUG: ===== FEATURE WINDOW ANALYSIS =====")
+                print(f"DEBUG: Feature window shape: {feature_window.shape}")
+                print(f"DEBUG: Feature window dtype: {feature_window.dtype}")
+                
+                # Check each timestep's timestamp
+                for i in range(feature_window.shape[0]):
+                    timestamp = feature_window[i, 127]  # timestamp is at index 127
+                    print(f"DEBUG: T{i} timestamp: {timestamp}")
+                
+                first_timestep = feature_window[0]
+                last_timestep = feature_window[-1]
+                
+                if np.array_equal(first_timestep, last_timestep):
+                    print("WARNING: First and last timesteps are identical - stale data detected!")
+                else:
+                    print("DEBUG: First and last timesteps are different")
+                
+                # Show sample values from first and last timesteps
+                print(f"DEBUG: First timestep (T9) sample values: {first_timestep[:5]}...")
+                print(f"DEBUG: Last timestep (T0) sample values: {last_timestep[:5]}...")
+                
+                # Check if ALL timesteps are identical
+                all_identical = True
+                for i in range(1, feature_window.shape[0]):
+                    if not np.array_equal(feature_window[0], feature_window[i]):
+                        all_identical = False
+                        break
+                
+                if all_identical:
+                    print("CRITICAL ERROR: ALL timesteps are identical - window is not shifting!")
+                    print(f"DEBUG: All timesteps have timestamp: {feature_window[0, 127]}")
+                else:
+                    print("DEBUG: Timesteps are different - window shifting is working")
+            
+            # Get current action tensors (10 timesteps)
+            print("DEBUG: Getting action features from controller...")
+            action_tensors = self.controller.get_action_features()
+            print(f"DEBUG: Action tensors count: {len(action_tensors) if action_tensors else 0}")
+            
+            if not action_tensors or len(action_tensors) < 10:
+                from tkinter import messagebox
+                messagebox.showwarning("No Data", "No action data available. Start live mode first to collect data.", parent=self)
+                return
+            
+            # Debug action tensor structure
+            print("DEBUG: ===== ACTION TENSOR ANALYSIS =====")
+            print(f"DEBUG: Action tensors count: {len(action_tensors)}")
+            
+            for i, tensor in enumerate(action_tensors):
+                print(f"DEBUG: T{i}: length={len(tensor)}")
+                if len(tensor) > 0:
+                    print(f"DEBUG: T{i}: first_few_values={tensor[:5] if len(tensor) >= 5 else tensor}")
+                    if len(tensor) >= 1:
+                        action_count = int(tensor[0]) if isinstance(tensor[0], (int, float)) else 0
+                        print(f"DEBUG: T{i}: action_count={action_count}")
+                        
+                        # If this is an action tensor, show the structure
+                        if len(tensor) >= 8:
+                            print(f"DEBUG: T{i}: action_data=[count={tensor[0]}, Δt={tensor[1]}, type={tensor[2]}, x={tensor[3]}, y={tensor[4]}, btn={tensor[5]}, key={tensor[6]}, scroll_dx={tensor[7]}]")
+                else:
+                    print(f"DEBUG: T{i}: empty tensor")
+            
+            # Check if action tensors have meaningful data
+            non_empty_tensors = [t for t in action_tensors if len(t) > 1]
+            print(f"DEBUG: Non-empty action tensors: {len(non_empty_tensors)}/10")
+            
+            if non_empty_tensors:
+                print(f"DEBUG: Sample non-empty tensor: {non_empty_tensors[0]}")
+            else:
+                print("WARNING: All action tensors are empty or have only count=0!")
+            
+            # Get gamestate timestamps for the action tensors
+            current_timestamp = int(time.time() * 1000)
+            gamestate_timestamps = [current_timestamp - (9-i)*100 for i in range(10)]
+            print(f"DEBUG: Generated gamestate timestamps: {gamestate_timestamps[:3]}...")
+            
+            # Try to use shared pipeline methods
+            try:
+                print("DEBUG: Attempting to use shared pipeline conversion methods...")
+                from shared_pipeline import (
+                    convert_live_features_to_sequence_format,
+                    convert_live_actions_to_raw_format,
+                    create_live_training_sequences
+                )
+                
+                # Convert live data to pipeline format
+                print("DEBUG: Converting features to sequence format...")
+                features = convert_live_features_to_sequence_format(feature_window)
+                print(f"DEBUG: Converted features shape: {features.shape}")
+                
+                print("DEBUG: Converting actions to raw format...")
+                raw_actions = convert_live_actions_to_raw_format(action_tensors, gamestate_timestamps)
+                print(f"DEBUG: Raw actions count: {len(raw_actions)}")
+                if raw_actions:
+                    print(f"DEBUG: First raw action: {raw_actions[0]}")
+                
+                print("DEBUG: Creating training sequences...")
+                input_sequences, target_sequences, action_input_sequences = create_live_training_sequences(
+                    feature_window, action_tensors, gamestate_timestamps
+                )
+                print(f"DEBUG: Training sequences created successfully")
+                print(f"DEBUG: Input sequences shape: {input_sequences.shape if input_sequences is not None else 'None'}")
+                print(f"DEBUG: Target sequences count: {len(target_sequences) if target_sequences else 0}")
+                print(f"DEBUG: Action input sequences count: {len(action_input_sequences) if action_input_sequences else 0}")
+                
+                # Prepare the sample input data
+                sample_input = {
+                    'temporal_sequence': features.tolist(),  # (10, 128) - ready for model input
+                    'action_sequence': action_input_sequences,  # List of 10 action sequences
+                    'raw_actions': raw_actions,  # Raw action data for debugging
+                    'metadata': {
+                        'timestamp': time.time(),
+                        'feature_window_shape': feature_window.shape,
+                        'action_tensors_count': len(action_tensors),
+                        'action_tensor_lengths': [len(tensor) for tensor in action_tensors],
+                        'input_sequences_shape': input_sequences.shape if input_sequences is not None else None,
+                        'target_sequences_count': len(target_sequences) if target_sequences else 0,
+                        'action_input_sequences_count': len(action_input_sequences) if action_input_sequences else 0
+                    }
+                }
+                
+            except Exception as conversion_error:
+                # Fallback to basic data if conversion fails
+                print(f"DEBUG: Conversion failed, using basic data: {conversion_error}")
+                import traceback
+                traceback.print_exc()
+                
+                sample_input = {
+                    'temporal_sequence': feature_window.tolist(),  # (10, 128)
+                    'action_sequence': action_tensors,  # List of 10 action tensors
+                    'metadata': {
+                        'timestamp': time.time(),
+                        'feature_window_shape': feature_window.shape,
+                        'action_tensors_count': len(action_tensors),
+                        'action_tensor_lengths': [len(tensor) for tensor in action_tensors],
+                        'conversion_error': str(conversion_error)
+                    }
+                }
+            
+            # Save to file
             from tkinter import filedialog
-            filename = filedialog.askopenfilename(
+            filename = filedialog.asksaveasfilename(
                 parent=self,
-                title="Load Trained Model",
-                filetypes=[
-                    ("PyTorch models", "*.pth"),
-                    ("All files", "*.*")
-                ]
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+                initialfilename="sample_model_input.json"
             )
             
-            if filename:
-                from pathlib import Path
-                model_path = Path(filename)
-                success = self.controller.load_model(model_path)
-                
-                if success:
-                    # Update status to show model loaded
-                    self.status_label.config(text=f"Model Loaded: {model_path.name}")
-                else:
-                    from tkinter import messagebox
-                    messagebox.showerror("Error", f"Failed to load model: {model_path}", parent=self)
-                    
+            if not filename:
+                return
+            
+            import json
+            with open(filename, 'w') as f:
+                json.dump(sample_input, f, indent=2)
+            
+            print(f"DEBUG: Sample input saved to: {filename}")
+            
+            # Show success message
+            from tkinter import messagebox
+            messagebox.showinfo("Success", f"Sample model input saved to:\n{filename}\n\n"
+                              f"Feature window: {feature_window.shape}\n"
+                              f"Action tensors: {len(action_tensors)} timesteps\n"
+                              f"Sample action tensor length: {len(action_tensors[0]) if action_tensors else 0}", 
+                              parent=self)
+            
         except Exception as e:
-            print(f"Error loading model: {e}")
+            print(f"DEBUG: Exception in _save_sample_input: {e}")
+            import traceback
+            traceback.print_exc()
+            from tkinter import messagebox
+            messagebox.showerror("Error", f"Failed to save sample input: {e}", parent=self)

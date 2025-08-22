@@ -37,7 +37,7 @@ class LogsView(ttk.Frame):
                  font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
         
         # Controls frame
-        controls_frame = ttk.Frame(self)
+        controls_frame = ttk.Frame(self, style="Toolbar.TFrame")
         controls_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 4))
         controls_frame.grid_columnconfigure(2, weight=1)
         

@@ -18,7 +18,8 @@ PALETTE = {
     "accent_hover": "#6ca0ff", # Accent hover state
     "accent_active": "#4078d0", # Accent active state
     "sel_bg": "#314b7d",       # Selection background
-    "sel_fg": "#ffffff"        # Selection foreground
+    "sel_fg": "#ffffff",       # Selection foreground
+    "menubar": "#3a3d42"       # Menu bar background (distinct from surface)
 }
 
 
@@ -79,11 +80,25 @@ def apply_dark_theme(root: tk.Tk, *, accent: str = PALETTE["accent"]) -> None:
     # Apply menu options (raise on any failure)
     try:
         root.option_add("*TearOff", False)
-        root.option_add("*Menu.background", PALETTE["surface"])
+        # Menu bar (the File, Control, View, Help bar)
+        root.option_add("*Menu.background", PALETTE["menubar"])
         root.option_add("*Menu.foreground", PALETTE["text"])
         root.option_add("*Menu.activeBackground", PALETTE["sel_bg"])
         root.option_add("*Menu.activeForeground", PALETTE["sel_fg"])
         root.option_add("*Menu.relief", "flat")
+        root.option_add("*Menu.borderWidth", 1)
+        root.option_add("*Menu.activeBorderWidth", 1)
+        # Specific menubar styling
+        root.option_add("*Menubar.background", PALETTE["menubar"])
+        root.option_add("*Menubar.foreground", PALETTE["text"])
+        root.option_add("*Menubar.relief", "raised")
+        root.option_add("*Menubar.borderWidth", 1)
+        # Alternative patterns for Windows
+        root.configure(bg=PALETTE["menubar"])
+        
+        # Setup larger fonts globally
+        setup_styles()
+        
     except tk.TclError as e:
         raise RuntimeError(f"Failed to apply dark menu options: {e}") from e
     except Exception as e:
@@ -196,6 +211,24 @@ def apply_dark_theme(root: tk.Tk, *, accent: str = PALETTE["accent"]) -> None:
         style.configure("TPanedwindow", background=PALETTE["surface"])
     except Exception as e:
         raise RuntimeError(f"Failed to configure scrollbar/paned window styles: {e}") from e
+    
+    # Configure toolbar style - distinct from other frames
+    try:
+        style.configure("Toolbar.TFrame", 
+                       background="#3a3d42",  # Slightly lighter than surface, darker than border
+                       relief="raised",
+                       borderwidth=1)
+    except Exception as e:
+        raise RuntimeError(f"Failed to configure toolbar style: {e}") from e
+    
+    # Configure menubar style - distinct from other elements
+    try:
+        style.configure("Menubar.TFrame", 
+                       background=PALETTE["menubar"],
+                       relief="flat",
+                       borderwidth=0)
+    except Exception as e:
+        raise RuntimeError(f"Failed to configure menubar style: {e}") from e
     
     # Sanity check: ensure base color was actually applied
     try:
@@ -346,3 +379,39 @@ def create_dark_intvar(parent, **kw) -> tk.IntVar:
         return tk.IntVar(master=parent, **kw)
     except Exception as e:
         raise RuntimeError(f"Failed to create dark IntVar: {e}") from e
+
+
+def setup_styles():
+    """Setup custom ttk styles"""
+    style = ttk.Style()
+    
+    # Increase default font sizes globally
+    default_font = ("Segoe UI", 13)  # Increased from default
+    large_font = ("Segoe UI", 15)    # Increased from default
+    header_font = ("Segoe UI", 17, "bold")  # Increased from default
+    
+    # Configure default fonts for all widgets
+    style.configure(".", font=default_font)
+    
+    # Specific widget styles with larger fonts
+    style.configure("TLabel", font=default_font)
+    style.configure("TButton", font=default_font)
+    style.configure("TEntry", font=default_font)
+    style.configure("TCombobox", font=default_font)
+    style.configure("Treeview", font=default_font)
+    style.configure("Treeview.Heading", font=default_font)
+    
+    # Header styles
+    style.configure("Header.TLabel", font=header_font)
+    style.configure("Title.TLabel", font=large_font)
+    
+    # Button styles
+    style.configure("Accent.TButton", font=default_font)
+    style.configure("Primary.TButton", font=default_font)
+    
+    # Frame styles
+    style.configure("Toolbar.TFrame", background="#3a3d42", relief="raised", borderwidth=1)
+    
+    # Status and info styles
+    style.configure("Status.TLabel", font=default_font)
+    style.configure("Info.TLabel", font=default_font)

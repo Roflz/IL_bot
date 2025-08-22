@@ -25,8 +25,9 @@ LOG = logging.getLogger(__name__)
 class FeaturePipeline:
     """Pipeline for processing gamestate data into features and actions"""
     
-    def __init__(self, data_root: Path = Path("data")):
+    def __init__(self, data_root: Path = Path("data"), actions_service=None):
         self.data_root = data_root
+        self.actions_service = actions_service
         
         # --- explicit state so first access never raises AttributeError
         self.window: Optional[np.ndarray] = None        # (10,128), T0 at row 0
@@ -35,6 +36,10 @@ class FeaturePipeline:
         self.feature_groups: list[str] = []             # len 128
         self._deque: deque[np.ndarray] = deque(maxlen=10)
         self._action_windows: deque[List[float]] = deque(maxlen=20)
+        
+        # Gamestate storage for final 10 timesteps
+        self._gamestate_windows: deque[Dict[str, Any]] = deque(maxlen=20)
+        self._feature_windows: deque[np.ndarray] = deque(maxlen=20)
         
         # Load feature mappings
         try:
@@ -130,6 +135,39 @@ class FeaturePipeline:
             # put newest at t0 (row 0)
             self.window[0, :] = feats
             
+            # DEBUG: Check if window is being updated correctly
+            if self.window is not None:
+                print(f"DEBUG: extract_window: Window updated")
+                print(f"DEBUG: extract_window: Window shape: {self.window.shape}")
+                print(f"DEBUG: extract_window: Newest row (T0) sample values: {self.window[0, :5]}...")
+                print(f"DEBUG: extract_window: Newest row (T0) timestamp feature (127): {self.window[0, 127]}")
+                
+                if self.window.shape[0] > 1:
+                    print(f"DEBUG: extract_window: Previous row (T1) sample values: {self.window[1, :5]}...")
+                    print(f"DEBUG: extract_window: Previous row (T1) timestamp feature (127): {self.window[1, 127]}")
+                    
+                    # Check if rows are different
+                    if np.array_equal(self.window[0], self.window[1]):
+                        print("WARNING: extract_window: Newest and previous rows are identical!")
+                        print(f"DEBUG: extract_window: T0 timestamp: {self.window[0, 127]}")
+                        print(f"DEBUG: extract_window: T1 timestamp: {self.window[1, 127]}")
+                    else:
+                        print("DEBUG: extract_window: Newest and previous rows are different")
+                
+                # Check if ALL rows are identical (stale data issue)
+                if self.window.shape[0] >= 2:
+                    all_identical = True
+                    for i in range(1, self.window.shape[0]):
+                        if not np.array_equal(self.window[0], self.window[i]):
+                            all_identical = False
+                            break
+                    
+                    if all_identical:
+                        print("CRITICAL ERROR: extract_window: ALL rows are identical - window is not shifting!")
+                        print(f"DEBUG: extract_window: All rows have timestamp: {self.window[0, 127]}")
+                    else:
+                        print("DEBUG: extract_window: Window rows are different - shifting is working")
+            
             # Save ID mappings to disk for persistence
             try:
                 # Use absolute path to ensure correct location
@@ -193,6 +231,10 @@ class FeaturePipeline:
         """
         # Extract window and metadata
         window, feature_names, feature_groups = self.extract_window(gamestate)
+        
+        # Store gamestate and features for final 10 timesteps
+        self._gamestate_windows.append(gamestate)
+        self._feature_windows.append(window[-1].copy())  # Store a copy of the newest feature vector
         
         # Compute change mask
         changed_mask = self.diff_mask(window)
@@ -355,3 +397,272 @@ class FeaturePipeline:
             return []
         items = list(self._action_windows)[-count:]
         return list(reversed(items))
+    
+    def _pad_action_sequences_to_fixed_length(self, action_tensors: List[List[float]], max_actions: int = 100) -> np.ndarray:
+        """
+        Pad action sequences to fixed length numpy array format expected by the model.
+        
+        Args:
+            action_tensors: List of action tensors from convert_raw_actions_to_tensors
+            max_actions: Maximum number of actions per timestep (default 100)
+            
+        Returns:
+            Numpy array of shape (10, 101, 8) with action count at index 0, then up to 100 actions
+        """
+        timesteps = 10
+        features_per_action = 8
+        
+        # Output: (10, 101, 8) - 10 timesteps, each with action count at index 0 + up to 100 actions
+        action_array = np.zeros((timesteps, max_actions + 1, features_per_action), dtype=np.float32)
+        
+        # Process each of the 10 timesteps
+        for i in range(min(timesteps, len(action_tensors))):
+            timestep_tensor = action_tensors[i]  # One timestep's data
+            
+            if len(timestep_tensor) >= 1:
+                action_count = int(timestep_tensor[0])
+                
+                # Store action count in the first row (index 0), first position
+                action_array[i, 0, 0] = action_count
+                
+                # Parse remaining actions (starting from index 1)
+                if len(timestep_tensor) > 1:
+                    actions_data = timestep_tensor[1:]  # Skip action count
+                    max_actions_found = min(len(actions_data) // features_per_action, max_actions)
+                    
+                    for j in range(max_actions_found):
+                        start_idx = j * features_per_action
+                        end_idx = start_idx + features_per_action
+                        if end_idx <= len(actions_data):
+                            action_features = actions_data[start_idx:end_idx]
+                            # Store actions starting at index 1 (after the count row)
+                            action_array[i, j + 1, :] = action_features
+        
+        return action_array
+
+    def save_final_data(self, output_dir: Path = None) -> None:
+        """
+        Save the final 10 timesteps of data when live tracking stops.
+        Creates all the files needed for the sample buttons.
+        """
+        try:
+            # Use data_root/sample_data as default if no output_dir specified
+            if output_dir is None:
+                output_dir = self.data_root / "sample_data"
+            
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Get the last 10 timesteps
+            gamestates = list(self._gamestate_windows)[-10:]
+            features = list(self._feature_windows)[-10:]
+            
+            if len(gamestates) < 10:
+                LOG.warning(f"Only {len(gamestates)} timesteps available, expected 10")
+                return
+            
+            # Save gamestate sequences
+            # Non-normalized (raw features)
+            raw_features_array = np.array(features)
+            np.save(output_dir / "non_normalized_gamestate_sequence.npy", raw_features_array)
+            
+            # Normalized features
+            mappings_file = self.data_root / "05_mappings" / "feature_mappings.json"
+            normalized_features = normalize_features(raw_features_array, str(mappings_file))
+            np.save(output_dir / "normalized_gamestate_sequence.npy", normalized_features)
+            
+            # Process actions using shared pipeline workflow
+            # This is the key fix: use the existing pipeline method that properly syncs actions to gamestates
+            raw_action_data = self._extract_raw_action_data_using_pipeline(gamestates)
+            
+            # Non-normalized action sequence
+            non_normalized_actions = convert_raw_actions_to_tensors(raw_action_data, self._encoder)
+            LOG.debug(f"DEBUG: Non-normalized actions shape: {len(non_normalized_actions)} tensors")
+            LOG.debug(f"DEBUG: First tensor length: {len(non_normalized_actions[0]) if non_normalized_actions else 0}")
+            LOG.debug(f"DEBUG: Last tensor length: {len(non_normalized_actions[-1]) if non_normalized_actions else 0}")
+            
+            # Save as list since tensors have variable lengths
+            import pickle
+            with open(output_dir / "non_normalized_action_sequence.pkl", 'wb') as f:
+                pickle.dump(non_normalized_actions, f)
+            
+            # Also save as padded numpy array for model input
+            padded_non_normalized_actions = self._pad_action_sequences_to_fixed_length(non_normalized_actions)
+            np.save(output_dir / "non_normalized_action_sequence.npy", padded_non_normalized_actions)
+            LOG.debug(f"DEBUG: Saved non-normalized actions as numpy array with shape: {padded_non_normalized_actions.shape}")
+            
+            # Normalized action sequence
+            normalized_action_data = normalize_action_data(raw_action_data, normalized_features)
+            normalized_actions = convert_raw_actions_to_tensors(normalized_action_data, self._encoder)
+            LOG.debug(f"DEBUG: Normalized actions shape: {len(normalized_actions)} tensors")
+            LOG.debug(f"DEBUG: First tensor length: {len(normalized_actions[0]) if normalized_actions else 0}")
+            LOG.debug(f"DEBUG: Last tensor length: {len(normalized_actions[-1]) if normalized_actions else 0}")
+            
+            # Save as list since tensors have variable lengths
+            with open(output_dir / "normalized_action_sequence.pkl", 'wb') as f:
+                pickle.dump(normalized_actions, f)
+            
+            # Also save as padded numpy array for model input
+            padded_normalized_actions = self._pad_action_sequences_to_fixed_length(normalized_actions)
+            np.save(output_dir / "normalized_action_sequence.npy", padded_normalized_actions)
+            LOG.debug(f"DEBUG: Saved normalized actions as numpy array with shape: {padded_normalized_actions.shape}")
+            
+            # Also save actions.csv for compatibility with existing tools
+            actions_csv_path = output_dir / "actions.csv"
+            self._save_actions_csv_from_pipeline_data(gamestates, raw_action_data, actions_csv_path)
+            
+            LOG.info(f"Saved final data to {output_dir}")
+            
+        except Exception as e:
+            LOG.exception("Failed to save final data")
+            raise
+    
+    def _extract_raw_action_data_using_pipeline(self, gamestates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Extract raw action data using the existing shared pipeline workflow.
+        This method properly syncs actions to gamestates using the 600ms window logic.
+        """
+        # Import the shared pipeline method
+        from shared_pipeline.actions import extract_raw_action_data
+        
+        # Get all actions from memory
+        all_actions = self._get_all_actions_in_memory()
+        LOG.info(f"Found {len(all_actions)} actions in memory")
+        
+        if not all_actions:
+            LOG.warning("No actions found in memory")
+            # Return empty action data for each gamestate
+            return [{
+                'mouse_movements': [],
+                'clicks': [],
+                'key_presses': [],
+                'key_releases': [],
+                'scrolls': []
+            } for _ in gamestates]
+        
+        # Convert in-memory actions to the format expected by the pipeline
+        # The pipeline expects actions.csv format, so we need to create a temporary CSV
+        import tempfile
+        import pandas as pd
+        
+        # Create temporary actions.csv with the in-memory actions
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, newline='') as temp_csv:
+            # Convert actions to DataFrame format
+            actions_df_data = []
+            for action in all_actions:
+                actions_df_data.append({
+                    'timestamp': action.get('timestamp', 0),
+                    'event_type': action.get('event_type', ''),
+                    'x_in_window': action.get('x_in_window', 0),
+                    'y_in_window': action.get('y_in_window', 0),
+                    'btn': action.get('btn', ''),
+                    'key': action.get('key', ''),
+                    'scroll_dx': action.get('scroll_dx', 0),
+                    'scroll_dy': action.get('scroll_dy', 0)
+                })
+            
+            # Write to temporary CSV
+            df = pd.DataFrame(actions_df_data)
+            df.to_csv(temp_csv.name, index=False)
+            temp_csv_path = temp_csv.name
+        
+        try:
+            # Use the existing pipeline method to extract action sequences
+            # This will properly sync actions to gamestates using the 600ms window
+            raw_action_data = extract_raw_action_data(gamestates, temp_csv_path)
+            LOG.info(f"Pipeline extracted action data for {len(raw_action_data)} gamestates")
+            return raw_action_data
+            
+        finally:
+            # Clean up temporary file
+            import os
+            try:
+                os.unlink(temp_csv_path)
+            except:
+                pass
+    
+    def _save_actions_csv_from_pipeline_data(self, gamestates: List[Dict[str, Any]], 
+                                           raw_action_data: List[Dict[str, Any]], 
+                                           csv_path: Path) -> None:
+        """
+        Save actions to CSV file using the processed pipeline data.
+        This ensures the CSV matches what the pipeline actually used.
+        """
+        import pandas as pd
+        
+        # Collect all actions from the processed pipeline data
+        all_actions = []
+        
+        for gamestate_idx, (gamestate, action_data) in enumerate(zip(gamestates, raw_action_data)):
+            gamestate_timestamp = gamestate.get('timestamp', 0)
+            
+            # Process each action type from the pipeline data
+            for move in action_data.get('mouse_movements', []):
+                all_actions.append({
+                    'timestamp': move.get('timestamp', 0),
+                    'event_type': 'move',
+                    'x_in_window': move.get('x', 0),
+                    'y_in_window': move.get('y', 0),
+                    'btn': '',
+                    'key': '',
+                    'scroll_dx': 0,
+                    'scroll_dy': 0
+                })
+            
+            for click in action_data.get('clicks', []):
+                all_actions.append({
+                    'timestamp': click.get('timestamp', 0),
+                    'event_type': 'click',
+                    'x_in_window': click.get('x', 0),
+                    'y_in_window': click.get('y', 0),
+                    'btn': click.get('button', ''),
+                    'key': '',
+                    'scroll_dx': 0,
+                    'scroll_dy': 0
+                })
+            
+            for key_press in action_data.get('key_presses', []):
+                all_actions.append({
+                    'timestamp': key_press.get('timestamp', 0),
+                    'event_type': 'key_press',
+                    'x_in_window': 0,
+                    'y_in_window': 0,
+                    'btn': '',
+                    'key': key_press.get('key', ''),
+                    'scroll_dx': 0,
+                    'scroll_dy': 0
+                })
+            
+            for key_release in action_data.get('key_releases', []):
+                all_actions.append({
+                    'timestamp': key_release.get('timestamp', 0),
+                    'event_type': 'key_release',
+                    'x_in_window': 0,
+                    'y_in_window': 0,
+                    'btn': '',
+                    'key': key_release.get('key', ''),
+                    'scroll_dx': 0,
+                    'scroll_dy': 0
+                })
+            
+            for scroll in action_data.get('scrolls', []):
+                all_actions.append({
+                    'timestamp': scroll.get('timestamp', 0),
+                    'event_type': 'scroll',
+                    'x_in_window': 0,
+                    'y_in_window': 0,
+                    'btn': '',
+                    'key': '',
+                    'scroll_dx': scroll.get('dx', 0),
+                    'scroll_dy': scroll.get('dy', 0)
+                })
+        
+        # Save to CSV
+        df = pd.DataFrame(all_actions)
+        df.to_csv(csv_path, index=False)
+        LOG.info(f"Saved actions CSV to {csv_path} with {len(all_actions)} actions")
+    
+    def _get_all_actions_in_memory(self) -> List[Dict[str, Any]]:
+        """Get all actions currently in memory from the actions service"""
+        if self.actions_service:
+            return self.actions_service.actions
+        return []

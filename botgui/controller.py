@@ -87,17 +87,17 @@ class BotController:
             # Mapping service
             self.mapping_service = MappingService(self.ui_state.data_root)
 
-            # Feature pipeline
-            self.feature_pipeline = FeaturePipeline(self.ui_state.data_root)
+            # Actions service
+            self.actions_service = ActionsService(self)
+            
+            # Feature pipeline (needs actions service for synchronization)
+            self.feature_pipeline = FeaturePipeline(self.ui_state.data_root, self.actions_service)
 
             # Predictor service
             self.predictor_service = PredictorService()
 
             # Window finder
             self.window_finder = WindowFinder()
-
-            # Actions service
-            self.actions_service = ActionsService(self)
 
             # Live source (use watchdog for instant file detection)
             gamestates_dir = Path(f"data/{self.ui_state.bot_mode}/gamestates")
@@ -478,6 +478,13 @@ class BotController:
             # Stop actions recording
             self.actions_service.stop_recording()
             
+            # Save final data for the last 10 timesteps
+            try:
+                self.feature_pipeline.save_final_data()
+                LOG.info("Successfully saved final data for sample buttons")
+            except Exception as e:
+                LOG.error(f"Failed to save final data: {e}")
+            
             # Reset stop event for next start
             self._stop.clear()
             
@@ -594,7 +601,24 @@ class BotController:
                 gs = self.gs_queue.get()           # blocks
                 
                 # Push into pipeline (extract + buffer + warm window)
+                print(f"DEBUG: controller: Processing gamestate with timestamp: {gs.get('timestamp', 'unknown')}")
+                print(f"DEBUG: controller: Gamestate keys: {list(gs.keys())[:10]}...")
+                
                 window, changed_mask, feature_names, feature_groups = self.feature_pipeline.push(gs)
+                print(f"DEBUG: controller: Feature pipeline returned window shape: {window.shape if window is not None else 'None'}")
+                print(f"DEBUG: controller: Changed mask sum: {changed_mask.sum() if changed_mask is not None else 'None'}")
+                
+                # DEBUG: Check if window data is actually changing
+                if window is not None and window.shape[0] >= 2:
+                    print(f"DEBUG: controller: T0 timestamp: {window[0, 127]}")
+                    print(f"DEBUG: controller: T1 timestamp: {window[1, 127]}")
+                    print(f"DEBUG: controller: T9 timestamp: {window[-1, 127]}")
+                    
+                    # Check if timestamps are different
+                    if window[0, 127] == window[1, 127]:
+                        print("WARNING: controller: T0 and T1 have identical timestamps!")
+                    if window[0, 127] == window[-1, 127]:
+                        print("WARNING: controller: T0 and T9 have identical timestamps!")
                 
                 # Also build synchronized action window for this gamestate timestamp
                 try:
@@ -653,8 +677,8 @@ class BotController:
         except Exception as e:
             LOG.exception("Error during shutdown")
     
-    def get_action_features(self) -> List[float]:
+    def get_action_features(self) -> List[List[float]]:
         """Get current action features for display"""
         if hasattr(self, 'actions_service'):
             return self.actions_service.get_action_features()
-        return [0.0] * 8
+        return [[0.0]] * 10  # Return 10 empty tensors for T0-T9
