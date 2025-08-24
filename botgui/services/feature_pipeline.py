@@ -95,8 +95,10 @@ class FeaturePipeline:
                 self.session_start_time = gamestate.get('timestamp', 0)
                 self.live_mode_start_time = self.session_start_time
                 
-                # Initialize the feature extractor with this session timing
+                # Initialize and PIN the feature extractor to this exact base
                 self.feature_extractor.initialize_session_timing([gamestate])
+                self.feature_extractor.session_start_time = self.session_start_time
+                self.feature_extractor.session_start_time_initialized = True
                 self.session_timing_initialized = True
             
             # Extract features using the properly initialized extractor
@@ -229,17 +231,40 @@ class FeaturePipeline:
         Returns:
             Tuple of (window, changed_mask, feature_names, feature_groups)
         """
-        # Extract window and metadata
-        window, feature_names, feature_groups = self.extract_window(gamestate)
-        
-        # Store gamestate and features for final 10 timesteps
-        self._gamestate_windows.append(gamestate)
-        self._feature_windows.append(window[-1].copy())  # Store a copy of the newest feature vector
-        
-        # Compute change mask
-        changed_mask = self.diff_mask(window)
-        
-        return window, changed_mask, feature_names, feature_groups
+        try:
+            print("🔍 DEBUG [feature_pipeline.py:230] FeaturePipeline.push called")
+            print(f"🔍 DEBUG [feature_pipeline.py:235] Gamestate keys: {list(gamestate.keys()) if gamestate else 'None'}")
+            print(f"🔍 DEBUG [feature_pipeline.py:240] Gamestate timestamp: {gamestate.get('timestamp', 'unknown') if gamestate else 'None'}")
+            
+            # Extract window and metadata
+            print("🔍 DEBUG [feature_pipeline.py:245] About to call extract_window...")
+            window, feature_names, feature_groups = self.extract_window(gamestate)
+            print(f"🔍 DEBUG [feature_pipeline.py:250] extract_window returned - window: {type(window)}, names: {len(feature_names) if feature_names else 'None'}, groups: {len(feature_groups) if feature_groups else 'None'}")
+            
+            if window is not None:
+                print(f"🔍 DEBUG [feature_pipeline.py:255] Window shape: {window.shape}")
+            else:
+                print("❌ ERROR [feature_pipeline.py:260] Window is None from extract_window")
+                return None, None, None, None
+            
+            # Store gamestate and features for final 10 timesteps
+            self._gamestate_windows.append(gamestate)
+            self._feature_windows.append(window[-1].copy())  # Store a copy of the newest feature vector
+            print("🔍 DEBUG [feature_pipeline.py:270] Stored gamestate and features in buffers")
+            
+            # Compute change mask
+            print("🔍 DEBUG [feature_pipeline.py:275] About to compute change mask...")
+            changed_mask = self.diff_mask(window)
+            print(f"🔍 DEBUG [feature_pipeline.py:280] Change mask computed - shape: {changed_mask.shape if changed_mask is not None else 'None'}")
+            
+            print("🔍 DEBUG [feature_pipeline.py:285] FeaturePipeline.push completed successfully")
+            return window, changed_mask, feature_names, feature_groups
+            
+        except Exception as e:
+            print(f"❌ ERROR [feature_pipeline.py:290] in FeaturePipeline.push: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
     
     def push_actions(self, actions: List[Dict[str, Any]], current_time_ms: Optional[float] = None) -> bool:
         """
@@ -302,6 +327,12 @@ class FeaturePipeline:
         self.session_timing_initialized = False
         self.session_start_time = None
         self.live_mode_start_time = None
+        # IMPORTANT: also reset the extractor's session timing
+        try:
+            self.feature_extractor.session_start_time = None
+            self.feature_extractor.session_start_time_initialized = False
+        except Exception:
+            pass
         LOG.info("Cleared feature buffers")
     
     def reset_session_timing(self):
@@ -309,6 +340,11 @@ class FeaturePipeline:
         self.session_timing_initialized = False
         self.session_start_time = None
         self.live_mode_start_time = None
+        try:
+            self.feature_extractor.session_start_time = None
+            self.feature_extractor.session_start_time_initialized = False
+        except Exception:
+            pass
         LOG.info("Reset session timing")
     
     def get_feature_names(self) -> List[str]:
@@ -666,3 +702,18 @@ class FeaturePipeline:
         if self.actions_service:
             return self.actions_service.actions
         return []
+
+    # --- Simple accessors for the live UI ---------------------------------
+    def get_last_gamestate_timestamp(self) -> Optional[int]:
+        """
+        Absolute timestamp (ms) of the most recent gamestate used to build T0.
+        Returns None if the buffer is empty.
+        """
+        try:
+            if self._gamestate_windows:
+                gs = self._gamestate_windows[-1]
+                ts = gs.get("timestamp")
+                return int(ts) if ts is not None else None
+        except Exception:
+            pass
+        return None

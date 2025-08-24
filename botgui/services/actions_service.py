@@ -113,21 +113,10 @@ class ActionsService:
             List of action tensors, one per timestep, in format:
             [action_count, timestamp1, type1, x1, y1, button1, key1, scroll_dx1, scroll_dy1, ...]
         """
-        # DEBUG: Show what we're working with
-        print(f"DEBUG: get_action_features called")
-        print(f"DEBUG: is_recording = {self.is_recording}")
-        print(f"DEBUG: actions list length = {len(self.actions) if self.actions else 0}")
-        if self.actions:
-            print(f"DEBUG: First 3 actions in memory: {self.actions[:3]}")
-            print(f"DEBUG: Last 3 actions in memory: {self.actions[-3:] if len(self.actions) >= 3 else self.actions}")
-        
         # FIXED: Only check if actions exist, not if recording is active
         # We should be able to access previously recorded actions even when recording is stopped
         if not self.actions:
-            print(f"DEBUG: No actions in memory, returning empty tensors")
             return [[0.0]] * 10  # Return 10 empty tensors for T0-T9
-        
-        print(f"DEBUG: Processing {len(self.actions)} actions in memory (recording status: {self.is_recording})")
         
         # FIXED: Use action timestamps instead of current gamestate timestamps
         # The actions were recorded at specific times, so we need to use those timestamps
@@ -135,21 +124,15 @@ class ActionsService:
         
         # Get the timestamp range of recorded actions
         if not self.actions:
-            print(f"DEBUG: No actions to process")
             return [[0.0]] * 10
         
         action_timestamps = [action.get('timestamp', 0) for action in self.actions]
         min_timestamp = min(action_timestamps)
         max_timestamp = max(action_timestamps)
         
-        print(f"DEBUG: Action timestamp range: {min_timestamp} to {max_timestamp}")
-        print(f"DEBUG: Total time span: {max_timestamp - min_timestamp}ms")
-        
         # Create 10 evenly spaced timesteps within the action time range
         # T0 = most recent actions, T9 = oldest actions
         timestep_duration = (max_timestamp - min_timestamp) // 10  # Duration per timestep
-        
-        print(f"DEBUG: Creating 10 timesteps, each {timestep_duration}ms long")
         
         # Create 10 timesteps (T0-T9) with 600ms windows
         action_tensors = []
@@ -170,18 +153,12 @@ class ActionsService:
             window_start = center_timestamp - 300  # 300ms before center
             window_end = center_timestamp + 300    # 300ms after center
             
-            print(f"DEBUG: Timestep {i}: center_timestamp={center_timestamp}, window={window_start}-{window_end}")
-            
             # Get actions in this window
             window_actions = []
             for action in self.actions:
                 action_timestamp = action.get('timestamp', 0)
                 if window_start <= action_timestamp <= window_end:
                     window_actions.append(action)
-            
-            print(f"DEBUG: Timestep {i}: Found {len(window_actions)} actions in window")
-            if window_actions:
-                print(f"DEBUG: Timestep {i}: Window actions: {window_actions}")
             
             # Sort actions by timestamp
             window_actions.sort(key=lambda a: a.get('timestamp', 0))
@@ -235,14 +212,10 @@ class ActionsService:
                 action_tensor.append(float(action.get('scroll_dx', 0)))
                 action_tensor.append(float(action.get('scroll_dy', 0)))
             
-            print(f"DEBUG: Timestep {i}: Created action tensor: {action_tensor}")
             action_tensors.append(action_tensor)
-        
-        print(f"DEBUG: Final action_tensors: {action_tensors}")
         
         # Count non-empty tensors
         non_empty_count = sum(1 for tensor in action_tensors if len(tensor) > 1)  # > 1 because [0] is empty
-        print(f"DEBUG: SUCCESS: Created {non_empty_count}/10 non-empty action tensors")
         
         # T0 is already most recent (index 0), T9 is oldest (index 9)
         # No need to reverse since we sorted gamestate_timestamps in reverse order
@@ -363,9 +336,11 @@ class ActionsService:
             
             if runelite_windows:
                 self.runelite_window = runelite_windows[0]
+                print(f"🎯 RUNELITE WINDOW FOUND: '{self.runelite_window.title}' at ({self.runelite_window.left}, {self.runelite_window.top}) {self.runelite_window.width}x{self.runelite_window.height}")
                 LOG.info(f"Found Runelite window: {self.runelite_window.title}")
                 return True
             
+            print("❌ RUNELITE WINDOW NOT FOUND: No Runelite windows detected")
             LOG.warning("No Runelite window found")
             return False
             
@@ -464,9 +439,7 @@ class ActionsService:
             self.action_counts['mouse_movements'] += 1
             self.action_counts['total_actions'] += 1
             
-            # DEBUG: Log what we're actually recording
-            print(f"DEBUG: RECORDED MOUSE MOVE: {action}")
-            print(f"DEBUG: Total actions in memory: {len(self.actions)}")
+
     
     def _on_mouse_click(self, x, y, button, pressed):
         """Handle mouse click events."""
@@ -499,9 +472,7 @@ class ActionsService:
             self.action_counts['clicks'] += 1
             self.action_counts['total_actions'] += 1
             
-            # DEBUG: Log what we're actually recording
-            print(f"DEBUG: RECORDED MOUSE CLICK: {action}")
-            print(f"DEBUG: Total actions in memory: {len(self.actions)}")
+
     
     def _on_mouse_scroll(self, x, y, dx, dy):
         """Handle mouse scroll events."""
@@ -528,9 +499,7 @@ class ActionsService:
             self.action_counts['scrolls'] += 1
             self.action_counts['total_actions'] += 1
             
-            # DEBUG: Log what we're actually recording
-            print(f"DEBUG: RECORDED MOUSE SCROLL: {action}")
-            print(f"DEBUG: Total actions in memory: {len(self.actions)}")
+
     
     def _on_key_press(self, key):
         """Handle key press events."""
@@ -557,9 +526,7 @@ class ActionsService:
             self.action_counts['key_presses'] += 1
             self.action_counts['total_actions'] += 1
             
-            # DEBUG: Log what we're actually recording
-            print(f"DEBUG: RECORDED KEY PRESS: {action}")
-            print(f"DEBUG: Total actions in memory: {len(self.actions)}")
+
     
     def _on_key_release(self, key):
         """Handle key release events."""
@@ -586,9 +553,7 @@ class ActionsService:
             self.action_counts['key_releases'] += 1
             self.action_counts['total_actions'] += 1
             
-            # DEBUG: Log what we're actually recording
-            print(f"DEBUG: RECORDED KEY RELEASE: {action}")
-            print(f"DEBUG: Total actions in memory: {len(self.actions)}")
+
     
     def save_actions(self, filepath: str = "data/actions.csv"):
         """Save recorded actions to CSV file."""

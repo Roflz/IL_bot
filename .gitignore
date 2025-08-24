@@ -28,6 +28,7 @@ data/gamestates/
 data/runelite_gamestates/
 data/runelite_screenshots/
 data/actions.csv
+data/recording_sessions/
 *.npy
 *.json
 !config.json

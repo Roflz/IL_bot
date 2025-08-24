@@ -237,37 +237,74 @@ class LiveView(ttk.Frame):
     
     def _on_live_view_toggle(self):
         """Handle live view toggle change"""
-        is_enabled = self.live_view_enabled.get()
-        
-        if is_enabled:
-            # Turn on live view
-            self.live_status_label.config(text="Live view is ON", foreground="#51cf66")
-            self._start_live_view()
-        else:
-            # Turn off live view
-            self.live_status_label.config(text="Live view is OFF", foreground="#a9b2bd")
-            self._stop_live_view()
+        try:
+            print(f"🔍 DEBUG [live_view.py:240] _on_live_view_toggle called")
+            is_enabled = self.live_view_enabled.get()
+            print(f"🔍 DEBUG [live_view.py:245] Live view enabled state: {is_enabled}")
+            
+            if is_enabled:
+                print("🔍 DEBUG [live_view.py:250] Turning ON live view...")
+                # Turn on live view
+                self.live_status_label.config(text="Live view is ON", foreground="#51cf66")
+                self._start_live_view()
+                print("🔍 DEBUG [live_view.py:255] Live view started successfully")
+            else:
+                print("🔍 DEBUG [live_view.py:260] Turning OFF live view...")
+                # Turn off live view
+                self.live_status_label.config(text="Live view is OFF", foreground="#a9b2bd")
+                self._stop_live_view()
+                print("🔍 DEBUG [live_view.py:265] Live view stopped successfully")
+                
+        except Exception as e:
+            print(f"❌ ERROR [live_view.py:270] in _on_live_view_toggle: {e}")
+            import traceback
+            traceback.print_exc()
+            # CRASH IMMEDIATELY - live view toggle errors can cause UI freezes
+            raise RuntimeError(f"Failed to toggle live view: {e}") from e
     
     def _start_live_view(self):
         """Start the live view functionality"""
-        # Only start if we have a detected window
-        if not self.detected_window:
-            self.live_status_label.config(text="Live view is OFF - No window detected", foreground="#ffa500")
-            self.live_view_enabled.set(False)  # Turn off the toggle
-            logger.warning("Cannot start live view: no window detected")
-            return
-        
-        # Enable auto-refresh
-        if hasattr(self, 'auto_refresh_var'):
-            self.auto_refresh_var.set(True)
-            self.auto_refresh = True
-        
-        # Start the refresh cycle
-        self._schedule_refresh()
-        
-        # Update status
-        self._update_status()
-        logger.info("Live view started")
+        try:
+            print("🔍 DEBUG [live_view.py:275] _start_live_view called")
+            
+            # Only start if we have a detected window
+            print(f"🔍 DEBUG [live_view.py:280] Checking detected_window: {self.detected_window}")
+            if not self.detected_window:
+                print("🔍 DEBUG [live_view.py:285] No window detected, disabling live view")
+                self.live_status_label.config(text="Live view is OFF - No window detected", foreground="#ffa500")
+                self.live_view_enabled.set(False)  # Turn off the toggle
+                logger.warning("Cannot start live view: no window detected")
+                return
+            
+            print("🔍 DEBUG [live_view.py:290] Window detected, enabling auto-refresh...")
+            # Enable auto-refresh
+            if hasattr(self, 'auto_refresh_var'):
+                self.auto_refresh_var.set(True)
+                self.auto_refresh = True
+                print("🔍 DEBUG [live_view.py:295] Auto-refresh enabled")
+            else:
+                print("🔍 DEBUG [live_view.py:300] No auto_refresh_var found, using direct setting")
+                self.auto_refresh = True
+            
+            print("🔍 DEBUG [live_view.py:305] About to schedule refresh...")
+            # Start the refresh cycle
+            self._schedule_refresh()
+            print("🔍 DEBUG [live_view.py:310] Refresh scheduled successfully")
+            
+            print("🔍 DEBUG [live_view.py:315] About to update status...")
+            # Update status
+            self._update_status()
+            print("🔍 DEBUG [live_view.py:320] Status updated successfully")
+            
+            logger.info("Live view started")
+            print("🔍 DEBUG [live_view.py:325] Live view started successfully")
+            
+        except Exception as e:
+            print(f"❌ ERROR [live_view.py:330] in _start_live_view: {e}")
+            import traceback
+            traceback.print_exc()
+            # CRASH IMMEDIATELY - live view start errors can cause UI freezes
+            raise RuntimeError(f"Failed to start live view: {e}") from e
     
     def _stop_live_view(self):
         """Stop the live view functionality"""
@@ -335,6 +372,24 @@ class LiveView(ttk.Frame):
     def _detect_runelite_window(self):
         """Detect Runelite windows and update the region"""
         try:
+            print("🔍 DEBUG [live_view.py:375] _detect_runelite_window called")
+            
+            # Update status to show we're working
+            self.window_status_label.config(text="Status: Detecting Runelite windows...")
+            
+            # Use after_idle to prevent GUI freeze during window detection
+            self.after_idle(self._detect_runelite_window_async)
+            
+        except Exception as e:
+            error_msg = f"Failed to start window detection: {e}"
+            self.window_status_label.config(text=f"Status: Error - {error_msg}")
+            logger.error(error_msg)
+    
+    def _detect_runelite_window_async(self):
+        """Asynchronous window detection to prevent GUI freeze"""
+        try:
+            print("🔍 DEBUG [live_view.py:390] _detect_runelite_window_async called")
+            
             # Find Runelite windows
             runelite_windows = self.window_finder.find_runelite_windows()
             
@@ -373,6 +428,8 @@ class LiveView(ttk.Frame):
                 # Update the live view toggle status - no screenshot when live mode is off
                 if hasattr(self, 'live_status_label'):
                     self.live_status_label.config(text="Live view is OFF - Window detected, toggle to start", foreground="#a9b2bd")
+                
+                print(f"🔍 DEBUG [live_view.py:420] Window detection completed successfully: {active_window['title']}")
             else:
                 self.window_status_label.config(text="Status: No active Runelite windows")
                 self.detected_window = None
@@ -382,6 +439,9 @@ class LiveView(ttk.Frame):
             error_msg = f"Failed to detect Runelite window: {e}"
             self.window_status_label.config(text=f"Status: Error - {error_msg}")
             logger.error(error_msg)
+            print(f"❌ ERROR [live_view.py:430] Window detection failed: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _update_window_status(self):
         """Update the window status display"""
@@ -399,62 +459,82 @@ class LiveView(ttk.Frame):
     
     def _capture_screenshot(self):
         """Capture a screenshot of the current region"""
-
         try:
+            print("🔍 DEBUG [live_view.py:440] _capture_screenshot called")
+            
             import pyautogui
+            print("🔍 DEBUG [live_view.py:445] pyautogui imported successfully")
             
             # Check if the window is ready
+            print("🔍 DEBUG [live_view.py:450] Checking canvas readiness...")
             if not self.canvas or not self.canvas.winfo_exists():
                 error_msg = "Canvas not ready for screenshot capture"
+                print(f"❌ ERROR [live_view.py:455] {error_msg}")
                 logger.error(error_msg)
-                print(f"ERROR: {error_msg}")
                 raise RuntimeError(error_msg)
+            print("🔍 DEBUG [live_view.py:460] Canvas check passed")
             
             # Use detected window region if available, otherwise use default
+            print(f"🔍 DEBUG [live_view.py:465] detected_window: {self.detected_window}")
             if self.detected_window:
                 left = self.detected_window['left']
                 top = self.detected_window['top']
                 width = self.detected_window['width']
                 height = self.detected_window['height']
                 region = (left, top, left + width, top + height)
+                print(f"🔍 DEBUG [live_view.py:470] Using detected window region: {region}")
             else:
                 # Use the stored region
                 left, top, right, bottom = self.region
                 width = right - left
                 height = bottom - top
                 region = (left, top, width, height)
+                print(f"🔍 DEBUG [live_view.py:475] Using stored region: {region}")
 
-            # logger.debug(f"Capturing screenshot for region: {region}")
-            
             # Validate region dimensions
+            print(f"🔍 DEBUG [live_view.py:480] Validating region dimensions: {width}x{height}")
             if width <= 0 or height <= 0:
                 error_msg = f"Invalid region dimensions: {width}x{height}"
+                print(f"❌ ERROR [live_view.py:485] {error_msg}")
                 logger.error(error_msg)
-                print(f"ERROR: {error_msg}")
                 raise RuntimeError(error_msg)
+            print("🔍 DEBUG [live_view.py:490] Region validation passed")
             
             # Take screenshot
+            print(f"🔍 DEBUG [live_view.py:495] About to capture screenshot with pyautogui...")
             screenshot = pyautogui.screenshot(region=(left, top, width, height))
-            # logger.debug(f"Screenshot captured successfully: {screenshot.size}")
+            print(f"🔍 DEBUG [live_view.py:500] Screenshot captured successfully: {screenshot.size}")
             
             # Convert to numpy array
+            print("🔍 DEBUG [live_view.py:505] Converting screenshot to numpy array...")
             self.current_image = np.array(screenshot)
+            print(f"🔍 DEBUG [live_view.py:510] Numpy array created: {self.current_image.shape}")
             
             # Convert BGR to RGB for OpenCV
+            print("🔍 DEBUG [live_view.py:515] Converting BGR to RGB...")
             self.current_image = cv2.cvtColor(self.current_image, cv2.COLOR_RGB2BGR)
+            print("🔍 DEBUG [live_view.py:520] Color conversion completed")
             
             # Update display
+            print("🔍 DEBUG [live_view.py:525] About to update display...")
             self._update_display()
+            print("🔍 DEBUG [live_view.py:530] Display updated successfully")
             
             # Update status
+            print("🔍 DEBUG [live_view.py:535] About to update status...")
             self._update_status()
             self._update_window_status()
+            print("🔍 DEBUG [live_view.py:540] Status updated successfully")
             
-            # logger.debug("Screenshot processing completed")
+            print("🔍 DEBUG [live_view.py:545] Screenshot processing completed successfully")
             
         except Exception as e:
+            print(f"❌ ERROR [live_view.py:550] in _capture_screenshot: {e}")
+            import traceback
+            traceback.print_exc()
             logger.error(f"Failed to capture screenshot: {e}")
-            raise  # Re-raise the exception to stop execution
+            # CRASH IMMEDIATELY - screenshot errors can cause UI freezes
+            raise RuntimeError(f"Failed to capture screenshot: {e}") from e
         
 
     
@@ -583,11 +663,29 @@ class LiveView(ttk.Frame):
     
     def _schedule_refresh(self):
         """Schedule the next refresh if auto-refresh is enabled"""
-        if self.auto_refresh:
-            self._pending_refresh_id = self.after(self.refresh_interval, self._refresh_display)
+        try:
+            print(f"🔍 DEBUG [live_view.py:585] _schedule_refresh called - auto_refresh: {self.auto_refresh}")
             
-            # Also refresh window detection every 5 seconds
-            self._pending_window_refresh_id = self.after(5000, self._refresh_window_detection)
+            if self.auto_refresh:
+                print(f"🔍 DEBUG [live_view.py:590] Scheduling display refresh in {self.refresh_interval}ms...")
+                self._pending_refresh_id = self.after(self.refresh_interval, self._refresh_display)
+                print(f"🔍 DEBUG [live_view.py:595] Display refresh scheduled with ID: {self._pending_refresh_id}")
+                
+                print("🔍 DEBUG [live_view.py:600] Scheduling window detection refresh in 5000ms...")
+                # Also refresh window detection every 5 seconds
+                self._pending_window_refresh_id = self.after(5000, self._refresh_window_detection)
+                print(f"🔍 DEBUG [live_view.py:605] Window detection refresh scheduled with ID: {self._pending_window_refresh_id}")
+                
+                print("🔍 DEBUG [live_view.py:610] All refresh operations scheduled successfully")
+            else:
+                print("🔍 DEBUG [live_view.py:615] Auto-refresh disabled, not scheduling")
+                
+        except Exception as e:
+            print(f"❌ ERROR [live_view.py:620] in _schedule_refresh: {e}")
+            import traceback
+            traceback.print_exc()
+            # CRASH IMMEDIATELY - refresh scheduling errors can cause UI freezes
+            raise RuntimeError(f"Failed to schedule refresh: {e}") from e
     
     def _refresh_window_detection(self):
         """Periodically refresh window detection"""
@@ -614,70 +712,96 @@ class LiveView(ttk.Frame):
     
     def _refresh_display(self):
         """Refresh the display"""
-        # logger.info(f"_refresh_display called, auto_refresh: {self.auto_refresh}")
-        
-        if self.auto_refresh:
-            # Check if the window is ready before attempting to capture
-            try:
-                # First check if the root window is ready
+        try:
+            print(f"🔍 DEBUG [live_view.py:625] _refresh_display called - auto_refresh: {self.auto_refresh}")
+            
+            if self.auto_refresh:
+                print("🔍 DEBUG [live_view.py:630] Auto-refresh enabled, checking window readiness...")
+                
+                # Check if the window is ready before attempting to capture
                 try:
-                    root = self.winfo_toplevel()
-                    if not root or not root.winfo_exists():
-                        error_msg = "Root window not ready for refresh"
+                    # First check if the root window is ready
+                    print("🔍 DEBUG [live_view.py:635] About to check root window...")
+                    try:
+                        root = self.winfo_toplevel()
+                        if not root or not root.winfo_exists():
+                            error_msg = "Root window not ready for refresh"
+                            print(f"❌ ERROR [live_view.py:640] {error_msg}")
+                            logger.error(error_msg)
+                            raise RuntimeError(error_msg)
+                        print("🔍 DEBUG [live_view.py:645] Root window check passed")
+                    except Exception as e:
+                        error_msg = f"Root window not accessible: {e}"
+                        print(f"❌ ERROR [live_view.py:650] {error_msg}")
+                        logger.error(error_msg)
+                        raise RuntimeError(error_msg)
+                    
+                    # Test if we can access the canvas dimensions
+                    print("🔍 DEBUG [live_view.py:655] About to check canvas...")
+                    if self.canvas and self.canvas.winfo_exists():
+                        print("🔍 DEBUG [live_view.py:660] Canvas exists, getting dimensions...")
+                        canvas_width = self.canvas.winfo_width()
+                        canvas_height = self.canvas.winfo_height()
+                        print(f"🔍 DEBUG [live_view.py:665] Canvas dimensions: {canvas_width}x{canvas_height}")
+                        
+                        # Only proceed if canvas has valid dimensions
+                        if canvas_width > 1 and canvas_height > 1:
+                            print("🔍 DEBUG [live_view.py:670] Canvas ready, checking detected window...")
+                            
+                            # Only capture if we have a detected window
+                            if self.detected_window:
+                                print(f"🔍 DEBUG [live_view.py:675] Window detected, frame count: {self.frame_count}")
+                                # Implement frame skipping for performance
+                                if self.frame_count % (self.skip_frames + 1) == 0:
+                                    print("🔍 DEBUG [live_view.py:680] Capturing screenshot...")
+                                    self._capture_screenshot()
+                                    
+                                    # Optimize refresh rate every 10 frames
+                                    if self.frame_count % 10 == 0:
+                                        print("🔍 DEBUG [live_view.py:685] Optimizing refresh rate...")
+                                        self._optimize_refresh_rate()
+                                else:
+                                    print(f"🔍 DEBUG [live_view.py:690] Skipping frame {self.frame_count}")
+                                    # Skip this frame
+                                    pass
+                                
+                                self.frame_count += 1
+                                
+                                # Schedule next refresh (but only if still enabled)
+                                if self.auto_refresh:
+                                    print(f"🔍 DEBUG [live_view.py:700] Scheduling next refresh in {self.refresh_interval}ms...")
+                                    self._pending_refresh_id = self.after(self.refresh_interval, self._refresh_display)
+                                    print(f"🔍 DEBUG [live_view.py:705] Next refresh scheduled with ID: {self._pending_refresh_id}")
+                            else:
+                                print("🔍 DEBUG [live_view.py:710] No window detected, showing placeholder...")
+                                # Show placeholder text when no window is detected
+                                self._show_placeholder()
+                        else:
+                            # Canvas not ready - show error and fail
+                            error_msg = f"Canvas dimensions invalid: {canvas_width}x{canvas_height}"
+                            print(f"❌ ERROR [live_view.py:720] {error_msg}")
+                            logger.error(error_msg)
+                            raise RuntimeError(error_msg)
+                    else:
+                        # Canvas doesn't exist - show error and fail
+                        error_msg = "Canvas does not exist or is not ready"
+                        print(f"❌ ERROR [live_view.py:725] {error_msg}")
                         logger.error(error_msg)
                         raise RuntimeError(error_msg)
                 except Exception as e:
-                    error_msg = f"Root window not accessible: {e}"
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg)
+                    print(f"❌ ERROR [live_view.py:730] Canvas refresh failed: {e}")
+                    logger.error(f"Canvas refresh failed: {e}")
+                    raise
+            else:
+                print("🔍 DEBUG [live_view.py:735] Auto-refresh is disabled, not refreshing")
+                pass
                 
-                # Test if we can access the canvas dimensions
-                if self.canvas and self.canvas.winfo_exists():
-                    canvas_width = self.canvas.winfo_width()
-                    canvas_height = self.canvas.winfo_height()
-                    # logger.debug(f"Canvas dimensions: {canvas_width}x{canvas_height}")
-                    
-                    # Only proceed if canvas has valid dimensions
-                    if canvas_width > 1 and canvas_height > 1:
-                        # logger.debug("Canvas ready, capturing screenshot...")
-                        
-                        # Only capture if we have a detected window
-                        if self.detected_window:
-                            # Implement frame skipping for performance
-                            if self.frame_count % (self.skip_frames + 1) == 0:
-                                self._capture_screenshot()
-                                
-                                # Optimize refresh rate every 10 frames
-                                if self.frame_count % 10 == 0:
-                                    self._optimize_refresh_rate()
-                            else:
-                                # Skip this frame
-                                pass
-                            
-                            self.frame_count += 1
-                            
-                            # Schedule next refresh (but only if still enabled)
-                            if self.auto_refresh:
-                                self._pending_refresh_id = self.after(self.refresh_interval, self._refresh_display)
-                        else:
-                            # Show placeholder text when no window is detected
-                            self._show_placeholder()
-                    else:
-                        # Canvas not ready - show error and fail
-                        error_msg = f"Canvas dimensions invalid: {canvas_width}x{canvas_height}"
-                        logger.error(error_msg)
-                        raise RuntimeError(error_msg)
-                else:
-                    # Canvas doesn't exist - show error and fail
-                    error_msg = "Canvas does not exist or is not ready"
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg)
-            except Exception as e:
-                logger.error(f"Canvas refresh failed: {e}")
-                raise
-        else:
-            # logger.debug("Auto-refresh is disabled, not refreshing")
-            pass
+        except Exception as e:
+            print(f"❌ ERROR [live_view.py:740] in _refresh_display: {e}")
+            import traceback
+            traceback.print_exc()
+            # CRASH IMMEDIATELY - display refresh errors can cause UI freezes
+            raise RuntimeError(f"Failed to refresh display: {e}") from e
         
 
     

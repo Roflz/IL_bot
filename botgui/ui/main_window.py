@@ -17,6 +17,7 @@ from .views.predictions_view import PredictionsView
 from .views.live_view import LiveView
 
 
+
 class MainWindow:
     """Main window that builds the UI and connects to the controller"""
 
@@ -31,7 +32,12 @@ class MainWindow:
         self._build_menu()
         self._build_main_pane()
         self._build_status_bar()
+        
 
+
+        # Initialize view state
+        self.live_view_visible = True  # Track live view visibility
+        
         # Bind window events
         self._bind_events()
 
@@ -89,6 +95,8 @@ class MainWindow:
         view_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="View", menu=view_menu)
         
+        # View toggle
+        view_menu.add_command(label="Toggle Live View", command=self._toggle_live_view)
         view_menu.add_separator()
         
         # Create BooleanVar for Show Translations with proper master
@@ -113,45 +121,53 @@ class MainWindow:
         container.grid_columnconfigure(0, weight=1)
 
         # Vertical paned window: top = live, bottom = notebook
-        paned = ttk.PanedWindow(container, orient="vertical")
-        paned.grid(row=0, column=0, sticky="nsew")
+        self.paned = ttk.PanedWindow(container, orient="vertical")
+        self.paned.grid(row=0, column=0, sticky="nsew")
 
         # ---- Top: Live View ----
-        live_frame = ttk.LabelFrame(paned, text="Live View", padding=(6, 6))
-        live_frame.grid_rowconfigure(0, weight=1)
-        live_frame.grid_columnconfigure(0, weight=1)
+        self.live_frame = ttk.LabelFrame(self.paned, text="Live View", padding=(6, 6))
+        self.live_frame.grid_rowconfigure(0, weight=1)
+        self.live_frame.grid_columnconfigure(0, weight=1)
 
         # Single LiveView instance without toolbar
         self.views = {}
-        self.views['live'] = LiveView(live_frame, controller=self.controller, show_toolbar=False)
+        self.views['live'] = LiveView(self.live_frame, controller=self.controller, show_toolbar=False)
         self.views['live'].grid(row=0, column=0, sticky="nsew")
 
         # ---- Bottom: Notebook frame only ----
-        notebook_frame = ttk.Frame(paned)
-        notebook_frame.grid_rowconfigure(0, weight=1)
-        notebook_frame.grid_columnconfigure(0, weight=1)
+        self.notebook_frame = ttk.Frame(self.paned)
+        self.notebook_frame.grid_rowconfigure(0, weight=1)
+        self.notebook_frame.grid_columnconfigure(0, weight=1)
         
-        notebook = ttk.Notebook(notebook_frame)
-        notebook.grid(row=0, column=0, sticky="nsew")
+        self.notebook = ttk.Notebook(self.notebook_frame)
+        self.notebook.grid(row=0, column=0, sticky="nsew")
 
-        self.views['logs'] = LogsView(notebook, controller=self.controller)
-        notebook.add(self.views['logs'], text="Bot Logs")
+        self.views['logs'] = LogsView(self.notebook, controller=self.controller)
+        self.notebook.add(self.views['logs'], text="Bot Logs")
 
-        self.views['live_features'] = LiveFeaturesView(notebook, controller=self.controller)
-        notebook.add(self.views['live_features'], text="Live Features")
+        self.views['live_features'] = LiveFeaturesView(self.notebook, controller=self.controller)
+        self.notebook.add(self.views['live_features'], text="Live Features")
 
-        self.views['predictions'] = PredictionsView(notebook, controller=self.controller)
-        notebook.add(self.views['predictions'], text="Predictions")
+        self.views['predictions'] = PredictionsView(self.notebook, controller=self.controller)
+        self.notebook.add(self.views['predictions'], text="Predictions")
 
         # Add panes to vertical PanedWindow (top:bottom ≈ 70:30 for more bottom space)
-        paned.add(live_frame, weight=7)
-        paned.add(notebook_frame, weight=3)
+        self.paned.add(self.live_frame, weight=7)
+        self.paned.add(self.notebook_frame, weight=3)
+        
+        # Verify panes were added correctly
+        panes = self.paned.panes()
+        print(f"🔍 DEBUG [main_window.py:155] Panes after addition: {panes}")
+        print(f"🔍 DEBUG [main_window.py:156] live_frame: {self.live_frame}")
+        print(f"🔍 DEBUG [main_window.py:157] notebook_frame: {self.notebook_frame}")
         
         # Set minimum sizes after adding panes
         try:
-            paned.paneconfig(live_frame, minsize=220)
-            paned.paneconfig(notebook_frame, minsize=180)
-        except Exception:
+            self.paned.paneconfig(self.live_frame, minsize=220)
+            self.paned.paneconfig(self.notebook_frame, minsize=180)
+            print("🔍 DEBUG [main_window.py:162] Pane configuration successful")
+        except Exception as e:
+            print(f"⚠️ WARNING [main_window.py:165] Pane configuration failed: {e}")
             pass
 
         def _set_vertical_sash():
@@ -159,10 +175,10 @@ class MainWindow:
                 # Ensure geometry is realized before measuring
                 self.root.update_idletasks()
                 # Prefer paned height; fall back to parent/root if needed
-                h = paned.winfo_height() or container.winfo_height() or self.root.winfo_height()
+                h = self.paned.winfo_height() or container.winfo_height() or self.root.winfo_height()
                 # Put ~65% to the top pane; never let top be below 220px
                 pos = max(220, int(h * 0.65))
-                paned.sashpos(0, pos)
+                self.paned.sashpos(0, pos)
             except Exception:
                 # Be robust: don't crash layout on startup
                 pass
@@ -171,7 +187,7 @@ class MainWindow:
         self.root.after_idle(_set_vertical_sash)
         self.root.after(300, _set_vertical_sash)
 
-        self.notebook = notebook
+
 
         # Register views with controller
         self.controller.bind_views(
@@ -341,7 +357,9 @@ class MainWindow:
             logger.info("Searching for windows that start with 'RuneLite' (capital R and L)")
             
             # Use the window finder to detect Runelite windows
+            print(f"🔍 MAIN WINDOW: Using window finder to detect Runelite windows...")
             runelite_windows = self.controller.window_finder.find_runelite_windows()
+            print(f"🔍 MAIN WINDOW: Window finder returned {len(runelite_windows)} Runelite windows")
             logger.info(f"Window finder returned {len(runelite_windows)} Runelite windows")
             
             if not runelite_windows:
@@ -366,6 +384,7 @@ class MainWindow:
                 return
             
             # Get the best window (active, then non-minimized, then first available)
+            print(f"🔍 MAIN WINDOW: Getting best Runelite window...")
             logger.info("Getting best Runelite window...")
             best_window = self.controller.window_finder.get_active_runelite_window()
             
@@ -551,6 +570,137 @@ class MainWindow:
         if 'live_features' in self.views:
             self.views['live_features'].update_translations_state(self.show_translations_var.get())
 
+    def _toggle_live_view(self):
+        """Toggle the live view visibility and auto-stretch tabs when hidden"""
+        try:
+            print(f"🔍 DEBUG [main_window.py:565] _toggle_live_view called - current state: {self.live_view_visible}")
+            print(f"🔍 DEBUG [main_window.py:570] About to check live_view_visible: {self.live_view_visible}")
+            
+            # First, validate that we have a proper PanedWindow and panes
+            print("🔍 DEBUG [main_window.py:575] Validating PanedWindow setup...")
+            if not hasattr(self, 'paned') or not self.paned:
+                error_msg = "PanedWindow not initialized"
+                print(f"❌ ERROR [main_window.py:580] {error_msg}")
+                raise RuntimeError(error_msg)
+            
+            # Check if frames are actually added as panes
+            print("🔍 DEBUG [main_window.py:585] Checking if frames are panes...")
+            panes = self.paned.panes()
+            print(f"🔍 DEBUG [main_window.py:590] Current panes: {panes}")
+            print(f"🔍 DEBUG [main_window.py:591] live_frame: {self.live_frame}")
+            print(f"🔍 DEBUG [main_window.py:592] notebook_frame: {self.notebook_frame}")
+            print(f"🔍 DEBUG [main_window.py:593] live_frame in panes: {self.live_frame in panes}")
+            print(f"🔍 DEBUG [main_window.py:594] notebook_frame in panes: {self.notebook_frame in panes}")
+            
+            if self.live_frame not in panes:
+                error_msg = f"live_frame not found in panes: {panes}"
+                print(f"❌ ERROR [main_window.py:595] {error_msg}")
+                raise RuntimeError(error_msg)
+                
+            if self.notebook_frame not in panes:
+                error_msg = f"notebook_frame not found in panes: {panes}"
+                print(f"❌ ERROR [main_window.py:600] {error_msg}")
+                raise RuntimeError(error_msg)
+            
+            print("🔍 DEBUG [main_window.py:605] Pane validation passed")
+            
+            if self.live_view_visible:
+                print("🔍 DEBUG [main_window.py:610] Hiding live view...")
+                
+                # Hide the live view by setting its weight to 0
+                print("🔍 DEBUG [main_window.py:615] About to set live_frame weight to 0...")
+                self.paned.paneconfig(self.live_frame, weight=0)
+                print("🔍 DEBUG [main_window.py:620] About to hide live_frame with grid_remove...")
+                self.live_frame.grid_remove()  # Hide the frame
+                print("🔍 DEBUG [main_window.py:625] About to set live_view_visible to False...")
+                self.live_view_visible = False
+                
+                # Make the notebook frame fill the entire paned window
+                print("🔍 DEBUG [main_window.py:630] About to set notebook_frame weight to 1...")
+                self.paned.paneconfig(self.notebook_frame, weight=1)
+                
+                print("🔍 DEBUG [main_window.py:635] About to update status...")
+                self.update_status("Live view hidden - tabs expanded", "info")
+                print("🔽 Live view hidden - tabs now fill the entire window")
+                print("🔍 DEBUG [main_window.py:640] Live view hide completed successfully")
+                
+            else:
+                print("🔍 DEBUG [main_window.py:645] Showing live view...")
+                
+                # Show the live view by restoring its weight and making it visible
+                print("🔍 DEBUG [main_window.py:650] About to show live_frame with grid()...")
+                self.live_frame.grid()  # Show the frame
+                print("🔍 DEBUG [main_window.py:655] About to set live_frame weight to 7...")
+                self.paned.paneconfig(self.live_frame, weight=7)
+                print("🔍 DEBUG [main_window.py:660] About to set notebook_frame weight to 3...")
+                self.paned.paneconfig(self.notebook_frame, weight=3)
+                
+                # Restore minimum sizes
+                print("🔍 DEBUG [main_window.py:665] About to restore minimum sizes...")
+                try:
+                    self.paned.paneconfig(self.live_frame, minsize=220)
+                    self.paned.paneconfig(self.notebook_frame, minsize=180)
+                    print("🔍 DEBUG [main_window.py:670] Minimum sizes restored successfully")
+                except Exception as e:
+                    print(f"⚠️ WARNING [main_window.py:675] Failed to restore minimum sizes: {e}")
+                
+                # Restore the sash position
+                print("🔍 DEBUG [main_window.py:680] About to schedule sash position restoration...")
+                self.root.after_idle(self._restore_sash_position)
+                print("🔍 DEBUG [main_window.py:685] Sash position restoration scheduled")
+                
+                print("🔍 DEBUG [main_window.py:690] About to set live_view_visible to True...")
+                self.live_view_visible = True
+                print("🔍 DEBUG [main_window.py:695] About to update status...")
+                self.update_status("Live view restored", "info")
+                print("🔼 Live view restored - normal layout")
+                print("🔍 DEBUG [main_window.py:700] Live view show completed successfully")
+                
+        except Exception as e:
+            print(f"❌ ERROR [main_window.py:705] in _toggle_live_view: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Fallback: try to restore normal state
+            print("🔍 DEBUG [main_window.py:710] Attempting fallback recovery...")
+            try:
+                self.live_frame.grid()
+                self.paned.paneconfig(self.live_frame, weight=7)
+                self.paned.paneconfig(self.notebook_frame, weight=3)
+                self.live_view_visible = True
+                print("🔍 DEBUG [main_window.py:715] Fallback recovery completed")
+            except Exception as fallback_e:
+                print(f"❌ CRITICAL ERROR [main_window.py:720] Fallback recovery failed: {fallback_e}")
+                import traceback
+                traceback.print_exc()
+                # CRASH IMMEDIATELY - UI layout errors are critical
+                raise RuntimeError(f"Failed to toggle live view and fallback recovery failed: {e} -> {fallback_e}") from e
+    
+    def _restore_sash_position(self):
+        """Restore the sash position when showing live view"""
+        try:
+            print("🔍 DEBUG [main_window.py:610] _restore_sash_position called")
+            print("🔍 DEBUG [main_window.py:615] About to call root.update_idletasks()...")
+            self.root.update_idletasks()
+            print("🔍 DEBUG [main_window.py:620] About to get paned window height...")
+            h = self.paned.winfo_height()
+            print(f"🔍 DEBUG [main_window.py:625] Paned window height: {h}")
+            
+            if h > 0:
+                pos = max(220, int(h * 0.65))
+                print(f"🔍 DEBUG [main_window.py:630] About to set sash position to: {pos}")
+                self.paned.sashpos(0, pos)
+                print("🔍 DEBUG [main_window.py:635] Sash position restored successfully")
+            else:
+                print("🔍 DEBUG [main_window.py:640] Paned window height is 0, skipping sash position restore")
+                
+        except Exception as e:
+            print(f"❌ ERROR [main_window.py:645] in _restore_sash_position: {e}")
+            import traceback
+            traceback.print_exc()
+            # CRASH IMMEDIATELY - sash position errors can cause UI freezes
+            raise RuntimeError(f"Failed to restore sash position: {e}") from e
+
     def _show_about(self):
         """Show about dialog"""
         about_text = """Bot Controller GUI v1.0.0
@@ -606,27 +756,30 @@ Built with Tkinter and following MVC architecture."""
     def update_status(self, message: str, level: str = "info"):
         """Update status display"""
         try:
+            print(f"🔍 DEBUG [main_window.py:720] update_status called - message: '{message}', level: {level}")
+            
             # Extract current region and position from status text
+            print("🔍 DEBUG [main_window.py:725] About to get current status text...")
             current_status = self.status_text.cget("text")
+            print(f"🔍 DEBUG [main_window.py:730] Current status text: '{current_status}'")
+            
             parts = current_status.split(" | ")
             region = parts[1] if len(parts) > 1 else "Region: 800x600"
             position = parts[2] if len(parts) > 2 else "Position: (0, 0)"
+            print(f"🔍 DEBUG [main_window.py:735] Extracted - region: '{region}', position: '{position}'")
             
-            if level == "error":
-                new_status = f"Status: {message} | {region} | {position}"
-                self.status_text.config(text=new_status)
-            elif level == "warning":
-                new_status = f"Status: {message} | {region} | {position}"
-                self.status_text.config(text=new_status)
-            elif level == "success":
-                new_status = f"Status: {message} | {region} | {position}"
-                self.status_text.config(text=new_status)
-            else:
-                new_status = f"Status: {message} | {region} | {position}"
-                self.status_text.config(text=new_status)
+            new_status = f"Status: {message} | {region} | {position}"
+            print(f"🔍 DEBUG [main_window.py:740] About to set new status: '{new_status}'")
+            
+            self.status_text.config(text=new_status)
+            print("🔍 DEBUG [main_window.py:745] Status updated successfully")
 
         except Exception as e:
-            print(f"Error updating status: {e}")
+            print(f"❌ ERROR [main_window.py:750] in update_status: {e}")
+            import traceback
+            traceback.print_exc()
+            # CRASH IMMEDIATELY - status update errors can indicate UI problems
+            raise RuntimeError(f"Failed to update status: {e}") from e
 
     def get_view(self, view_name: str):
         """Get a view by name"""

@@ -921,14 +921,18 @@ class FeatureExtractor:
         features.extend(skills_features)
         self.feature_mappings.extend(skills_mappings)
         
-        # Add timestamp feature (relative to session start, milliseconds)
+        # Feature 127: Timestamp (ms) relative to session start (used by normalizer)
         absolute_timestamp = gamestate.get('timestamp', 0)
-        relative_timestamp = self.to_relative_timestamp(absolute_timestamp)
-        features.append(relative_timestamp)
-        
-        # Store mapping for timestamp feature
+        relative_ms = self.to_relative_timestamp(absolute_timestamp)  # uses extractor.session_start_time
+        features.append(self.safe_float(relative_ms))
         self.feature_mappings.append(
-            create_feature_mapping(self.current_feature_index, "timestamp", None, None, None, "time_ms", "Timestamp")
+            create_feature_mapping(
+                self.current_feature_index,
+                "timestamp",
+                None, None, None,
+                "time_ms",   # keep as time_ms so offline /180 normalization applies
+                "System"
+            )
         )
         self.current_feature_index += 1
         

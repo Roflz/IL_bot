@@ -52,19 +52,87 @@ class MultiHeadAttention(nn.Module):
         return output
 
 class GamestateEncoder(nn.Module):
-    """Encoder for gamestate features with self-attention"""
+    """Encoder for gamestate features with feature-type-specific encoding and self-attention"""
     
     def __init__(self, input_dim: int = 128, hidden_dim: int = 256, num_heads: int = 8):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         
-        # Feature projection
-        self.feature_proj = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+        # Feature-type-specific encoders based on feature_mappings.json
+        # Group features by data type for optimal encoding
+        
+        # Continuous/Coordinate features (world_coord, camera_coord, screen_coord, angles, time)
+        self.continuous_encoder = nn.Sequential(
+            nn.Linear(1, hidden_dim // 16),  # 1 -> 16
+            nn.LayerNorm(hidden_dim // 16),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # Categorical features (item_ids, animation_ids, slot_ids, object_ids, hashed_strings)
+        # Use embeddings for proper categorical encoding
+        # Assume vocabulary size of 10000 for categorical features (can be tuned)
+        self.categorical_embedding = nn.Embedding(10000, hidden_dim // 16)
+        self.categorical_encoder = nn.Sequential(
+            nn.LayerNorm(hidden_dim // 16),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # Boolean features
+        self.boolean_encoder = nn.Sequential(
+            nn.Linear(1, hidden_dim // 16),  # 1 -> 16
+            nn.LayerNorm(hidden_dim // 16),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # Count features
+        self.count_encoder = nn.Sequential(
+            nn.Linear(1, hidden_dim // 16),  # 1 -> 16
+            nn.LayerNorm(hidden_dim // 16),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # Time features (timestamps, durations)
+        self.time_encoder = nn.Sequential(
+            nn.Linear(1, hidden_dim // 16),  # 1 -> 16
+            nn.LayerNorm(hidden_dim // 16),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # Angle features (camera pitch/yaw)
+        self.angle_encoder = nn.Sequential(
+            nn.Linear(1, hidden_dim // 16),  # 1 -> 16
+            nn.LayerNorm(hidden_dim // 16),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # Feature grouping based on feature_mappings.json - CORRECTED INDICES
+        # These indices are based on the actual feature structure analysis
+        self.continuous_indices = [0, 1, 9, 10, 11, 46, 47, 51, 52, 56, 57, 61, 62, 68, 69, 71, 72, 74, 75, 77, 78, 80, 81, 83, 84, 86, 87, 89, 90, 92, 93, 95, 96, 98, 99, 101, 102, 104, 105, 107, 108, 110, 111, 113, 114, 116, 117, 119, 120, 122, 123]  # world_coord, camera_coord, screen_coord
+        self.categorical_indices = [2, 4, 5, 6, 7, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 45, 50, 55, 60, 67, 70, 73, 76, 79, 82, 85, 88, 91, 94, 97, 100, 103, 106, 109, 112, 115, 118, 121, 124, 125, 126, 63]  # item_ids, animation_ids, object_ids, npc_ids, slot_ids, hashed_strings, etc.
+        self.boolean_indices = [3, 42, 43, 48, 53, 58]  # boolean flags
+        self.count_indices = [44, 49, 54, 59, 66]  # counts
+        self.time_indices = [8, 64, 65, 127]  # timestamps, durations
+        self.angle_indices = [12, 13]  # camera pitch/yaw
+        
+        # Feature combiner
+        self.feature_combiner = nn.Sequential(
+            nn.Linear(2048, hidden_dim),  # 51*16 + 60*16 + 6*16 + 5*16 + 4*16 + 2*16 = 2048 -> 256
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.1)
+        )
+        
+        # Feature preprocessing for proper scaling
+        self.feature_preprocessor = nn.Sequential(
+            nn.LayerNorm(input_dim),  # Normalize across the 128 features
+            nn.Dropout(0.05)  # Light dropout for regularization
         )
         
         # Self-attention layers
@@ -84,22 +152,67 @@ class GamestateEncoder(nn.Module):
         self.norm2 = nn.LayerNorm(hidden_dim)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Feature projection
-        x = self.feature_proj(x)
+        batch_size, seq_len, features = x.shape
+        
+        # Preprocess features for better training stability
+        x = self.feature_preprocessor(x)
+        
+        # Reshape to process all features: (batch_size * seq_len, features)
+        x_flat = x.view(-1, features)
+        
+        # Encode features by type
+        continuous_features = x_flat[:, self.continuous_indices]
+        categorical_features = x_flat[:, self.categorical_indices]
+        boolean_features = x_flat[:, self.boolean_indices]
+        count_features = x_flat[:, self.count_indices]
+        time_features = x_flat[:, self.time_indices]
+        angle_features = x_flat[:, self.angle_indices]
+        
+        # Encode each feature type
+        continuous_encoded = self.continuous_encoder(continuous_features.unsqueeze(-1))  # (batch*seq, n_continuous, 16)
+        
+        # Categorical features: convert to embeddings then encode
+        categorical_features_int = categorical_features.long().clamp(0, 9999)  # Ensure valid indices
+        categorical_embedded = self.categorical_embedding(categorical_features_int)  # (batch*seq, n_categorical, 16)
+        categorical_encoded = self.categorical_encoder(categorical_embedded)  # (batch*seq, n_categorical, 16)
+        
+        boolean_encoded = self.boolean_encoder(boolean_features.unsqueeze(-1))  # (batch*seq, n_boolean, 16)
+        count_encoded = self.count_encoder(count_features.unsqueeze(-1))  # (batch*seq, n_count, 16)
+        time_encoded = self.time_encoder(time_features.unsqueeze(-1))  # (batch*seq, n_time, 16)
+        angle_encoded = self.angle_encoder(angle_features.unsqueeze(-1))  # (batch*seq, n_angle, 16)
+        
+        # Flatten the encoded features: (batch*seq, n_features, 16) -> (batch*seq, n_features * 16)
+        continuous_flat = continuous_encoded.view(continuous_encoded.size(0), -1)  # (batch*seq, n_continuous * 16)
+        categorical_flat = categorical_encoded.view(categorical_encoded.size(0), -1)  # (batch*seq, n_categorical * 16)
+        boolean_flat = boolean_encoded.view(boolean_encoded.size(0), -1)  # (batch*seq, n_boolean * 16)
+        count_flat = count_encoded.view(count_encoded.size(0), -1)  # (batch*seq, n_count * 16)
+        time_flat = time_encoded.view(time_encoded.size(0), -1)  # (batch*seq, n_time * 16)
+        angle_flat = angle_encoded.view(angle_encoded.size(0), -1)  # (batch*seq, n_angle * 16)
+        
+        # Combine all encoded features
+        combined_features = torch.cat([
+            continuous_flat, categorical_flat, boolean_flat, count_flat, time_flat, angle_flat
+        ], dim=1)  # (batch*seq, total_encoded_features)
+        
+        # Final feature combination
+        x_encoded = self.feature_combiner(combined_features)  # (batch*seq, hidden_dim)
+        
+        # Reshape back: (batch_size, seq_len, hidden_dim)
+        x_encoded = x_encoded.view(batch_size, seq_len, -1)
         
         # Self-attention with residual connection
-        attn_out = self.attention1(x, x, x)
-        x = self.norm1(x + attn_out)
+        attn_out = self.attention1(x_encoded, x_encoded, x_encoded)
+        x_encoded = self.norm1(x_encoded + attn_out)
         
         # Second attention layer
-        attn_out = self.attention2(x, x, x)
-        x = self.norm1(x + attn_out)
+        attn_out = self.attention2(x_encoded, x_encoded, x_encoded)
+        x_encoded = self.norm1(x_encoded + attn_out)
         
         # Feed-forward with residual connection
-        ffn_out = self.ffn(x)
-        x = self.norm2(x + ffn_out)
+        ffn_out = self.ffn(x_encoded)
+        x_encoded = self.norm2(x_encoded + ffn_out)
         
-        return x
+        return x_encoded
 
 class ScreenshotEncoder(nn.Module):
     """CNN encoder for screenshot features"""
@@ -188,9 +301,12 @@ class CrossAttention(nn.Module):
 class ActionDecoder(nn.Module):
     """Decoder for OSRS action tensors with discrete categorical outputs"""
     
-    def __init__(self, input_dim: int = 256, max_actions: int = 100):
+    def __init__(self, input_dim: int = 256, max_actions: int = 100, 
+                 screen_width: int = 1920, screen_height: int = 1080):
         super().__init__()
         self.max_actions = max_actions
+        self.screen_width = screen_width
+        self.screen_height = screen_height
         
         # Shared feature processing
         self.shared_features = nn.Sequential(
@@ -215,8 +331,9 @@ class ActionDecoder(nn.Module):
         # Button head (categorical: 0,1,2,3) - 4 categories  
         self.button_head = nn.Linear(input_dim, (max_actions + 1) * 4)
         
-        # Key head (categorical) - use key categories
-        self.key_head = nn.Linear(input_dim, (max_actions + 1) * 4)  # Assuming 4 key categories
+        # Key head (categorical) - use key categories + 0 for "no key"
+        # Based on key_mapper.py: ~150 key categories + 1 for "no key" = 151 total
+        self.key_head = nn.Linear(input_dim, (max_actions + 1) * 151)
         
         # Scroll heads (categorical: -1,0,1) - use tanh + sign
         self.scroll_x_head = nn.Linear(input_dim, max_actions + 1)
@@ -241,9 +358,9 @@ class ActionDecoder(nn.Module):
         x_coord_raw = torch.sigmoid(self.x_coord_head(shared))  # (batch_size, max_actions + 1)
         y_coord_raw = torch.sigmoid(self.y_coord_head(shared))  # (batch_size, max_actions + 1)
         
-        # Scale to reasonable coordinate range (e.g., 0-800 for screen coordinates)
-        x_coord_output = torch.round(x_coord_raw * 800).float()  # (batch_size, max_actions + 1)
-        y_coord_output = torch.round(y_coord_raw * 600).float()  # (batch_size, max_actions + 1)
+        # Scale to screen dimensions and round to integers
+        x_coord_output = torch.round(x_coord_raw * self.screen_width).float()  # (batch_size, max_actions + 1)
+        y_coord_output = torch.round(y_coord_raw * self.screen_height).float()  # (batch_size, max_actions + 1)
         
         # 4. Button (categorical: 0,1,2,3)
         button_logits = self.button_head(shared)  # (batch_size, (max_actions + 1) * 4)
@@ -251,9 +368,9 @@ class ActionDecoder(nn.Module):
         button_probs = F.softmax(button_logits, dim=-1)
         button_output = torch.argmax(button_probs, dim=-1).float()  # (batch_size, max_actions + 1)
         
-        # 5. Key (categorical) - use key categories
-        key_logits = self.key_head(shared)  # (batch_size, (max_actions + 1) * 4)
-        key_logits = key_logits.view(batch_size, self.max_actions + 1, 4)
+        # 5. Key (categorical) - use key categories + 0 for "no key"
+        key_logits = self.key_head(shared)  # (batch_size, (max_actions + 1) * 151)
+        key_logits = key_logits.view(batch_size, self.max_actions + 1, 151)
         key_probs = F.softmax(key_logits, dim=-1)
         key_output = torch.argmax(key_probs, dim=-1).float()  # (batch_size, max_actions + 1)
         
@@ -287,13 +404,17 @@ class ImitationHybridModel(nn.Module):
                  action_dim: int = 8,       # Action features per timestep
                  sequence_length: int = 10,
                  hidden_dim: int = 256,
-                 num_attention_heads: int = 8):
+                 num_attention_heads: int = 8,
+                 screen_width: int = 1920,  # Screen width for coordinate scaling
+                 screen_height: int = 1080): # Screen height for coordinate scaling
         super().__init__()
         
         self.gamestate_dim = gamestate_dim
         self.action_dim = action_dim
         self.sequence_length = sequence_length
         self.hidden_dim = hidden_dim
+        self.screen_width = screen_width
+        self.screen_height = screen_height
         
         # 1. Gamestate Feature Encoder (128 -> 256)
         self.gamestate_encoder = GamestateEncoder(
@@ -302,13 +423,70 @@ class ImitationHybridModel(nn.Module):
             num_heads=num_attention_heads
         )
         
-        # 2. Action Sequence Encoder (8 -> 128)
+        # 2. Action Sequence Encoder - Feature-type-specific encoding (8 -> 128)
         # Input: (batch_size, 10, 101, 8) -> Output: (batch_size, 10, 101, hidden_dim // 2)
-        self.action_encoder = nn.Sequential(
-            nn.Linear(action_dim, hidden_dim // 2),
+        # Features: [timestamp, type, x, y, button, key, scroll_dx, scroll_dy]
+        
+        # Timestamp encoder (continuous) - raw output, no activation
+        self.timestamp_encoder = nn.Sequential(
+            nn.Linear(1, hidden_dim // 16),  # 1 -> 16
+            nn.LayerNorm(hidden_dim // 16),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # Action type encoder (categorical: 0,1,2,3) - 4 classes: move, click, key, scroll
+        self.action_type_embedding = nn.Embedding(4, hidden_dim // 16)  # 4 categories -> 16 dims
+        self.action_type_encoder = nn.Sequential(
+            nn.LayerNorm(hidden_dim // 16),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # Coordinate encoders (continuous) - sigmoid + rounding for discrete integers
+        self.coordinate_encoder = nn.Sequential(
+            nn.Linear(1, hidden_dim // 16),  # x or y -> 16
+            nn.LayerNorm(hidden_dim // 16),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # Button encoder (categorical: 0,1,2,3) - 4 classes: none, left, right, middle
+        self.button_embedding = nn.Embedding(4, hidden_dim // 16)  # 4 categories -> 16 dims
+        self.button_encoder = nn.Sequential(
+            nn.LayerNorm(hidden_dim // 16),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # Key encoder (categorical: 151 classes including "no key")
+        self.key_embedding = nn.Embedding(151, hidden_dim // 16)  # 151 categories -> 16 dims
+        self.key_encoder = nn.Sequential(
+            nn.LayerNorm(hidden_dim // 16),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # Scroll encoder (categorical: -1, 0, 1) - tanh + sign for discrete values
+        self.scroll_encoder = nn.Sequential(
+            nn.Linear(1, hidden_dim // 16),  # dx or dy -> 16
+            nn.LayerNorm(hidden_dim // 16),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # Combine all encoded features
+        self.feature_combiner = nn.Sequential(
+            nn.Linear(128, hidden_dim // 2),  # 8 * 16 = 128 -> 128
             nn.LayerNorm(hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(0.1)
+        )
+        
+        # Feature preprocessing for proper scaling
+        self.feature_preprocessor = nn.Sequential(
+            nn.LayerNorm(8),  # Normalize across the 8 features
+            nn.Dropout(0.05)  # Light dropout for regularization
         )
         
         # 2b. Action Sequence LSTM - Process actions within each timestep
@@ -351,7 +529,7 @@ class ImitationHybridModel(nn.Module):
         )
         
         # 5. Action Decoder (Multi-Head)
-        self.action_decoder = ActionDecoder(input_dim=hidden_dim, max_actions=100)
+        self.action_decoder = ActionDecoder(input_dim=hidden_dim, max_actions=100, screen_width=screen_width, screen_height=screen_height)
         
         # Initialize weights
         self._init_weights()
@@ -401,8 +579,54 @@ class ImitationHybridModel(nn.Module):
         # Reshape to process all actions: (batch_size * 10 * 101, 8)
         action_sequence_flat = action_sequence.view(-1, action_features)
         
-        # Encode each action: (batch_size * 10 * 101, hidden_dim//2)
-        action_encoded_flat = self.action_encoder(action_sequence_flat)
+        # Preprocess features for better training stability
+        action_sequence_flat = self.feature_preprocessor(action_sequence_flat)
+        
+        # Feature-type-specific encoding: (batch_size * 10 * 101, 8) -> (batch_size * 10 * 101, hidden_dim//2)
+        # Features: [timestamp, type, x, y, button, key, scroll_dx, scroll_dy]
+        
+        # Extract individual features
+        timestamp_features = action_sequence_flat[:, 0:1]      # (batch*10*101, 1)
+        action_type_features = action_sequence_flat[:, 1:2]    # (batch*10*101, 1)
+        x_coord_features = action_sequence_flat[:, 2:3]       # (batch*10*101, 1)
+        y_coord_features = action_sequence_flat[:, 3:4]       # (batch*10*101, 1)
+        button_features = action_sequence_flat[:, 4:5]         # (batch*10*101, 1)
+        key_features = action_sequence_flat[:, 5:6]            # (batch*10*101, 1)
+        scroll_dx_features = action_sequence_flat[:, 6:7]      # (batch*10*101, 1)
+        scroll_dy_features = action_sequence_flat[:, 7:8]      # (batch*10*101, 1)
+        
+        # Encode each feature type
+        timestamp_encoded = self.timestamp_encoder(timestamp_features)           # (batch*10*101, 16)
+        
+        # Categorical features: use embeddings
+        action_type_features_int = action_type_features.squeeze(-1).long().clamp(0, 3)  # 4 categories
+        action_type_embedded = self.action_type_embedding(action_type_features_int)  # (batch*10*101, 16)
+        action_type_encoded = self.action_type_encoder(action_type_embedded)  # (batch*10*101, 16)
+        
+        # Encode coordinates separately to maintain consistent dimensions
+        x_coord_encoded = self.coordinate_encoder(x_coord_features)  # (batch*10*101, 16)
+        y_coord_encoded = self.coordinate_encoder(y_coord_features)  # (batch*10*101, 16)
+        
+        button_features_int = button_features.squeeze(-1).long().clamp(0, 3)  # 4 categories
+        button_embedded = self.button_embedding(button_features_int)  # (batch*10*101, 16)
+        button_encoded = self.button_encoder(button_embedded)  # (batch*10*101, 16)
+        
+        key_features_int = key_features.squeeze(-1).long().clamp(0, 150)  # 151 categories
+        key_embedded = self.key_embedding(key_features_int)  # (batch*10*101, 16)
+        key_encoded = self.key_encoder(key_embedded)  # (batch*10*101, 16)
+        
+        # Encode scroll features separately to maintain consistent dimensions
+        scroll_dx_encoded = self.scroll_encoder(scroll_dx_features)  # (batch*10*101, 16)
+        scroll_dy_encoded = self.scroll_encoder(scroll_dy_features)  # (batch*10*101, 16)
+        
+        # Combine all encoded features
+        combined_features = torch.cat([
+            timestamp_encoded, action_type_encoded, x_coord_encoded, y_coord_encoded,
+            button_encoded, key_encoded, scroll_dx_encoded, scroll_dy_encoded
+        ], dim=1)  # (batch*10*101, 128) - 8 features * 16 dims each
+        
+        # Final feature combination
+        action_encoded_flat = self.feature_combiner(combined_features)  # (batch*10*101, hidden_dim//2)
         
         # Reshape back: (batch_size, 10, 101, hidden_dim//2)
         action_encoded = action_encoded_flat.view(batch_size, seq_len, num_actions, -1)
@@ -461,7 +685,9 @@ class ImitationHybridModel(nn.Module):
             'trainable_parameters': trainable_params,
             'gamestate_dim': self.gamestate_dim,
             'sequence_length': self.sequence_length,
-            'hidden_dim': self.hidden_dim
+            'hidden_dim': self.hidden_dim,
+            'screen_width': self.screen_width,
+            'screen_height': self.screen_height
         }
 
 def create_model(config: Dict = None) -> ImitationHybridModel:
@@ -472,7 +698,9 @@ def create_model(config: Dict = None) -> ImitationHybridModel:
             'action_dim': 8,       # Action features per timestep
             'sequence_length': 10,
             'hidden_dim': 256,
-            'num_attention_heads': 8
+            'num_attention_heads': 8,
+            'screen_width': 1920,  # Default screen width
+            'screen_height': 1080  # Default screen height
         }
     
     model = ImitationHybridModel(**config)

@@ -62,8 +62,13 @@ class WindowFinder:
                     # logger.debug(f"Filtered out non-Runelite window: {title}")
                     pass
             
-            # logger.info(f"Search term used: '{search_term}'")
-            # logger.info(f"Found {len(runelite_windows)} Runelite window(s)")
+            print(f"🔍 RUNELITE WINDOW DETECTION: Found {len(runelite_windows)} Runelite window(s)")
+            if runelite_windows:
+                for i, window in enumerate(runelite_windows):
+                    print(f"   Window {i+1}: '{window['title']}' at ({window['left']}, {window['top']}) {window['width']}x{window['height']}")
+            else:
+                print("   No Runelite windows found - make sure RuneLite is running")
+            
             return runelite_windows
             
         except Exception as e:

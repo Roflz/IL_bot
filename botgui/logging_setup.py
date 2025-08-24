@@ -14,7 +14,7 @@ if not hasattr(logging, "TRACE"):
     logging.Logger.trace = trace
 
 
-def init_logging(level=logging.DEBUG):
+def init_logging(level=logging.INFO):
     """Initialize global logging configuration"""
     # Env switch: BOTGUI_TRACE=1 -> TRACE level globally
     if os.environ.get("BOTGUI_TRACE") == "1":

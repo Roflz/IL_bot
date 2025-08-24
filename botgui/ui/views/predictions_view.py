@@ -211,10 +211,9 @@ class PredictionsView(ttk.Frame):
                 # Store the full paths for later use
                 self.model_paths = {model[0]: model[1] for model in models_found}
                 
-                # Select first model by default if none selected
-                if not self.model_var.get() and models_found:
-                    self.model_var.set(models_found[0][0])
-                    self._on_model_selection_change()
+                # Don't auto-select models to avoid startup errors
+                # User can manually select a model when they want to use it
+                print(f"Models available: {[m[0] for m in models_found]}")
                 
                 print(f"Found {len(models_found)} models: {[m[0] for m in models_found]}")
             else:
@@ -243,21 +242,42 @@ class PredictionsView(ttk.Frame):
                 print(f"Loading selected model: {model_path}")
                 
                 # Load the model through the controller
-                success = self.controller.load_model(model_path)
-                
-                if success:
-                    # Update status
-                    self.status_label.config(text=f"Model Loaded: {Path(selected_model).name}")
-                    print(f"Successfully loaded model: {selected_model}")
-                else:
-                    # Reset selection on failure
-                    self.model_var.set("")
-                    self.status_label.config(text="Status: Failed to load model")
-                    print(f"Failed to load model: {selected_model}")
+                try:
+                    success = self.controller.load_model(model_path)
                     
-                    # Show error message
+                    if success:
+                        # Update status
+                        self.status_label.config(text=f"Model Loaded: {Path(selected_model).name}")
+                        print(f"Successfully loaded model: {selected_model}")
+                    else:
+                        # Reset selection on failure
+                        self.model_var.set("")
+                        self.status_label.config(text="Status: Failed to load model")
+                        print(f"Failed to load model: {selected_model}")
+                        
+                        # Show informative error message
+                        from tkinter import messagebox
+                        messagebox.showwarning("Model Loading Failed", 
+                            f"Could not load model: {Path(selected_model).name}\n\n"
+                            f"This is normal if you haven't trained a model yet.\n"
+                            f"Train a model first, then select it here for predictions.", 
+                            parent=self)
+                except Exception as e:
+                    # Reset selection on error
+                    self.model_var.set("")
+                    self.status_label.config(text="Status: Model loading error")
+                    print(f"Exception loading model {selected_model}: {e}")
+                    
+                    # Show informative error message
                     from tkinter import messagebox
-                    messagebox.showerror("Error", f"Failed to load model: {selected_model}", parent=self)
+                    messagebox.showinfo("No Model Available", 
+                        f"Model file not found: {Path(selected_model).name}\n\n"
+                        f"This is normal if you haven't trained a model yet.\n"
+                        f"The GUI will work without a model - you can:\n"
+                        f"• Record training data using the Recorder tab\n"
+                        f"• View live features in the Live Features tab\n"
+                        f"• Train a model, then come back here for predictions", 
+                        parent=self)
             else:
                 print(f"Model path not found for: {selected_model}")
                 
