@@ -48,9 +48,14 @@ def extract_action_sequences(gamestates: List[Dict], actions_file: str = "data/a
         # Use absolute timestamp for action window calculation
         gamestate_timestamp = gamestate.get('timestamp', 0)
         
-        # Find actions in the 600ms window BEFORE this gamestate
-        window_start = gamestate_timestamp - action_window_ms
-        window_end = gamestate_timestamp
+        # Find actions in a window that includes both before and after the gamestate
+        # This is more realistic since actions can happen before (anticipation) or after (response) gamestate changes
+        window_start = gamestate_timestamp - action_window_ms // 2
+        window_end = gamestate_timestamp + action_window_ms // 2
+        
+        # Debug: log the first few gamestates and their action windows
+        if i < 5:
+            print(f"  Gamestate {i}: timestamp={gamestate_timestamp}, window=[{window_start}, {window_end}]")
         
         # Get actions in this window
         window_actions = actions_df[
@@ -58,12 +63,35 @@ def extract_action_sequences(gamestates: List[Dict], actions_file: str = "data/a
             (actions_df['timestamp'] <= window_end)
         ].copy()
         
+        # If no actions found in the window, try to find the closest actions
+        if len(window_actions) == 0:
+            # Find the closest action before and after this gamestate
+            actions_before = actions_df[actions_df['timestamp'] < gamestate_timestamp].copy()
+            actions_after = actions_df[actions_df['timestamp'] > gamestate_timestamp].copy()
+            
+            if len(actions_before) > 0:
+                # Get the most recent action before this gamestate
+                closest_before = actions_before.iloc[-1]
+                window_actions = pd.DataFrame([closest_before])
+                print(f"    No actions in window, using closest before: {closest_before['timestamp']}")
+            elif len(actions_after) > 0:
+                # Get the earliest action after this gamestate
+                closest_after = actions_after.iloc[0]
+                window_actions = pd.DataFrame([closest_after])
+                print(f"    No actions in window, using closest after: {closest_after['timestamp']}")
+        
+        # Debug: log action counts for first few gamestates
+        if i < 5:
+            print(f"    Found {len(window_actions)} actions in window")
+            if len(window_actions) > 0:
+                print(f"    Action timestamps: {window_actions['timestamp'].tolist()[:3]}")
+        
         # Sort by timestamp
         window_actions = window_actions.sort_values('timestamp')
         
         # Keep absolute timestamps instead of converting to relative
         # window_actions['relative_timestamp'] = (
-        #     (window_actions['timestamp'] - window_start) * 1000
+        #     (actions_df['timestamp'] - window_start) * 1000
         # ).astype(int)
         
         # Create action sequence
@@ -557,6 +585,66 @@ def _convert_key_code(code: int) -> str:
         return ''
     # You may want to expand this based on your actual key encoding
     return str(code)
+
+
+def convert_extracted_actions_to_normalized_format(extracted_actions: List[Dict]) -> List[Dict]:
+    """
+    Convert extracted action sequences to the normalized format expected by normalize_action_data.
+    
+    Args:
+        extracted_actions: List of action sequence dictionaries from extract_action_sequences
+        
+    Returns:
+        List of normalized action data dictionaries with categorized actions
+    """
+    print("Converting extracted actions to normalized format...")
+    
+    normalized_actions = []
+    
+    for action_sequence in extracted_actions:
+        # Initialize normalized gamestate with empty action lists
+        normalized_gamestate = {
+            'mouse_movements': [],
+            'clicks': [],
+            'key_presses': [],
+            'key_releases': [],
+            'scrolls': []
+        }
+        
+        # Process each action in the sequence
+        for action in action_sequence.get('actions', []):
+            event_type = action.get('event_type', 'move')
+            
+            # Create normalized action with proper field names
+            normalized_action = {
+                'timestamp': action.get('timestamp', 0),
+                'x': action.get('x_in_window', 0),
+                'y': action.get('y_in_window', 0),
+                'btn': action.get('btn', ''),
+                'key': action.get('key', ''),
+                'dx': action.get('scroll_dx', 0),
+                'dy': action.get('scroll_dy', 0)
+            }
+            
+            # Categorize action by type
+            if event_type == 'move':
+                normalized_gamestate['mouse_movements'].append(normalized_action)
+            elif event_type == 'click':
+                normalized_gamestate['clicks'].append(normalized_action)
+            elif event_type == 'key_press':
+                normalized_gamestate['key_presses'].append(normalized_action)
+            elif event_type == 'key_release':
+                normalized_gamestate['key_releases'].append(normalized_action)
+            elif event_type == 'scroll':
+                normalized_gamestate['scrolls'].append(normalized_action)
+            else:
+                # Unknown event type, treat as move
+                normalized_gamestate['mouse_movements'].append(normalized_action)
+        
+        normalized_actions.append(normalized_gamestate)
+    
+    print(f"Converted {len(normalized_actions)} action sequences to normalized format")
+    return normalized_actions
 
 
 def create_live_training_sequences(feature_window: np.ndarray, 

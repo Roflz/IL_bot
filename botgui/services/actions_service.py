@@ -71,7 +71,7 @@ class ActionsService:
         self.actions.clear()
         self.action_counts = {k: 0 for k in self.action_counts.keys()}
         
-        # Set session start time
+        # Use a session-relative time origin for action events
         self.current_session_start = int(time.time() * 1000)
         
         # Find Runelite window
@@ -420,10 +420,13 @@ class ActionsService:
         self.last_move_time = current_time
         
         rel_x, rel_y = self._get_relative_coordinates(x, y)
-        timestamp = int(current_time * 1000)
+        ts_abs = int(current_time * 1000)
+        t_sess = ts_abs - self.current_session_start
         
         action = {
-            'timestamp': timestamp,
+            'timestamp': t_sess,  # legacy column (session-relative)
+            'timestamp_abs_ms': ts_abs,
+            't_session_ms': t_sess,
             'event_type': 'move',
             'x_in_window': rel_x,
             'y_in_window': rel_y,
@@ -451,12 +454,15 @@ class ActionsService:
             return
         
         rel_x, rel_y = self._get_relative_coordinates(x, y)
-        timestamp = int(time.time() * 1000)
+        ts_abs = int(time.time() * 1000)
+        t_sess = ts_abs - self.current_session_start
         
         button_name = str(button).split('.')[-1] if button else ''
         
         action = {
-            'timestamp': timestamp,
+            'timestamp': t_sess,
+            'timestamp_abs_ms': ts_abs,
+            't_session_ms': t_sess,
             'event_type': 'click',
             'x_in_window': rel_x,
             'y_in_window': rel_y,
@@ -480,10 +486,13 @@ class ActionsService:
             return
         
         rel_x, rel_y = self._get_relative_coordinates(x, y)
-        timestamp = int(time.time() * 1000)
+        ts_abs = int(time.time() * 1000)
+        t_sess = ts_abs - self.current_session_start
         
         action = {
-            'timestamp': timestamp,
+            'timestamp': t_sess,
+            'timestamp_abs_ms': ts_abs,
+            't_session_ms': t_sess,
             'event_type': 'scroll',
             'x_in_window': rel_x,
             'y_in_window': rel_y,
@@ -506,11 +515,14 @@ class ActionsService:
         if not self.is_recording or not self._check_window_focus():
             return
         
-        timestamp = int(time.time() * 1000)
+        ts_abs = int(time.time() * 1000)
+        t_sess = ts_abs - self.current_session_start
         key_name = str(key).replace("'", "") if hasattr(key, 'char') and key.char else str(key)
         
         action = {
-            'timestamp': timestamp,
+            'timestamp': t_sess,
+            'timestamp_abs_ms': ts_abs,
+            't_session_ms': t_sess,
             'event_type': 'key_press',
             'x_in_window': 0,
             'y_in_window': 0,
@@ -533,11 +545,14 @@ class ActionsService:
         if not self.is_recording or not self._check_window_focus():
             return
         
-        timestamp = int(time.time() * 1000)
+        ts_abs = int(time.time() * 1000)
+        t_sess = ts_abs - self.current_session_start
         key_name = str(key).replace("'", "") if hasattr(key, 'char') and key.char else str(key)
         
         action = {
-            'timestamp': timestamp,
+            'timestamp': t_sess,
+            'timestamp_abs_ms': ts_abs,
+            't_session_ms': t_sess,
             'event_type': 'key_release',
             'x_in_window': 0,
             'y_in_window': 0,
@@ -565,10 +580,14 @@ class ActionsService:
             Path(filepath).parent.mkdir(parents=True, exist_ok=True)
             
             with open(filepath, 'w', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=[
-                    'timestamp', 'event_type', 'x_in_window', 'y_in_window',
-                    'btn', 'key', 'scroll_dx', 'scroll_dy'
-                ])
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
+                        'timestamp_abs_ms', 't_session_ms', 'timestamp',
+                        'event_type', 'x_in_window', 'y_in_window',
+                        'btn', 'key', 'scroll_dx', 'scroll_dy'
+                    ],
+                )
                 writer.writeheader()
                 writer.writerows(self.actions)
             

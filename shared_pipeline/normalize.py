@@ -215,11 +215,30 @@ def normalize_action_data(raw_action_data: List[Dict], normalized_features: Opti
     Returns:
         List of normalized action data dictionaries
     """
-    print("Normalizing action data: timestamps already relative ms; scaling by /180 only...")
+    print("Normalizing action data: converting absolute timestamps to session-relative and scaling by /180...")
 
     if normalized_features is None:
         print("Warning: No normalized features available, returning raw action data")
         return raw_action_data
+
+    # Find the session start time from the first gamestate's actions
+    session_start_time = None
+    for action_data in raw_action_data:
+        for action_type in ['mouse_movements', 'clicks', 'key_presses', 'key_releases', 'scrolls']:
+            for action in action_data.get(action_type, []):
+                timestamp = action.get('timestamp', 0)
+                if timestamp > 0:
+                    if session_start_time is None or timestamp < session_start_time:
+                        session_start_time = timestamp
+                    break
+            if session_start_time is not None:
+                break
+        if session_start_time is not None:
+            break
+    
+    if session_start_time is None:
+        print("Warning: Could not determine session start time, using 0")
+        session_start_time = 0
 
     normalized_action_data = []
     
@@ -231,8 +250,10 @@ def normalize_action_data(raw_action_data: List[Dict], normalized_features: Opti
         for move in action_data.get('mouse_movements', []):
             normalized_move = move.copy()
 
-            # Divide by 180 (timestamps are already relative ms)
-            normalized_move['timestamp'] = move.get('timestamp', 0) / 180.0
+            # Convert absolute timestamp to session-relative, then divide by 180
+            absolute_timestamp = move.get('timestamp', 0)
+            relative_timestamp = (absolute_timestamp - session_start_time) / 180.0
+            normalized_move['timestamp'] = relative_timestamp
             
             # Preserve original screen coordinates (no normalization)
             # x and y remain as original pixel values
@@ -246,8 +267,10 @@ def normalize_action_data(raw_action_data: List[Dict], normalized_features: Opti
         for click in action_data.get('clicks', []):
             normalized_click = click.copy()
 
-            # Divide by 180
-            normalized_click['timestamp'] = click.get('timestamp', 0) / 180.0
+            # Convert absolute timestamp to session-relative, then divide by 180
+            absolute_timestamp = click.get('timestamp', 0)
+            relative_timestamp = (absolute_timestamp - session_start_time) / 180.0
+            normalized_click['timestamp'] = relative_timestamp
             
             # Preserve original screen coordinates (no normalization)
             # x and y remain as original pixel values
@@ -261,8 +284,10 @@ def normalize_action_data(raw_action_data: List[Dict], normalized_features: Opti
         for key_press in action_data.get('key_presses', []):
             normalized_key = key_press.copy()
 
-            # Divide by 180
-            normalized_key['timestamp'] = key_press.get('timestamp', 0) / 180.0
+            # Convert absolute timestamp to session-relative, then divide by 180
+            absolute_timestamp = key_press.get('timestamp', 0)
+            relative_timestamp = (absolute_timestamp - session_start_time) / 180.0
+            normalized_key['timestamp'] = relative_timestamp
             
             # Keep key info as-is (no normalization)
             normalized_key_presses.append(normalized_key)
@@ -274,8 +299,10 @@ def normalize_action_data(raw_action_data: List[Dict], normalized_features: Opti
         for key_release in action_data.get('key_releases', []):
             normalized_key = key_release.copy()
 
-            # Divide by 180
-            normalized_key['timestamp'] = key_release.get('timestamp', 0) / 180.0
+            # Convert absolute timestamp to session-relative, then divide by 180
+            absolute_timestamp = key_release.get('timestamp', 0)
+            relative_timestamp = (absolute_timestamp - session_start_time) / 180.0
+            normalized_key['timestamp'] = relative_timestamp
             
             # Keep key info as-is (no normalization)
             normalized_key_releases.append(normalized_key)
@@ -287,8 +314,10 @@ def normalize_action_data(raw_action_data: List[Dict], normalized_features: Opti
         for scroll in action_data.get('scrolls', []):
             normalized_scroll = scroll.copy()
 
-            # Divide by 180
-            normalized_scroll['timestamp'] = scroll.get('timestamp', 0) / 180.0
+            # Convert absolute timestamp to session-relative, then divide by 180
+            absolute_timestamp = scroll.get('timestamp', 0)
+            relative_timestamp = (absolute_timestamp - session_start_time) / 180.0
+            normalized_scroll['timestamp'] = relative_timestamp
             
             # Keep scroll deltas as-is (no normalization)
             normalized_scrolls.append(normalized_scroll)
@@ -298,7 +327,7 @@ def normalize_action_data(raw_action_data: List[Dict], normalized_features: Opti
         normalized_action_data.append(normalized_gamestate)
     
     print(f"Action data normalized for {len(normalized_action_data)} gamestates")
-    print(f"  - Timestamps divided by 180 (input already relative ms)")
+    print(f"  - Timestamps converted from absolute to session-relative, then divided by 180")
     print(f"  - Screen coordinates preserved as original pixel values")
     print(f"  - Scroll deltas preserved as original pixel values")
     print(f"  - Key information preserved as original values")

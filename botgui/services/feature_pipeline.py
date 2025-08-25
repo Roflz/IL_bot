@@ -69,6 +69,9 @@ class FeaturePipeline:
         self.session_start_time = None
         self.session_timing_initialized = False
         self.live_mode_start_time = None  # When live mode started (for relative timing)
+        # Wall-clock ↔ gamestate clock alignment
+        self.session_wallclock_at_start_ms = None
+        self.wallclock_to_gs_offset_ms = 0
         
         # Action window processing utilities
         self._encoder = self.action_encoder
@@ -94,6 +97,10 @@ class FeaturePipeline:
                 # The first gamestate becomes time 0
                 self.session_start_time = gamestate.get('timestamp', 0)
                 self.live_mode_start_time = self.session_start_time
+                # Capture wall-clock at the moment we latched session_start_time
+                import time as _time
+                self.session_wallclock_at_start_ms = int(_time.time() * 1000)
+                self.wallclock_to_gs_offset_ms = int(self.session_start_time) - int(self.session_wallclock_at_start_ms)
                 
                 # Initialize and PIN the feature extractor to this exact base
                 self.feature_extractor.initialize_session_timing([gamestate])
@@ -327,6 +334,8 @@ class FeaturePipeline:
         self.session_timing_initialized = False
         self.session_start_time = None
         self.live_mode_start_time = None
+        self.session_wallclock_at_start_ms = None
+        self.wallclock_to_gs_offset_ms = 0
         # IMPORTANT: also reset the extractor's session timing
         try:
             self.feature_extractor.session_start_time = None
@@ -340,6 +349,8 @@ class FeaturePipeline:
         self.session_timing_initialized = False
         self.session_start_time = None
         self.live_mode_start_time = None
+        self.session_wallclock_at_start_ms = None
+        self.wallclock_to_gs_offset_ms = 0
         try:
             self.feature_extractor.session_start_time = None
             self.feature_extractor.session_start_time_initialized = False
@@ -717,3 +728,357 @@ class FeaturePipeline:
         except Exception:
             pass
         return None
+
+    # ---------------------- Offline Prep (normalize & sequences) ----------------------
+    def prepare_session_training_data(self, session_dir: Path, out_dir: Path | None = None) -> Path:
+        """
+        Normalize a session and build training sequences.
+        Inputs:  <session_dir>/features.csv, <session_dir>/actions.csv, <session_dir>/gamestates/*.json
+        Outputs: <out_dir>/
+          - features_raw.npy             (N, 128)
+          - features_norm.npy            (N, 128)
+          - X_gs_norm.npy                (S, 10, 128)
+          - y_actions_norm_padded.npy    (S, 101, 8)        # targets at NEXT timestep
+          - action_input_sequences_padded.npy (S, 10, 101, 8)  # actions for last 10 steps
+          - meta.json
+        Returns: Path to the prepared directory.
+        """
+        from pathlib import Path as _Path
+        import numpy as np, pandas as pd, json
+        # Prefer shared_pipeline imports if available; otherwise fall back to local modules.
+        try:
+            from shared_pipeline.io_offline import load_gamestates
+            from shared_pipeline.sequences import create_temporal_sequences
+        except Exception:
+            from .io_offline import load_gamestates
+            from .sequences import create_temporal_sequences
+        # normalize_features / normalize_action_data / convert_raw_actions_to_tensors were imported at top
+        session_dir = _Path(session_dir)
+        out_dir = _Path(out_dir) if out_dir is not None else session_dir / "prepared"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1) Load features.csv -> (N,128)
+        fcsv = pd.read_csv(session_dir / "features.csv")
+        if "timestamp" in fcsv.columns:
+            feat_mat = fcsv.drop(columns=["timestamp"]).to_numpy(dtype=float)
+        else:
+            feat_mat = fcsv.to_numpy(dtype=float)
+        np.save(out_dir / "features_raw.npy", feat_mat.astype(np.float32))
+
+        # 2) Normalize features (uses your mappings in data/05_mappings or data/features)
+        #    The function itself finds/uses its default mapping path if not given.
+        feat_norm = normalize_features(feat_mat)
+        np.save(out_dir / "features_norm.npy", feat_norm.astype(np.float32))
+
+        gamestates = load_gamestates(str(session_dir / "gamestates"))
+        LOG.info(f"[prep] Loaded {len(gamestates)} gamestates")
+        if gamestates:
+            LOG.info(f"[prep] First gamestate keys: {list(gamestates[0].keys())}")
+            if "timestamp" in gamestates[0]:
+                LOG.info(f"[prep] First gamestate timestamp: {gamestates[0]['timestamp']}")
+
+        # --- Canonicalize actions timing & schema ---
+        # We maintain BOTH absolute and session-relative timestamps,
+        # but downstream extraction uses a guaranteed-good CSV.
+        import sys
+        import os
+        # Add parent directory to path to find timebase module
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        from timebase import SessionClock, coerce_action_columns, infer_session_start_abs_ms, ABS_THRESHOLD  # type: ignore
+
+        actions_csv = session_dir / "actions.csv"
+        actions_path_for_extraction = str(actions_csv)
+        try:
+            import pandas as pd
+            # Load existing files
+            _adf = pd.read_csv(actions_csv) if actions_csv.exists() else pd.DataFrame()
+            _fcsv = pd.read_csv(session_dir / "features.csv") if (session_dir / "features.csv").exists() else pd.DataFrame()
+            
+            LOG.info(f"[prep] Actions CSV: {len(_adf)} rows, columns: {list(_adf.columns)}")
+            if not _adf.empty:
+                LOG.info(f"[prep] Actions CSV timestamp range: {_adf['timestamp'].min()} to {_adf['timestamp'].max()}")
+                LOG.info(f"[prep] Actions CSV event types: {_adf['event_type'].value_counts().to_dict()}")
+            
+            LOG.info(f"[prep] Actions CSV columns: {list(_adf.columns)}")
+            LOG.info(f"[prep] Actions CSV shape: {_adf.shape}")
+            if not _adf.empty and "timestamp" in _adf.columns:
+                _ts_sample = pd.to_numeric(_adf["timestamp"], errors="coerce").dropna()
+                if len(_ts_sample) > 0:
+                    LOG.info(f"[prep] Legacy timestamp sample: min={_ts_sample.min()}, max={_ts_sample.max()}, 95th percentile={_ts_sample.quantile(0.95)}")
+
+            # Infer absolute session start from meta/gamestates/features
+            try:
+                import json as _json
+                _meta = None
+                _meta_path = session_dir / "meta.json"
+                if _meta_path.exists():
+                    _meta = _json.loads(_meta_path.read_text())
+            except Exception:
+                _meta = None
+            _session_start_abs = infer_session_start_abs_ms(gamestates, meta=_meta, features_df=_fcsv)
+            LOG.info(f"[prep] Inferred session_start_abs_ms: {_session_start_abs}")
+            if _session_start_abs is None:
+                raise RuntimeError("Cannot determine session_start_abs_ms from meta/gamestates/features.")
+
+            _clock = SessionClock(session_start_abs_ms=_session_start_abs)
+
+            # Normalize names / ensure required columns
+            _adf = coerce_action_columns(_adf)
+
+            # Derive session-relative & absolute timestamp columns
+            # First, check if we have existing timestamp data and determine what it represents
+            _ts_rel = None
+            _ts_abs = None
+            
+            # Check if we already have the new columns
+            if "t_session_ms" in _adf.columns and pd.to_numeric(_adf["t_session_ms"], errors="coerce").max() > 0:
+                _ts_rel = pd.to_numeric(_adf["t_session_ms"], errors="coerce")
+                _ts_abs = _clock.to_absolute(_ts_rel)
+            elif "timestamp_abs_ms" in _adf.columns and pd.to_numeric(_adf["timestamp_abs_ms"], errors="coerce").max() > 0:
+                _ts_abs = pd.to_numeric(_adf["timestamp_abs_ms"], errors="coerce")
+                _ts_rel = _clock.to_session(_ts_abs)
+            elif "timestamp" in _adf.columns and pd.to_numeric(_adf["timestamp"], errors="coerce").max() > 0:
+                # Legacy timestamp - assume it's session-relative if it's small numbers
+                _ts_legacy = pd.to_numeric(_adf["timestamp"], errors="coerce")
+                if _ts_legacy.quantile(0.95) < ABS_THRESHOLD:
+                    # Small numbers, treat as session-relative
+                    _ts_rel = _ts_legacy
+                    _ts_abs = _clock.to_absolute(_ts_rel)
+                else:
+                    # Large numbers, treat as absolute
+                    _ts_abs = _ts_legacy
+                    _ts_rel = _clock.to_session(_ts_abs)
+            
+            # Ensure we have both columns
+            if _ts_rel is not None:
+                _adf["t_session_ms"] = _ts_rel.astype("int64")
+                LOG.info(f"[prep] Using existing session-relative timestamps: min={_ts_rel.min()}, max={_ts_rel.max()}")
+            else:
+                _adf["t_session_ms"] = 0
+                LOG.info(f"[prep] No session-relative timestamps found, using 0")
+                
+            if _ts_abs is not None:
+                _adf["timestamp_abs_ms"] = _ts_abs.astype("int64")
+                LOG.info(f"[prep] Using existing absolute timestamps: min={_ts_abs.min()}, max={_ts_abs.max()}")
+            else:
+                _adf["timestamp_abs_ms"] = _session_start_abs
+                LOG.info(f"[prep] No absolute timestamps found, using session_start_abs={_session_start_abs}")
+
+            # Duplicate columns some extractors expect
+            if "x" not in _adf.columns and "x_in_window" in _adf.columns: _adf["x"] = _adf["x_in_window"]
+            if "y" not in _adf.columns and "y_in_window" in _adf.columns: _adf["y"] = _adf["y_in_window"]
+            if "dx" not in _adf.columns and "scroll_dx" in _adf.columns: _adf["dx"] = _adf["scroll_dx"]
+            if "dy" not in _adf.columns and "scroll_dy" in _adf.columns: _adf["dy"] = _adf["scroll_dy"]
+
+            # Save canonical (session-relative) & an absolute-timestamp temp CSV for current extractor
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "actions_canonical.csv").write_text(_adf.to_csv(index=False))
+            _adf_export = _adf.copy()
+            _adf_export["timestamp"] = _adf_export["timestamp_abs_ms"]
+            LOG.info(f"[prep] Export dataframe timestamp range: {_adf_export['timestamp'].min()} to {_adf_export['timestamp'].max()}")
+            LOG.info(f"[prep] Export dataframe columns: {list(_adf_export.columns)}")
+            LOG.info(f"[prep] Export dataframe sample (first 3 rows):")
+            LOG.info(f"[prep] {_adf_export.head(3).to_string()}")
+            _tmp_path = out_dir / "actions_abs_tmp.csv"
+            _adf_export.to_csv(_tmp_path, index=False)
+            actions_path_for_extraction = str(_tmp_path)
+            LOG.info(f"[prep] Actions path for extraction: {actions_path_for_extraction}")
+            LOG.info(f"[prep] Temp CSV has {len(_adf_export)} rows")
+
+            # Sanity log: actions per 600ms window before first few gamestates
+            try:
+                _win = 600
+                _ts_series = pd.to_numeric(_adf["t_session_ms"], errors="coerce").fillna(0).astype("int64")
+                LOG.info(f"[prep] Final actions dataframe: {len(_adf)} rows, columns: {list(_adf.columns)}")
+                LOG.info(f"[prep] Final t_session_ms range: {_ts_series.min()} to {_ts_series.max()}")
+                for _i, _gs in enumerate(gamestates[:5]):
+                    _t0 = int(_gs.get("timestamp", 0))
+                    _t0 = (_t0 - _session_start_abs) if _t0 > ABS_THRESHOLD else _t0
+                    _n = ((_ts_series >= (_t0 - _win)) & (_ts_series < _t0)).sum()
+                    LOG.info(f"[prep] gs#{_i:02d} @ t={_t0}ms -> {_n} actions in previous {_win}ms")
+            except Exception as __e:
+                LOG.debug(f"Sanity log failed: {__e}")
+        except Exception as _e:
+            LOG.warning(f"Could not canonicalize actions.csv: {_e}")
+
+        # Build raw action windows (absolute timestamps expected by extractor)
+        from shared_pipeline.actions import extract_action_sequences as _extract_actions  # try shared
+        try:
+            LOG.info(f"[prep] Extracting actions with shared pipeline from {actions_path_for_extraction}")
+            raw_actions = _extract_actions(gamestates, actions_file=actions_path_for_extraction)
+            LOG.info(f"[prep] Shared pipeline extracted {len(raw_actions)} action windows")
+        except Exception as e:
+            LOG.warning(f"[prep] Shared pipeline failed: {e}, trying local")
+            from .actions import extract_action_sequences as _extract_actions_local
+            raw_actions = _extract_actions_local(gamestates, actions_file=actions_path_for_extraction)
+            LOG.info(f"[prep] Local pipeline extracted {len(raw_actions)} action windows")
+
+        # Guardrail: log empty windows before normalization
+        try:
+            _empty = 0
+            for _w in raw_actions:
+                try:
+                    _empty += (len(_w) == 0)
+                except Exception:
+                    pass
+            if _empty:
+                LOG.warning(f"[prep] {_empty} empty action windows detected before normalization")
+            
+            # Debug: log raw actions details
+            LOG.info(f"[prep] Raw actions: {len(raw_actions)} windows")
+            if raw_actions:
+                try:
+                    LOG.info(f"[prep] First window: {len(raw_actions[0])} actions")
+                    if len(raw_actions[0]) > 0:
+                        LOG.info(f"[prep] First action sample: {raw_actions[0][0]}")
+                except (IndexError, KeyError, TypeError) as e:
+                    LOG.info(f"[prep] First window structure: {type(raw_actions[0])} - {raw_actions[0]}")
+        except Exception:
+            pass
+
+        # 4) Convert extracted actions to normalized format, then normalize and convert to tensors
+        from shared_pipeline.actions import convert_extracted_actions_to_normalized_format
+        normalized_format_actions = convert_extracted_actions_to_normalized_format(raw_actions)
+        norm_action_data = normalize_action_data(normalized_format_actions, feat_norm)
+        LOG.info(f"[prep] Normalized action data: {len(norm_action_data)} windows")
+        if norm_action_data:
+            try:
+                LOG.info(f"[prep] First normalized window: {len(norm_action_data[0])} actions")
+                if len(norm_action_data[0]) > 0:
+                    LOG.info(f"[prep] First normalized action sample: {norm_action_data[0][0]}")
+            except (IndexError, KeyError, TypeError) as e:
+                LOG.info(f"[prep] First normalized window structure: {type(norm_action_data[0])} - {norm_action_data[0]}")
+        else:
+            LOG.warning(f"[prep] norm_action_data is empty!")
+        
+        action_tensors = convert_raw_actions_to_tensors(norm_action_data, self._encoder)
+        LOG.info(f"[prep] Action tensors: {len(action_tensors)} windows")
+        if action_tensors:
+            try:
+                LOG.info(f"[prep] First tensor window: {len(action_tensors[0])} actions")
+                if len(action_tensors[0]) > 0:
+                    LOG.info(f"[prep] First tensor action sample: {action_tensors[0][0]}")
+            except (IndexError, KeyError, TypeError) as e:
+                LOG.info(f"[prep] First tensor window structure: {type(action_tensors[0])} - {action_tensors[0]}")
+        else:
+            LOG.warning(f"[prep] action_tensors is empty!")
+
+        # 5) Build temporal sequences (10-step)
+        LOG.info(f"[prep] Creating temporal sequences with feat_norm.shape={feat_norm.shape}, action_tensors={len(action_tensors)}")
+        X_seq, y_seq, action_input_seq = create_temporal_sequences(
+            feat_norm, action_tensors, sequence_length=10
+        )
+        np.save(out_dir / "X_gs_norm.npy", X_seq.astype(np.float32))
+        
+        # Debug: log temporal sequence details
+        LOG.info(f"[prep] Temporal sequences: X={X_seq.shape}, y={len(y_seq)}, action_input={len(action_input_seq)}")
+        if y_seq:
+            LOG.info(f"[prep] First y_seq: {len(y_seq[0]) if y_seq[0] else 0} elements")
+            if y_seq[0] and len(y_seq[0]) > 0:
+                LOG.info(f"[prep] First y_seq sample: {y_seq[0][:5] if len(y_seq[0]) >= 5 else y_seq[0]}")
+        else:
+            LOG.warning(f"[prep] y_seq is empty!")
+        
+        if action_input_seq:
+            LOG.info(f"[prep] First action_input_seq: {len(action_input_seq[0]) if action_input_seq[0] else 0} elements")
+            if action_input_seq[0] and len(action_input_seq[0]) > 0:
+                LOG.info(f"[prep] First action_input_seq sample: {action_input_seq[0][:5] if len(action_input_seq[0]) >= 5 else action_input_seq[0]}")
+        else:
+            LOG.warning(f"[prep] action_input_seq is empty!")
+
+        # ==== Correct padding (shapes) ====
+        # Infer per-action event width (E)
+        def _infer_event_width(example):
+            # example is a flattened list: [count, e1_f1,...,e1_fE, e2_f1,...]
+            try:
+                cnt = int(example[0]) if len(example) > 0 else 0
+                rest = max(0, len(example) - 1)
+                result = (rest // max(1, cnt)) if cnt > 0 else 8
+                LOG.debug(f"[prep] _infer_event_width: example={example[:5] if len(example) >= 5 else example}, cnt={cnt}, rest={rest}, result={result}")
+                return result
+            except Exception as e:
+                LOG.debug(f"[prep] _infer_event_width: exception {e}, returning default 8")
+                return 8
+        E = 8
+        for ex in (y_seq[0:1] or []):
+            if ex:
+                E = _infer_event_width(ex)
+                LOG.info(f"[prep] Inferred event width: E={E}")
+            else:
+                LOG.info(f"[prep] No examples in y_seq to infer event width, using default E={E}")
+        MAX_EVENTS = 100
+
+        def pad_target(flat_vec, max_events=MAX_EVENTS, e=E):
+            """Pad a single 'next-step' target window to (max_events+1, e)."""
+            out = np.zeros((max_events + 1, e), dtype=np.float32)
+            if flat_vec is None or len(flat_vec) == 0:
+                LOG.debug(f"[prep] pad_target: flat_vec is None or empty")
+                return out
+            cnt = int(flat_vec[0]) if len(flat_vec) > 0 else 0
+            LOG.debug(f"[prep] pad_target: count={cnt}, flat_vec length={len(flat_vec)}")
+            out[0, 0] = float(cnt)
+            if cnt <= 0:
+                LOG.debug(f"[prep] pad_target: count <= 0, returning zeros")
+                return out
+            data = np.asarray(flat_vec[1:], dtype=np.float32)
+            # Copy at most max_events actions
+            m = min(cnt, max_events)
+            needed = m * e
+            if data.size < needed:
+                # If encoder emitted fewer elements than expected, trim m
+                m = data.size // e
+                needed = m * e
+            if m > 0:
+                out[1:1 + m, :] = data[:needed].reshape(m, e)
+                LOG.debug(f"[prep] pad_target: copied {m} actions, data shape={data[:needed].shape}")
+            else:
+                LOG.debug(f"[prep] pad_target: no actions to copy, m={m}")
+            return out
+
+        def pad_seq10(seq10, max_events=MAX_EVENTS, e=E):
+            """Pad a 10-step list of flattened windows to (10, max_events+1, e)."""
+            arr = np.zeros((10, max_events + 1, e), dtype=np.float32)
+            if not seq10:
+                LOG.debug(f"[prep] pad_seq10: seq10 is empty, returning zeros")
+                return arr
+            T = min(10, len(seq10))
+            LOG.debug(f"[prep] pad_seq10: processing {T} timesteps")
+            for t in range(T):
+                arr[t] = pad_target(seq10[t], max_events, e)
+            return arr
+
+        # Targets (NEXT timestep): (S, 101, E)
+        LOG.info(f"[prep] Padding {len(y_seq)} y_seq elements with E={E}, MAX_EVENTS={MAX_EVENTS}")
+        y_actions_norm_padded = np.stack(
+            [pad_target(v) for v in y_seq], axis=0
+        )
+        LOG.info(f"[prep] Final y_actions_norm_padded shape: {y_actions_norm_padded.shape}")
+        LOG.info(f"[prep] Non-zero counts in first sequence: {np.count_nonzero(y_actions_norm_padded[0])}")
+        np.save(out_dir / "y_actions_norm_padded.npy", y_actions_norm_padded)
+
+        # Action inputs for last 10 steps: (S, 10, 101, E)
+        LOG.info(f"[prep] Padding {len(action_input_seq)} action_input_seq elements")
+        action_input_sequences_padded = np.stack(
+            [pad_seq10(seq) for seq in action_input_seq], axis=0
+        )
+        LOG.info(f"[prep] Final action_input_sequences_padded shape: {action_input_sequences_padded.shape}")
+        LOG.info(f"[prep] Non-zero counts in first sequence: {np.count_nonzero(action_input_sequences_padded[0])}")
+        np.save(out_dir / "action_input_sequences_padded.npy", action_input_sequences_padded)
+
+        # 6) Metadata
+        meta = {
+            "n_samples": int(feat_mat.shape[0]),
+            "n_sequences": int(X_seq.shape[0]),
+            "n_features": int(feat_mat.shape[1]),
+            "session_start_time": int(self.session_start_time) if self.session_start_time else None,
+            "paths": {
+                "features_raw": str(out_dir / "features_raw.npy"),
+                "features_norm": str(out_dir / "features_norm.npy"),
+                "X_gs_norm": str(out_dir / "X_gs_norm.npy"),
+                "y_actions_norm_padded": str(out_dir / "y_actions_norm_padded.npy"),
+                "action_input_sequences_padded": str(out_dir / "action_input_sequences_padded.npy"),
+            }
+        }
+        (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+        LOG.info(f"Prepared training data at {out_dir} (sequences={meta['n_sequences']})")
+        return out_dir

@@ -61,6 +61,15 @@ def display_data(filepath):
     if data_type == "numpy_array":
         print(f"Array shape: {data.shape}")
         print(f"Array dtype: {data.dtype}")
+        # Add summary for numpy arrays
+        total_elements = data.size
+        non_zero_count = np.count_nonzero(data)
+        zero_count = total_elements - non_zero_count
+        print(f"Total elements: {total_elements:,}")
+        print(f"Non-zero elements: {non_zero_count:,} ({100 * non_zero_count / total_elements:.1f}%)")
+        print(f"Zero elements: {zero_count:,} ({100 * zero_count / total_elements:.1f}%)")
+        if non_zero_count > 0:
+            print(f"Value range: {data.min():.2f} to {data.max():.2f}")
     elif data_type == "json":
         print(f"JSON structure: {type(data).__name__}")
         if isinstance(data, list):
@@ -79,10 +88,11 @@ def display_data(filepath):
     root.title(f"Data Viewer: {data_type} - {filepath}")
     root.geometry("1400x900")
     
-    # Add 3D navigation at the top if needed (for numpy arrays or 3D JSON)
-    if (data_type == "numpy_array" and len(data.shape) >= 3) or \
-       (data_type == "json" and isinstance(data, list) and data and 
-        isinstance(data[0], list) and data[0] and isinstance(data[0][0], list)):
+        # Add navigation when we have 3D+ numpy arrays (or 3D JSON)
+    is_numpy_3d_plus = (data_type == "numpy_array" and len(getattr(data, "shape", ())) >= 3)
+    if is_numpy_3d_plus or \
+        (data_type == "json" and isinstance(data, list) and data and 
+         isinstance(data[0], list) and data[0] and isinstance(data[0][0], list)):
         
         nav_frame = ttk.Frame(root)
         nav_frame.pack(fill=tk.X, padx=10, pady=(5, 0))
@@ -110,6 +120,11 @@ def display_data(filepath):
             total_slices = len(data)
         ttk.Label(nav_frame, text=f"of {total_slices} total slices", font=("Arial", 9)).pack(side=tk.LEFT)
         
+        # Add slice statistics display
+        stats_label = ttk.Label(nav_frame, text="", font=("Arial", 9), foreground="blue")
+        stats_label.pack(side=tk.LEFT, padx=(20, 0))
+        nav_frame.stats_label = stats_label  # Store reference for updates
+        
         # Jump to specific slice
         ttk.Label(nav_frame, text="Jump to:", font=("Arial", 9)).pack(side=tk.LEFT, padx=(20, 5))
         jump_var = tk.StringVar(value="0")
@@ -121,10 +136,45 @@ def display_data(filepath):
         
         # Bind Enter key to jump
         jump_entry.bind('<Return>', lambda e: jump_to_slice())
+
+        # If numpy 4D (e.g., actions: S x 10 x 101 x 8), add a TIME selector for axis-1
+        time_var = tk.IntVar(value=0)
+        if data_type == "numpy_array" and len(data.shape) == 4:
+            ttk.Label(nav_frame, text="   Time:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(20, 5))
+            time_prev = ttk.Button(nav_frame, text="◀", width=3, command=lambda: change_time(-1))
+            time_prev.pack(side=tk.LEFT, padx=(0, 2))
+            time_label = ttk.Label(nav_frame, text="0", font=("Arial", 10, "bold"), width=6)
+            time_label.pack(side=tk.LEFT, padx=2)
+            time_next = ttk.Button(nav_frame, text="▶", width=3, command=lambda: change_time(1))
+            time_next.pack(side=tk.LEFT, padx=(2, 10))
+            ttk.Label(nav_frame, text=f"of {data.shape[1]} timesteps", font=("Arial", 9)).pack(side=tk.LEFT)
     
     # Create main frame for the table
     main_frame = ttk.Frame(root)
     main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+    
+    # Add legend for color coding
+    legend_frame = ttk.Frame(main_frame)
+    legend_frame.pack(fill=tk.X, pady=(0, 5))
+    
+    # Create legend labels
+    legend_label = ttk.Label(legend_frame, text="Legend:", font=("Arial", 9, "bold"))
+    legend_label.pack(side=tk.LEFT, padx=(0, 10))
+    
+    # Non-zero value indicator
+    nonzero_indicator = tk.Label(legend_frame, text="  Non-zero values  ", 
+                                background="#e6f3ff", relief=tk.RAISED, borderwidth=1)
+    nonzero_indicator.pack(side=tk.LEFT, padx=(0, 20))
+    
+    # Zero value indicator
+    zero_indicator = tk.Label(legend_frame, text="  0  ", 
+                             background="white", relief=tk.RAISED, borderwidth=1)
+    zero_indicator.pack(side=tk.LEFT, padx=(0, 20))
+    
+    # Info about clean formatting and row coloring
+    info_label = ttk.Label(legend_frame, text="Values without trailing zeros | Rows with non-zero values highlighted", 
+                           font=("Arial", 8), foreground="gray")
+    info_label.pack(side=tk.LEFT)
     
     # Container for tree + scrollbars
     tree_frame = ttk.Frame(main_frame)
@@ -156,9 +206,9 @@ def display_data(filepath):
     tree_frame.grid_columnconfigure(0, weight=1)
     
     # 3D navigation functions (for numpy arrays and 3D JSON)
-    if (data_type == "numpy_array" and len(data.shape) >= 3) or \
-       (data_type == "json" and isinstance(data, list) and data and 
-        isinstance(data[0], list) and data[0] and isinstance(data[0][0], list)):
+    if is_numpy_3d_plus or \
+        (data_type == "json" and isinstance(data, list) and data and 
+         isinstance(data[0], list) and data[0] and isinstance(data[0][0], list)):
         
         def change_slice(delta):
             current = slice_var.get()
@@ -187,6 +237,16 @@ def display_data(filepath):
                     jump_var.set(str(slice_var.get()))  # Reset to current
             except ValueError:
                 jump_var.set(str(slice_var.get()))  # Reset to current
+
+        def change_time(delta):
+            # Only meaningful for 4D numpy arrays
+            if not (data_type == "numpy_array" and len(data.shape) == 4):
+                return
+            current = time_var.get()
+            new_t = current + delta
+            if 0 <= new_t < data.shape[1]:
+                time_var.set(new_t)
+                update_3d_slice()
         
         def update_3d_slice():
             slice_idx = slice_var.get()
@@ -196,14 +256,82 @@ def display_data(filepath):
                     slice_label.config(text=str(slice_idx))
                     jump_var.set(str(slice_idx))
                     
+                    # Update slice statistics
+                    if hasattr(nav_frame, 'stats_label'):
+                        stats_text = get_slice_statistics(data, slice_idx)
+                        nav_frame.stats_label.config(text=stats_text)
+                    
                     # Clear existing items
                     for item in tree.get_children():
                         tree.delete(item)
                     
-                    # Add new slice data
-                    for i in range(data.shape[1]):
-                        values = [f"{val:.6f}" for val in data[slice_idx, i]]
-                        tree.insert("", tk.END, text=f"Row {i}", values=values)
+                    # Render depending on dimensionality
+                    ndim = len(data.shape)
+                    if ndim == 3:
+                        # (A, R, C): rows R, cols C
+                        rows = data.shape[1]
+                        cols = data.shape[2]
+                        _ensure_numpy_columns(tree, cols)
+                        for r in range(rows):
+                            row_vals = np.asarray(data[slice_idx, r, :]).ravel()
+                            values = [format_value_clean(float(v)) for v in row_vals]
+                            
+                            # Check if this row has any non-zero values and prepare text accordingly
+                            has_nonzero = np.any(np.abs(row_vals) > 1e-10)
+                            if has_nonzero:
+                                # Create a tag for this row
+                                row_tag = f"nonzero_row_{r}"
+                                tree.tag_configure(row_tag, background="#e6f3ff", foreground="black")
+                                
+                                # Add info about which columns have non-zero values
+                                nonzero_cols = [f"col_{i}" for i, v in enumerate(row_vals) if abs(v) > 1e-10]
+                                if len(nonzero_cols) <= 3:  # Show specific columns if few
+                                    item_text = f"Row {r} (non-zero: {', '.join(nonzero_cols)})"
+                                else:
+                                    item_text = f"Row {r} ({len(nonzero_cols)} non-zero cols)"
+                                
+                                item = tree.insert("", tk.END, text=item_text, values=values, tags=(row_tag,))
+                            else:
+                                item = tree.insert("", tk.END, text=f"Row {r}", values=values)
+                    elif ndim == 4:
+                        # (S, T, E, F): events E as rows, features F as cols; choose T with time_var
+                        t_idx = int(time_var.get())
+                        t_idx = max(0, min(t_idx, data.shape[1] - 1))
+                        # Update time label if present
+                        try:
+                            time_label.config(text=str(t_idx))
+                        except Exception:
+                            pass
+                        
+                        # Update slice statistics for 4D data
+                        if hasattr(nav_frame, 'stats_label'):
+                            stats_text = get_slice_statistics(data, slice_idx, t_idx)
+                            nav_frame.stats_label.config(text=stats_text)
+                        
+                        events = data.shape[2]
+                        feats = data.shape[3]
+                        _ensure_numpy_columns(tree, feats)
+                        for e in range(events):
+                            row_vals = np.asarray(data[slice_idx, t_idx, e, :]).ravel()
+                            values = [format_value_clean(float(v)) for v in row_vals]
+                            
+                            # Check if this row has any non-zero values and prepare text accordingly
+                            has_nonzero = np.any(np.abs(row_vals) > 1e-10)
+                            if has_nonzero:
+                                # Create a tag for this row
+                                row_tag = f"nonzero_row_{e}"
+                                tree.tag_configure(row_tag, background="#e6f3ff", foreground="black")
+                                
+                                # Add info about which columns have non-zero values
+                                nonzero_cols = [f"col_{i}" for i, v in enumerate(row_vals) if abs(v) > 1e-10]
+                                if len(nonzero_cols) <= 3:  # Show specific columns if few
+                                    item_text = f"Evt {e} (non-zero: {', '.join(nonzero_cols)})"
+                                else:
+                                    item_text = f"Evt {e} ({len(nonzero_cols)} non-zero cols)"
+                                
+                                item = tree.insert("", tk.END, text=item_text, values=values, tags=(row_tag,))
+                            else:
+                                item = tree.insert("", tk.END, text=f"Evt {e}", values=values)
             else:  # JSON 3D array
                 if 0 <= slice_idx < len(data):
                     # Update label
@@ -230,7 +358,13 @@ def configure_numpy_tree(tree, data):
         tree.heading("value", text="Value")
         
         for i, val in enumerate(data):
-            tree.insert("", tk.END, values=(i, f"{val:.6f}"))
+            formatted_val = format_value_clean(val)
+            item = tree.insert("", tk.END, values=(i, formatted_val))
+            if abs(val) > 1e-10:  # Non-zero value
+                # Create unique tag for this cell
+                cell_tag = f"nonzero_cell_{i}"
+                tree.tag_configure(cell_tag, background="#e6f3ff", foreground="black")
+                tree.item(item, tags=(cell_tag,))
             
     elif len(data.shape) == 2:
         tree["columns"] = tuple([f"col_{i}" for i in range(data.shape[1])])
@@ -242,17 +376,96 @@ def configure_numpy_tree(tree, data):
             tree.heading(f"col_{i}", text=f"Col {i}")
         
         for i in range(data.shape[0]):
-            values = [f"{val:.6f}" for val in data[i]]
-            tree.insert("", tk.END, text=f"Row {i}", values=values)
+            values = [format_value_clean(val) for val in data[i]]
+            
+            # Check if this row has any non-zero values and prepare text accordingly
+            has_nonzero = np.any(np.abs(data[i]) > 1e-10)
+            if has_nonzero:
+                # Create a tag for this row
+                row_tag = f"nonzero_row_{i}"
+                tree.tag_configure(row_tag, background="#e6f3ff", foreground="black")
+                
+                # Add info about which columns have non-zero values
+                nonzero_cols = [f"col_{j}" for j, v in enumerate(data[i]) if abs(v) > 1e-10]
+                if len(nonzero_cols) <= 3:  # Show specific columns if few
+                    item_text = f"Row {i} (non-zero: {', '.join(nonzero_cols)})"
+                else:
+                    item_text = f"Row {i} ({len(nonzero_cols)} non-zero cols)"
+                
+                item = tree.insert("", tk.END, text=item_text, values=values, tags=(row_tag,))
+            else:
+                item = tree.insert("", tk.END, text=f"Row {i}", values=values)
             
     else:
-        # For 3D+, show slice navigation
-        tree["columns"] = tuple([f"col_{i}" for i in range(data.shape[2])])
+        # For 3D+: columns = last axis size
+        last_axis = data.shape[-1]
+        tree["columns"] = tuple([f"col_{i}" for i in range(last_axis)])
         tree.column("#0", width=100, stretch=tk.NO)
         tree.heading("#0", text="Row")
-        
-        for i in range(data.shape[2]):
-            tree.column(f"col_{i}", anchor=tk.CENTER, width=120)  # Consistent width
+        for i in range(last_axis):
+            tree.column(f"col_{i}", anchor=tk.CENTER, width=120)
+            tree.heading(f"col_{i}", text=f"Col {i}")
+
+def format_value_clean(val):
+    """Format value with trailing zeros removed and special handling for zeros"""
+    if abs(val) < 1e-10:  # Essentially zero
+        return "0"
+    elif val == int(val):  # Integer value
+        return str(int(val))
+    else:  # Float value - remove trailing zeros
+        formatted = f"{val:.6f}".rstrip('0').rstrip('.')
+        return formatted
+
+def get_slice_statistics(data, slice_idx, time_idx=None):
+    """Get statistics for a specific slice of the data"""
+    if len(data.shape) == 3:
+        slice_data = data[slice_idx]
+        slice_name = f"Sequence {slice_idx}"
+    elif len(data.shape) == 4 and time_idx is not None:
+        slice_data = data[slice_idx, time_idx]
+        slice_name = f"Sequence {slice_idx}, Time {time_idx}"
+    else:
+        return "No slice data available"
+    
+    total_elements = slice_data.size
+    non_zero_count = np.count_nonzero(slice_data)
+    zero_count = total_elements - non_zero_count
+    
+    if non_zero_count == 0:
+        return f"{slice_name}: All zeros ({total_elements:,} elements)"
+    
+    non_zero_values = slice_data[slice_data != 0]
+    value_ranges = [
+        (0, 1, "0-1"),
+        (1, 10, "1-10"), 
+        (10, 100, "10-100"),
+        (100, 1000, "100-1000"),
+        (1000, float('inf'), "1000+")
+    ]
+    
+    range_counts = []
+    for min_val, max_val, label in value_ranges:
+        if max_val == float('inf'):
+            count = np.sum(slice_data >= min_val)
+        else:
+            count = np.sum((slice_data >= min_val) & (slice_data < max_val))
+        range_counts.append(f"{label}: {count}")
+    
+    return (f"{slice_name}: {non_zero_count:,}/{total_elements:,} non-zero "
+            f"({100 * non_zero_count / total_elements:.1f}%) | "
+            f"Range: {slice_data.min():.2f} to {slice_data.max():.2f} | "
+            f"Values: {', '.join(range_counts)}")
+
+def _ensure_numpy_columns(tree, ncols: int):
+    """Ensure the tree has exactly ncols numerical columns, recreating if needed."""
+    existing = list(tree["columns"]) if "columns" in tree.__dict__ else []
+    desired = [f"col_{i}" for i in range(ncols)]
+    if tuple(existing) != tuple(desired):
+        tree["columns"] = tuple(desired)
+        tree.column("#0", width=100, stretch=tk.NO)
+        tree.heading("#0", text="Row")
+        for i in range(ncols):
+            tree.column(f"col_{i}", anchor=tk.CENTER, width=120)
             tree.heading(f"col_{i}", text=f"Col {i}")
 
 def configure_json_tree(tree, data):
@@ -387,12 +600,9 @@ def update_3d_json_slice(tree, slice_idx):
         for action_idx, action_data in enumerate(current_sequence):
             if isinstance(action_data, list) and feature_idx < len(action_data):
                 val = action_data[feature_idx]
-                if isinstance(val, float):
-                    # Format floats consistently with NumPy display (6 decimal places)
-                    values.append(f"{val:.6f}")
-                elif isinstance(val, int):
-                    # Format integers as strings without decimal places
-                    values.append(str(val))
+                if isinstance(val, (float, int)):
+                    # Use clean formatting for numbers
+                    values.append(format_value_clean(val))
                 else:
                     values.append(str(val))
             else:

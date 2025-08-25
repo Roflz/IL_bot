@@ -16,7 +16,8 @@ from .features import extract_features_from_gamestate, FeatureExtractor
 from .actions import (
     extract_action_sequences, flatten_action_window, convert_actions_to_training_format,
     extract_raw_action_data, convert_raw_actions_to_tensors, analyze_action_distribution,
-    convert_live_features_to_sequence_format, convert_live_actions_to_raw_format, create_live_training_sequences
+    convert_live_features_to_sequence_format, convert_live_actions_to_raw_format, create_live_training_sequences,
+    convert_extracted_actions_to_normalized_format
 )
 from .sequences import (
     create_temporal_sequences, pad_sequence_window, create_rolling_windows,
@@ -52,6 +53,7 @@ __all__ = [
     "convert_live_features_to_sequence_format",
     "convert_live_actions_to_raw_format", 
     "create_live_training_sequences",
+    "convert_extracted_actions_to_normalized_format",
     
     # Sequence building
     "create_temporal_sequences",

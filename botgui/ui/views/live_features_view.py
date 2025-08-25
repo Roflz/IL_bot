@@ -7,6 +7,7 @@ import numpy as np
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Any
 from ...util.formatting import format_value_for_display
 from ..styles import create_dark_stringvar, create_dark_booleanvar
@@ -108,6 +109,7 @@ class LiveFeaturesView(ttk.Frame):
         self.action_recording = False
         self.csv_writer = None
         self.csvf = None
+        self._ts_offset_warned = False
         
         # Gamestate recording (raw JSON files)
         self.gamestate_recording = False
@@ -143,6 +145,53 @@ class LiveFeaturesView(ttk.Frame):
         self.expanded_groups = set()  # All feature groups collapsed initially
         
         LOG.info("LiveFeaturesView: initialized with tksheet")
+    
+    def _now_gs_clock_ms(self) -> int:
+        """Return 'now' in the gamestate time base (wall-clock + pipeline offset)."""
+        import time as _time
+        now = int(_time.time() * 1000)
+        try:
+            fp = getattr(self.controller, "feature_pipeline", None)
+            if fp and hasattr(fp, "wallclock_to_gs_offset_ms"):
+                return int(now + int(fp.wallclock_to_gs_offset_ms))
+        except Exception:
+            pass
+        if not self._ts_offset_warned:
+            print("⚠️ No GS offset yet; using wall-clock for action timestamps.")
+            self._ts_offset_warned = True
+        return now
+    
+    def _session_rel_ms(self) -> int:
+        """
+        Session-relative timestamp in ms, using the same zero as feature 127.
+        = (GS-aligned 'now') - FeaturePipeline.session_start_time
+        """
+        t_abs = self._now_gs_clock_ms()
+        try:
+            fp = getattr(self.controller, "feature_pipeline", None)
+            base = getattr(fp, "session_start_time", None)
+            if base is not None:
+                return max(0, int(t_abs - int(base)))
+        except Exception:
+            pass
+        # Before first gamestate arrives, we don't have the base yet.
+        # Return 0 so early actions don't get Unix timestamps.
+        return 0
+    
+    def _gs_timestamp_for_t0(self) -> int:
+        """
+        Return the absolute gamestate timestamp (ms) for the newest window row (T0)
+        when saving features. Falls back to the GS-aligned live clock.
+        """
+        try:
+            if hasattr(self.controller, "feature_pipeline"):
+                ts = self.controller.feature_pipeline.get_last_gamestate_timestamp()
+                if ts:
+                    return int(ts)
+        except Exception:
+            pass
+        # Fallback: use our GS-aligned live clock
+        return self._now_gs_clock_ms()
     
     def _setup_ui(self):
         """Setup the user interface with tksheet and integrated recorder"""
@@ -701,7 +750,7 @@ class LiveFeaturesView(ttk.Frame):
                 if getattr(self, "feature_recording", False) and getattr(self, "features_csv_writer", None):
                     # Convention used elsewhere: row 0 is the most recent timestep (T0)
                     latest_vec = window[0, :].tolist()
-                    ts_ms = int(time.time() * 1000)
+                    ts_ms = self._gs_timestamp_for_t0()
                     self._save_feature_vector(latest_vec, ts_ms)
             except Exception as e:
                 LOG.warning("Failed to save live feature vector: %s", e)
@@ -2366,6 +2415,16 @@ class LiveFeaturesView(ttk.Frame):
             print(f"💾 Recording stopped. Saved actions to {actions_file}")
             print(f"📊 Final counts - Clicks: {self.click_count}, Key presses: {self.key_press_count}, Scrolls: {self.scroll_count}, Mouse moves: {self.mouse_move_count}")
             print(f"🧠 Feature vectors saved: {self.feature_count}")
+
+            # If features were recording but stop_feature_recording wasn't called, try to prepare here as well.
+            try:
+                if hasattr(self, "session_dir") and self.session_dir and hasattr(self.controller, "feature_pipeline"):
+                    prepared_dir = Path(self.session_dir) / "prepared"
+                    if not prepared_dir.exists():
+                        self.controller.feature_pipeline.prepare_session_training_data(Path(self.session_dir), out_dir=prepared_dir)
+                        print(f"✅ Prepared training artifacts at: {prepared_dir}")
+            except Exception as prep_err:
+                print(f"⚠️ Skipped auto-prepare in _stop_recording: {prep_err}")
             
         except Exception as e:
             print(f"❌ Error stopping recording: {e}")
@@ -2406,7 +2465,7 @@ class LiveFeaturesView(ttk.Frame):
                     try:
                         if hasattr(self, 'csv_writer') and self.csv_writer:
                             action_data = [
-                                int(time.time() * 1000), 'move', rel_x, rel_y, 
+                                self._session_rel_ms(), 'move', rel_x, rel_y, 
                                 '', '', 0, 0, '', ''
                             ]
                             self._write_csv_buffered(action_data)
@@ -2470,7 +2529,7 @@ class LiveFeaturesView(ttk.Frame):
                 try:
                     if hasattr(self, 'csv_writer') and self.csv_writer:
                         action_data = [
-                            int(time.time() * 1000), 'click', rel_x, rel_y, 
+                            self._session_rel_ms(), 'click', rel_x, rel_y, 
                             btn_name, '', 0, 0, '', ''
                         ]
                         self._write_csv_buffered(action_data)
@@ -2530,11 +2589,11 @@ class LiveFeaturesView(ttk.Frame):
                 
                 self.scroll_count += 1
                 
-                # Write to CSV with buffering
+                # Write to CSV with buffering (use session-relative GS clock)
                 try:
                     if hasattr(self, 'csv_writer') and self.csv_writer:
                         action_data = [
-                            int(time.time() * 1000), 'scroll', rel_x, rel_y, 
+                            self._session_rel_ms(), 'scroll', rel_x, rel_y, 
                             '', '', dx, dy, '', ''
                         ]
                         self._write_csv_buffered(action_data)
@@ -2586,7 +2645,7 @@ class LiveFeaturesView(ttk.Frame):
             try:
                 if hasattr(self, 'csv_writer') and self.csv_writer:
                     action_data = [
-                        int(time.time() * 1000), 'key_press', 0, 0, 
+                        self._session_rel_ms(), 'key_press', 0, 0, 
                         '', key_char, 0, 0, '', ''
                     ]
                     self._write_csv_buffered(action_data)
@@ -2636,7 +2695,7 @@ class LiveFeaturesView(ttk.Frame):
             try:
                 if hasattr(self, 'csv_writer') and self.csv_writer:
                     action_data = [
-                        int(time.time() * 1000), 'key_release', 0, 0, 
+                        self._session_rel_ms(), 'key_release', 0, 0, 
                         '', key_char, 0, 0, '', ''
                     ]
                     self._write_csv_buffered(action_data)
@@ -3232,6 +3291,17 @@ class LiveFeaturesView(ttk.Frame):
             self._finalize_features_csv()
             
             print(f"💾 Stopped feature recording. Saved {self.feature_count} feature vectors")
+
+            # Prepare training artifacts (after both CSVs are closed)
+            try:
+                if hasattr(self, "session_dir") and self.session_dir and hasattr(self.controller, "feature_pipeline"):
+                    prepared_dir = Path(self.session_dir) / "prepared"
+                    self.controller.feature_pipeline.prepare_session_training_data(Path(self.session_dir), out_dir=prepared_dir)
+                    print(f"✅ Prepared training artifacts at: {prepared_dir}")
+            except Exception as prep_err:
+                import traceback
+                print(f"⚠️ Skipped auto-prepare: {prep_err}")
+                traceback.print_exc()
             
         except Exception as e:
             import traceback
@@ -3249,7 +3319,8 @@ class LiveFeaturesView(ttk.Frame):
                 return
             
             if timestamp is None:
-                timestamp = int(time.time() * 1000)
+                # Always prefer the GS timestamp that produced this row
+                timestamp = self._gs_timestamp_for_t0()
             
             # Prepare feature row: timestamp + 128 feature values
             if hasattr(feature_vector, 'flatten'):
