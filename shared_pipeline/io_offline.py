@@ -50,23 +50,17 @@ def _add_only_merge_id_maps(path: Path, new_maps: dict) -> None:
 
 def load_gamestates(gamestates_dir: str = "data/gamestates") -> List[Dict]:
     """
-    Load all gamestate files from directory.
-    
-    Args:
-        gamestates_dir: Directory containing gamestate JSON files
-        
-    Returns:
-        List of gamestate dictionaries
-        
-    Raises:
-        FileNotFoundError: If gamestates directory doesn't exist
-        ValueError: If no gamestate files found
+    Load gamestate JSONs from a directory and return a list of dicts.
     """
     gamestates_path = Path(gamestates_dir)
     if not gamestates_path.exists():
         raise FileNotFoundError(f"Gamestates directory not found: {gamestates_path}")
     
-    gamestate_files = list(gamestates_path.glob("*.json"))
+    # Deterministic order: sort by filename stem (epoch ms)
+    gamestate_files = sorted(
+        gamestates_path.glob("*.json"),
+        key=lambda p: int(p.stem) if p.stem.isdigit() else p.stem
+    )
     
     if not gamestate_files:
         raise ValueError(f"No gamestate files found in {gamestates_path}")
@@ -88,6 +82,45 @@ def load_gamestates(gamestates_dir: str = "data/gamestates") -> List[Dict]:
     
     print(f"Successfully loaded {len(gamestates)} gamestates")
     return gamestates
+
+
+def load_gamestates_sorted(gamestates_dir: str = "data/gamestates") -> List[Dict]:
+    """
+    Load all gamestate files from directory with deterministic sorting.
+    This is an alias for load_gamestates to maintain compatibility.
+    
+    Args:
+        gamestates_dir: Directory containing gamestate JSON files
+        
+    Returns:
+        List of gamestate dictionaries sorted by filename stem
+    """
+    return load_gamestates(gamestates_dir)
+
+
+def build_gamestates_metadata(gamestates_dir: str) -> List[Dict]:
+    """
+    Build per-session metadata directly from gamestate JSONs.
+    Each entry: {'raw_index', 'absolute_timestamp', 'filename'}
+    """
+    path = Path(gamestates_dir)
+    files = sorted(
+        path.glob("*.json"),
+        key=lambda p: int(p.stem) if p.stem.isdigit() else p.stem
+    )
+    meta = []
+    for i, fp in enumerate(files):
+        try:
+            obj = json.loads(fp.read_text())
+            ts = int(obj.get("timestamp", 0))
+        except Exception:
+            ts = 0
+        meta.append({
+            "raw_index": i,
+            "absolute_timestamp": ts,
+            "filename": fp.name
+        })
+    return meta
 
 
 def load_actions(actions_file: str = "data/actions.csv") -> pd.DataFrame:
@@ -338,7 +371,7 @@ def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir:
         raw_dir: Directory for raw extracted data
         trimmed_dir: Directory for trimmed data
         normalized_dir: Directory for normalized data
-        sequences_dir: Directory for sequence data (SKIPPED - only final training data needed)
+        # sequences_dir: Directory for sequence data (SKIPPED - only final training data needed)
         mappings_dir: Directory for mappings and metadata
         final_dir: Directory for final clean training data
         features: Raw extracted features
@@ -369,21 +402,26 @@ def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir:
         json.dump(raw_action_data, f, indent=2)
     print(f"    ✓ raw_action_data.json: {len(raw_action_data)} gamestates")
 
-    # Also emit raw action tensors for the browser (optional convenience)
-    try:
-        encoder = ActionEncoder()
-        # Prefer deriving from targets if available; otherwise from raw actions
-        targets_path = Path(sequences_dir) / "target_sequences.json"
-        if targets_path.exists():
-            encoder.derive_encodings_from_data(str(targets_path))
-        else:
-            encoder.derive_encodings_from_raw_actions(raw_action_data)
-        raw_action_tensors = convert_raw_actions_to_tensors(raw_action_data, encoder)
-        with open(Path(raw_dir) / "raw_action_tensors.json", 'w') as f:
-            json.dump(raw_action_tensors, f, indent=2)
-        print(f"    ✓ raw_action_tensors.json: {len(raw_action_tensors)} gamestates")
-    except Exception as e:
-        print(f"    ⚠ Could not generate raw_action_tensors.json: {e}")
+    # Also emit raw action tensors for the browser (no fallbacks; no count)
+    def _flatten_actions_no_count(actions_obj):
+        # Returns flat [t, type, x, y, button, key, dx, dy] * N without a leading count
+        all_rows = []
+        for mv in actions_obj.get("mouse_movements", []):
+            all_rows += [mv.get("timestamp", 0), 0, mv.get("x", 0), mv.get("y", 0), 0, 0, 0, 0]
+        for c in actions_obj.get("clicks", []):
+            all_rows += [c.get("timestamp", 0), 1, c.get("x", 0), c.get("y", 0), c.get("button", 0), 0, 0, 0]
+        for kp in actions_obj.get("key_presses", []):
+            all_rows += [kp.get("timestamp", 0), 2, 0, 0, 0, kp.get("key", 0), 0, 0]
+        for kr in actions_obj.get("key_releases", []):
+            all_rows += [kr.get("timestamp", 0), 3, 0, 0, 0, kr.get("key", 0), 0, 0]
+        for sc in actions_obj.get("scrolls", []):
+            all_rows += [sc.get("timestamp", 0), 4, sc.get("x", 0), sc.get("y", 0), 0, 0, sc.get("dx", 0), sc.get("dy", 0)]
+        return all_rows
+
+    raw_action_tensors = [_flatten_actions_no_count(gs) for gs in raw_action_data]
+    with open(Path(raw_dir) / "raw_action_tensors.json", 'w') as f:
+        json.dump(raw_action_tensors, f, indent=2)
+    print(f"    ✓ raw_action_tensors.json: {len(raw_action_tensors)} gamestates")
     
     # 2. TRIMMED DATA (data/trimmed_data/)
     print("  📂 Trimmed data directory...")
@@ -395,6 +433,12 @@ def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir:
         json.dump(trimmed_raw_action_data, f, indent=2)
     print(f"    ✓ trimmed_raw_action_data.json: {len(trimmed_raw_action_data)} gamestates")
 
+    # And trimmed tensors (no count) for symmetry with raw
+    trimmed_action_tensors = [_flatten_actions_no_count(gs) for gs in trimmed_raw_action_data]
+    with open(Path(trimmed_dir) / "trimmed_raw_action_tensors.json", 'w') as f:
+        json.dump(trimmed_action_tensors, f, indent=2)
+    print(f"    ✓ trimmed_raw_action_tensors.json: {len(trimmed_action_tensors)} gamestates")
+
     # 3. NORMALIZED DATA (data/normalized_data/)
     print("  📂 Normalized data directory...")
     np.save(Path(normalized_dir) / "normalized_features.npy", normalized_features)
@@ -404,121 +448,11 @@ def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir:
         json.dump(normalized_action_data, f, indent=2)
     print(f"    ✓ normalized_action_data.json: {len(normalized_action_data)} gamestates")
 
-    # Also emit normalized action tensors in training format for the browser
-    try:
-        encoder = ActionEncoder()
-        # Prefer deriving from targets if available; otherwise from raw actions
-        targets_path = Path(sequences_dir) / "target_sequences.json"
-        if targets_path.exists():
-            encoder.derive_encodings_from_data(str(targets_path))
-        else:
-            encoder.derive_encodings_from_raw_actions(raw_action_data)
-        
-        # IMPORTANT: normalized_action_data already has timestamps converted to relative + 0-1000 scale
-        # We need to convert this back to the training tensor format WITHOUT further timestamp processing
-        normalized_action_tensors = []
-        for gamestate_idx, gamestate_actions in enumerate(normalized_action_data):
-            # Count total actions for this gamestate
-            total_actions = (len(gamestate_actions.get('mouse_movements', [])) + 
-                            len(gamestate_actions.get('clicks', [])) + 
-                            len(gamestate_actions.get('key_presses', [])) + 
-                            len(gamestate_actions.get('key_releases', [])) + 
-                            len(gamestate_actions.get('scrolls', [])))
-            
-            # Start building the action tensor: [action_count, timestamp1, type1, x1, y1, button1, key1, scroll_dx1, scroll_dy1, ...]
-            action_tensor = [total_actions]
-            
-            # Collect all actions with their metadata (timestamps are already normalized to 0-1000)
-            all_actions = []
-            
-            # Process mouse movements
-            for move in gamestate_actions.get('mouse_movements', []):
-                all_actions.append({
-                    'timestamp': move.get('timestamp', 0),  # Already normalized to 0-10000
-                    'type': 0,  # 0 = move
-                    'x': move.get('x', 0),
-                    'y': move.get('y', 0),
-                    'button': 0,  # No button for moves
-                    'key': 0,     # No key for moves
-                    'scroll_dx': 0,  # No scroll for moves
-                    'scroll_dy': 0
-                })
-            
-            # Process clicks
-            for click in gamestate_actions.get('clicks', []):
-                all_actions.append({
-                    'timestamp': click.get('timestamp', 0),  # Already normalized to 0-10000
-                    'type': 1,  # 1 = click
-                    'x': click.get('x', 0),
-                    'y': click.get('y', 0),
-                    'button': encoder.encode_button(click.get('button', '')),
-                    'key': 0,  # No key for clicks
-                    'scroll_dx': 0,  # No scroll for clicks
-                    'scroll_dy': 0
-                })
-            
-            # Process key presses
-            for key_press in gamestate_actions.get('key_presses', []):
-                all_actions.append({
-                    'timestamp': key_press.get('timestamp', 0),  # Already normalized to 0-10000
-                    'type': 2,  # 2 = key_press
-                    'x': 0,  # No position for key presses
-                    'y': 0,
-                    'button': 0,  # No button for key presses
-                    'key': encoder.encode_key(key_press.get('key', '')),
-                    'scroll_dx': 0,  # No scroll for key presses
-                    'scroll_dy': 0
-                })
-            
-            # Process key releases
-            for key_release in gamestate_actions.get('key_releases', []):
-                all_actions.append({
-                    'timestamp': key_release.get('timestamp', 0),  # Already normalized to 0-10000
-                    'type': 3,  # 3 = key_release
-                    'x': 0,  # No position for key releases
-                    'y': 0,
-                    'button': 0,  # No button for key releases
-                    'key': encoder.encode_key(key_release.get('key', '')),
-                    'scroll_dx': 0,  # No scroll for key releases
-                    'scroll_dy': 0
-                })
-            
-            # Process scrolls
-            for scroll in gamestate_actions.get('scrolls', []):
-                all_actions.append({
-                    'timestamp': scroll.get('timestamp', 0),  # Already normalized to 0-10000
-                    'type': 4,  # 4 = scroll
-                    'x': 0,  # No position for scrolls
-                    'y': 0,
-                    'button': 0,  # No button for scrolls
-                    'key': 0,  # No key for scrolls
-                    'scroll_dx': scroll.get('dx', 0),
-                    'scroll_dy': scroll.get('dy', 0)
-                })
-            
-            # Sort actions by timestamp (already normalized to 0-1000)
-            all_actions.sort(key=lambda a: a['timestamp'])
-            
-            # Flatten into tensor format
-            for action in all_actions:
-                action_tensor.extend([
-                    action['timestamp'],  # Already normalized to 0-1000
-                    action['type'],
-                    action['x'],
-                    action['y'],
-                    action['button'],
-                    action['key'],
-                    action['scroll_dx'],
-                    action['scroll_dy']
-                ])
-            
-            normalized_action_tensors.append(action_tensor)
-        
-        with open(Path(normalized_dir) / "normalized_action_training_format.json", 'w') as f:
-            json.dump(normalized_action_tensors, f, indent=2)
-        print(f"    ✓ normalized_action_training_format.json: {len(normalized_action_tensors)} gamestates")
-    except Exception as e:
-        print(f"    ⚠ Could not generate normalized_action_training_format.json: {e}")
+    # Normalized tensors (no count) with consistent naming
+    normalized_action_tensors = [_flatten_actions_no_count(gs) for gs in normalized_action_data]
+    with open(Path(normalized_dir) / "normalized_action_tensors.json", 'w') as f:
+        json.dump(normalized_action_tensors, f, indent=2)
+    print(f"    ✓ normalized_action_tensors.json: {len(normalized_action_tensors)} gamestates")
     
     # 4. SEQUENCES (data/sequences/) - SKIPPED - only final training data needed
     print("  📂 Sequences directory... SKIPPED (only final training data needed)")

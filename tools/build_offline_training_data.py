@@ -8,9 +8,10 @@ using the modularized shared pipeline. It preserves byte-for-byte output where f
 
 import sys
 import argparse
-import os
-import json
 from pathlib import Path
+import shutil
+import numpy as np
+import json as _json
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -19,23 +20,14 @@ from shared_pipeline import (
     load_gamestates, load_actions, load_existing_features, load_feature_mappings,
     load_gamestates_metadata, load_raw_action_data, load_action_targets,
     extract_features_from_gamestates, extract_raw_action_data, convert_raw_actions_to_tensors,
-    create_temporal_sequences, trim_sequences, create_screenshot_paths,
+    create_temporal_sequences, create_screenshot_paths,
     normalize_features, normalize_input_sequences, normalize_action_data,
     save_training_data, save_final_training_data, validate_data_files,
     derive_encodings_from_data, derive_encodings_from_raw_actions,
     save_organized_training_data
 )
-
-def _write_slice_info(path, start_idx_raw, end_idx_raw, count, first_ts=None, last_ts=None):
-    info = {
-        "start_idx_raw": int(start_idx_raw) if start_idx_raw is not None else None,
-        "end_idx_raw": int(end_idx_raw) if end_idx_raw is not None else None,
-        "count": int(count) if count is not None else 0,
-    }
-    if first_ts is not None: info["first_timestamp"] = int(first_ts)
-    if last_ts  is not None: info["last_timestamp"]  = int(last_ts)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f: json.dump(info, f, indent=2)
+from shared_pipeline.sequences import trim_sequences, create_temporal_sequences, create_screenshot_paths
+from shared_pipeline.io_offline import build_gamestates_metadata, load_gamestates as load_gamestates_sorted
 
 
 def main():
@@ -56,23 +48,22 @@ Examples:
         """
     )
     
+    parser.add_argument('--data-dir', default='data',
+                        help='Root data directory (parent of recording_sessions)')
     parser.add_argument(
-        '--data-dir', 
-        default='data',
-        help='Root data directory (default: data)'
+        '--session',
+        default=None,
+        help='Recording session id (e.g. 20250824_183745). If omitted, the newest folder under data/recording_sessions is used.'
+    )
+    parser.add_argument(
+        '--session-dir',
+        default=None,
+        help='Full path to a session directory. Overrides --session.'
     )
     
-    parser.add_argument(
-        '--use-existing-features',
-        action='store_true',
-        help='Use existing extracted features from data/features/state_features.npy'
-    )
-    
-    parser.add_argument(
-        '--extract-features',
-        action='store_true',
-        help='Extract features from gamestates (slower but more flexible)'
-    )
+    # Fresh every time; keep flags for compatibility but ignore them
+    parser.add_argument('--use-existing-features', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--extract-features', action='store_true', help=argparse.SUPPRESS)
     
     parser.add_argument(
         '--output-dir',
@@ -80,41 +71,7 @@ Examples:
         help='Output directory for training data (default: data/training_data)'
     )
     
-    parser.add_argument(
-        '--final-dir',
-        default='data/06_final_training_data',
-        help='Final training data directory (default: data/06_final_training_data)'
-    )
-    
-    parser.add_argument(
-        '--raw-dir',
-        default='data/01_raw_data',
-        help='Raw extracted data directory (default: data/01_raw_data)'
-    )
-    
-    parser.add_argument(
-        '--trimmed-dir',
-        default='data/02_trimmed_data',
-        help='Trimmed data directory (default: data/02_trimmed_data)'
-    )
-    
-    parser.add_argument(
-        '--normalized-dir',
-        default='data/03_normalized_data',
-        help='Normalized data directory (default: data/03_normalized_data)'
-    )
-    
-    parser.add_argument(
-        '--sequences-dir',
-        default='data/04_sequences',
-        help='Sequence data directory (default: data/04_sequences)'
-    )
-    
-    parser.add_argument(
-        '--mappings-dir',
-        default='data/05_mappings',
-        help='Mappings and metadata directory (default: data/05_mappings)'
-    )
+    # per-session subfolders are derived below; no more global defaults
     
     parser.add_argument(
         '--validate-only',
@@ -127,253 +84,142 @@ Examples:
     print("=" * 60)
     print("BUILD OFFLINE TRAINING DATA")
     print("=" * 60)
-    print(f"Data directory: {args.data_dir}")
-    print(f"Raw data directory: {args.raw_dir}")
-    print(f"Trimmed data directory: {args.trimmed_dir}")
-    print(f"Normalized data directory: {args.normalized_dir}")
-    print(f"Sequences directory: {args.sequences_dir}")
-    print(f"Mappings directory: {args.mappings_dir}")
-    print(f"Final training data: {args.final_dir}")
-    print(f"Use existing features: {args.use_existing_features}")
-    print(f"Extract features: {args.extract_features}")
-    print("=" * 60)
     
-    # Validate data files
-    print("Validating data files...")
-    validation_results = validate_data_files(args.data_dir)
-    
-    if not any(validation_results.values()):
-        print("❌ No required data files found!")
-        print("Please ensure you have the required data structure:")
-        print("  data/")
-        print("  ├── gamestates/          # JSON gamestate files")
-        print("  ├── actions.csv          # Actions CSV file")
-        print("  ├── features/            # Extracted features")
-        print("  └── training_data/       # Output directory")
+    print("Validating session inputs...")
+    # Resolve session directory
+    base = Path(args.data_dir)
+    if args.session_dir:
+        session_root = Path(args.session_dir)
+    else:
+        sessions_root = base / "recording_sessions"
+        if args.session:
+            session_root = sessions_root / args.session
+        else:
+            # pick newest folder
+            candidates = sorted(sessions_root.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not candidates:
+                print("❌ No recording_sessions found.")
+                return 1
+            session_root = candidates[0]
+    session_root = session_root.resolve()
+    print(f"Session: {session_root}")
+
+    # Derive all per-session paths
+    gamestates_dir = session_root / "gamestates"
+    actions_csv    = session_root / "actions.csv"
+    raw_dir        = session_root / "01_raw_data"
+    trimmed_dir    = session_root / "02_trimmed_data"
+    normalized_dir = session_root / "03_normalized_data"
+    mappings_dir   = session_root / "05_mappings"
+    final_dir      = session_root / "06_final_training_data"
+
+    # Validate minimal inputs for the session
+    validation_results = {"gamestates": gamestates_dir.exists(), "actions_csv": actions_csv.exists()}
+    ok = all(validation_results.values())
+    for k,v in validation_results.items():
+        print(f" - {k}: {'OK' if v else 'MISSING'}")
+    if not ok:
+        print("❌ Missing required session inputs.")
         return 1
     
     if args.validate_only:
         print("Validation complete. Exiting.")
         return 0
-    
-    # Determine processing mode
-    if args.use_existing_features and args.extract_features:
-        print("❌ Cannot use both --use-existing-features and --extract-features")
-        return 1
-    
-    if not args.use_existing_features and not args.extract_features:
-        print("⚠️  No processing mode specified, defaulting to --use-existing-features")
-        args.use_existing_features = True
-    
+
+    # Always build fresh — wipe output subdirs then rebuild
+    def _clean_dir(p: Path):
+        if p.exists():
+            shutil.rmtree(p)
+        p.mkdir(parents=True, exist_ok=True)
+
+    print("\n🧹 Cleaning output folders (fresh build)…")
+    for p in (raw_dir, trimmed_dir, normalized_dir, mappings_dir, final_dir):
+        _clean_dir(p)
+
     try:
-        if args.use_existing_features:
-            print("\n🔍 Using existing extracted features...")
-            process_with_existing_features(args)
-        else:
-            print("\n🔍 Extracting features from gamestates...")
-            process_with_feature_extraction(args)
+        print("\n🔍 Extracting features from session gamestates (fresh)…")
+        process_fresh(session_root, gamestates_dir, actions_csv,
+                      raw_dir, trimmed_dir, normalized_dir, mappings_dir, final_dir)
         
         print("\n✅ Training data build completed successfully!")
         return 0
         
     except Exception as e:
         print(f"\n❌ Training data build failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
+        raise
 
 
-def process_with_existing_features(args):
-    """Process using existing extracted features."""
-    # Load existing data
-    features = load_existing_features(f"{args.data_dir}/features/state_features.npy")
-    feature_mappings = load_feature_mappings(f"{args.data_dir}/features/feature_mappings.json")
-    gamestates_metadata = load_gamestates_metadata(f"{args.data_dir}/features/gamestates_metadata.json")
+def process_fresh(session_root, gamestates_dir, actions_csv,
+                  raw_dir, trimmed_dir, normalized_dir, mappings_dir, final_dir):
+    """Fresh, session-scoped build. No fallbacks; no external metadata."""
+    # Load session gamestates (sorted) for use throughout this function
+    gamestates = load_gamestates_sorted(str(gamestates_dir))
     
-    # -------------- RAW SLICE INFO --------------
-    raw_N = int(features.shape[0])  # or len(raw_action_data)
-    _write_slice_info(os.path.join(args.data_dir, "01_raw_data", "slice_info.json"),
-                      0, raw_N - 1, raw_N,
-                      first_ts=gamestates_metadata[0]["absolute_timestamp"],
-                      last_ts=gamestates_metadata[raw_N-1]["absolute_timestamp"])
-    
-    # Load or extract raw action data
-    raw_action_file = f"{args.data_dir}/features/raw_action_data.json"
-    if Path(raw_action_file).exists():
-        print("Loading existing raw action data...")
-        raw_action_data = load_raw_action_data(raw_action_file)
-    else:
-        print("Extracting raw action data from actions.csv...")
-        gamestates = load_gamestates(f"{args.data_dir}/gamestates")
-        raw_action_data = extract_raw_action_data(gamestates, f"{args.data_dir}/actions.csv")
-    
-    # Apply data trimming
-    print("Applying data trimming...")
-    trimmed_features, trimmed_action_data, start_idx, end_idx = trim_sequences(
+    # ---------- Helpers ----------
+    def _match_start_index(raw_np: np.ndarray, trimmed_np: np.ndarray, tol: float = 1e-6) -> int:
+        """Find where the first few rows of trimmed_np occur inside raw_np."""
+        if raw_np.ndim != 2 or trimmed_np.ndim != 2:
+            return 0
+        K = min(3, trimmed_np.shape[0])
+        tgt = trimmed_np[:K]
+        N = raw_np.shape[0] - K + 1
+        for s in range(max(N, 0)):
+            if not np.allclose(raw_np[s], tgt[0], atol=tol, rtol=0):
+                continue
+            if K == 1 or np.allclose(raw_np[s:s+K], tgt, atol=tol, rtol=0):
+                return s
+        return 0
+
+    def _write_slice_info(path: str, start_idx_raw: int, end_idx_raw: int, count: int,
+                          first_ts: int, last_ts: int) -> None:
+        info = {
+            "start_idx_raw": int(start_idx_raw) if start_idx_raw is not None else None,
+            "end_idx_raw": int(end_idx_raw) if end_idx_raw is not None else None,
+            "count": int(count),
+            "first_timestamp": int(first_ts) if first_ts is not None else None,
+            "last_timestamp": int(last_ts) if last_ts is not None else None,
+        }
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            _json.dump(info, f, indent=2)
+
+    # ---- 1) Extract features fresh -------------------------------------------------
+    print("🔍 Extracting features from session gamestates (fresh)…")
+    # IMPORTANT: do NOT write global mappings; we will save under the session mappings dir.
+    features, feature_mappings, feature_timestamps = extract_features_from_gamestates(
+        gamestates, save_mappings=False
+    )
+
+    # ---- 2) Build session-local metadata from JSONs --------------------------------
+    gamestates_metadata = build_gamestates_metadata(str(gamestates_dir))
+    (mappings_dir / "gamestates_metadata.json").write_text(_json.dumps(gamestates_metadata, indent=2))
+
+    # ---- 3) Raw action data --------------------------------------------------------
+    print("Extracting raw action data…")
+    raw_action_data = extract_raw_action_data(gamestates, str(actions_csv), align_to_gamestates=True)
+    (raw_dir / "raw_action_data.json").write_text(_json.dumps(raw_action_data, indent=2))
+
+    # ---- 4) Trimming (features + action_data) --------------------------------------
+    print("Applying data trimming…")
+    trimmed_features, trimmed_raw_action_data, start_idx, end_idx = trim_sequences(
         features, raw_action_data
     )
-    
-    # Update metadata to match trimmed data
-    if gamestates_metadata:
-        gamestates_metadata = gamestates_metadata[start_idx:len(features) - end_idx]
-    
-    # -------------- TRIMMED SLICE INFO --------------
-    # Derive start/end by matching first/last trimmed action timestamps into full metadata
-    def _find_index_by_ts(ts, meta):
-        for i, m in enumerate(meta):
-            if m.get("absolute_timestamp") == ts:
-                return i
-        return None
-    trim_first_ts = trimmed_action_data[0]["gamestate_timestamp"]
-    trim_last_ts  = trimmed_action_data[-1]["gamestate_timestamp"]
-    trim_start = _find_index_by_ts(trim_first_ts, gamestates_metadata)
-    trim_end   = _find_index_by_ts(trim_last_ts, gamestates_metadata)
-    _write_slice_info(os.path.join(args.data_dir, "02_trimmed_data", "slice_info.json"),
-                      trim_start, trim_end, (trim_end - trim_start + 1) if (trim_start is not None and trim_end is not None) else len(trimmed_features),
-                      first_ts=trim_first_ts, last_ts=trim_last_ts)
-    
-    # Normalize features
-    print("Normalizing features...")
-    normalized_features = normalize_features(trimmed_features, f"{args.data_dir}/05_mappings/feature_mappings.json")
-    
-    # Create temporal sequences from raw (trimmed) features
-    print("Creating temporal sequences from raw features...")
-    raw_input_sequences, action_input_sequences, target_sequences = create_temporal_sequences(
-        trimmed_features, raw_action_data
-    )
-    
-    # Create temporal sequences from normalized features
-    print("Creating temporal sequences from normalized features...")
-    normalized_input_sequences, _, _ = create_temporal_sequences(
-        normalized_features, raw_action_data
-    )
-    
-    # Use raw sequences as the default input sequences
-    input_sequences = raw_input_sequences
-    
-    # Normalize action data
-    print("Normalizing action data...")
-    normalized_action_data = normalize_action_data(raw_action_data, normalized_features)
-    
-    # Create screenshot paths
-    print("Creating screenshot paths...")
-    screenshot_paths = create_screenshot_paths(gamestates_metadata, f"{args.data_dir}/runelite_screenshots")
-    
-    # Load id_mappings if available (existing-features mode)
-    id_mappings_path = Path(f"{args.data_dir}/features/id_mappings.json")
-    if id_mappings_path.exists():
-        try:
-            import json
-            with open(id_mappings_path, 'r') as f:
-                id_mappings = json.load(f)
-            print("Loaded id_mappings from existing features")
-        except Exception as e:
-            print(f"⚠ Warning: Failed to load id_mappings: {e}")
-            id_mappings = {}
-    else:
-        id_mappings = {}
-    
-    # Save training data
-    print("Saving training data...")
-    save_organized_training_data(
-        args.raw_dir,
-        args.trimmed_dir,
-        args.normalized_dir,
-        args.mappings_dir,
-        args.final_dir,
-        features,
-        trimmed_features,
-        normalized_features,
-        input_sequences,
-        normalized_input_sequences,
-        target_sequences,
-        action_input_sequences,
-        raw_action_data,
-        raw_action_data,  # trimmed_raw_action_data (using raw for now)
-        normalized_action_data,
-        feature_mappings,
-        id_mappings,
-        gamestates_metadata,
-        screenshot_paths
-    )
-    
-    # Save final training data
-    print("Saving final training data...")
-    save_final_training_data(
-        args.final_dir,
-        normalized_input_sequences,
-        action_input_sequences,
-        target_sequences
-    )
+    # DO NOT mutate raw metadata. Keep a raw copy and make a trimmed view when needed.
+    gamestates_metadata_raw = gamestates_metadata
+    gamestates_metadata_trim = gamestates_metadata_raw[start_idx: len(features) - end_idx]
 
-
-def process_with_feature_extraction(args):
-    """Process by extracting features from gamestates."""
-    # Load gamestates
-    print("Loading gamestates...")
-    gamestates = load_gamestates(f"{args.data_dir}/gamestates")
+    # ---- 5) Normalize features -----------------------------------------------------
+    print("Normalizing features…")
+    # Save session-local feature mappings (no globals).
+    (mappings_dir / "feature_mappings.json").write_text(_json.dumps(feature_mappings, indent=2))
+    normalized_features = normalize_features(trimmed_features, str(mappings_dir / "feature_mappings.json"))
+    # Save raw features + ids
+    np.save(raw_dir / "state_features.npy", features)
+    (mappings_dir / "id_mappings.json").write_text(_json.dumps(feature_timestamps, indent=2))
     
-    # Extract features
-    print("Extracting features from gamestates...")
-    features, feature_mappings, id_mappings = extract_features_from_gamestates(gamestates)
-    
-    # Load actions
-    print("Loading actions...")
-    actions_df = load_actions(f"{args.data_dir}/actions.csv")
-    
-    # Extract raw action data
-    print("Extracting raw action data...")
-    raw_action_data = extract_raw_action_data(gamestates, f"{args.data_dir}/actions.csv")
-    
-    # Derive encodings from existing training targets (if available)
-    action_targets_file = f"{args.data_dir}/training_data/action_targets.json"
-    if Path(action_targets_file).exists():
-        print("Deriving action encodings from existing training data...")
-        action_encoder = derive_encodings_from_data(action_targets_file)
-    else:
-        print("Creating new action encoder...")
-        action_encoder = derive_encodings_from_raw_actions(raw_action_data)
-    
-    # Convert raw actions to training format
-    print("Converting raw actions to training format...")
-    action_targets = convert_raw_actions_to_tensors(raw_action_data, action_encoder)
-    
-    # Apply data trimming
-    print("Applying data trimming...")
-    trimmed_features, trimmed_action_targets, start_idx, end_idx = trim_sequences(
-        features, action_targets
-    )
-    
-    # Also trim raw_action_data to match the trimmed features
-    print("Trimming raw action data to match features...")
-    trimmed_raw_action_data = raw_action_data[start_idx:len(raw_action_data) - end_idx]
-    print(f"  Raw action data trimmed from {len(raw_action_data)} to {len(trimmed_raw_action_data)} gamestates")
-
-    # Create gamestates metadata
-    print("Creating gamestates metadata...")
-    gamestates_metadata = []
-    for i, gamestate in enumerate(gamestates[start_idx:len(gamestates) - end_idx]):
-        absolute_timestamp = gamestate.get('timestamp', 0)
-        relative_timestamp = absolute_timestamp - gamestates[0].get('timestamp', 0)
-        metadata = {
-            'index': i,
-            'absolute_timestamp': absolute_timestamp,
-            'relative_timestamp': relative_timestamp,
-            'filename': f"gamestate_{i}.json"
-        }
-        gamestates_metadata.append(metadata)
-
-    # Normalize features (features are already relative timestamps, just need scaling)
-    print("Normalizing features...")
-    # Use the global feature mappings that were just created, not session-specific ones
-    global_mappings_file = "data/features/feature_mappings.json"
-    if not Path(global_mappings_file).exists():
-        raise FileNotFoundError(f"Feature mappings file not found: {global_mappings_file}. Feature extraction should have created this file.")
-    normalized_features = normalize_features(trimmed_features, global_mappings_file)
-
-    # Create temporal sequences from raw (trimmed) features
-    print("Creating temporal sequences from raw features...")
-    raw_input_sequences, action_input_sequences, target_sequences = create_temporal_sequences(
+    # ---- 7) Build sequences --------------------------------------------------------
+    print("Creating temporal sequences from raw features…")
+    input_sequences, action_input_sequences, target_sequences = create_temporal_sequences(
         trimmed_features, trimmed_raw_action_data
     )
     
@@ -384,80 +230,92 @@ def process_with_feature_extraction(args):
     )
     
     # Use raw sequences as the default input sequences
-    input_sequences = raw_input_sequences
-    print(f"Raw sequences created from trimmed features: {raw_input_sequences.shape}")
-    print(f"Normalized sequences created from normalized features: {normalized_input_sequences.shape}")
-
-    # Normalize action data (using trimmed raw action data)
+    # (input_sequences is already set above)
+    
+    # Normalize action data
     print("Normalizing action data...")
     normalized_action_data = normalize_action_data(trimmed_raw_action_data, normalized_features)
+
+    # (optional but helpful) persist the trimmed raw actions for inspection
+    try:
+        (trimmed_dir / "trimmed_raw_action_data.json").write_text(_json.dumps(trimmed_raw_action_data, indent=2))
+    except Exception:
+        pass
     
-    # Create normalized action sequences and targets
-    print("Creating normalized action sequences and targets...")
-    _, normalized_action_input_sequences, normalized_target_sequences = create_temporal_sequences(
-        normalized_features, normalized_action_data
+    # ---- 8) Screenshot paths & metadata -------------------------------------------
+    # For screenshots counts, the trimmed view is what the UI expects.
+    screenshot_paths = create_screenshot_paths(gamestates_metadata_trim, str(session_root / "runelite_screenshots"))
+    
+    # Load id_mappings if available (existing-features mode)
+    id_mappings_path = Path(mappings_dir / "id_mappings.json")
+    if id_mappings_path.exists():
+        try:
+            with open(id_mappings_path, 'r') as f:
+                id_mappings = _json.load(f)
+            print("Loaded id_mappings from existing features")
+        except Exception as e:
+            print(f"⚠ Warning: Failed to load id_mappings: {e}")
+            id_mappings = {}
+    else:
+        id_mappings = {}
+    
+    # Build trimmed action data to match feature trim window
+    trimmed_raw_action_data = raw_action_data[start_idx : start_idx + len(trimmed_features)]
+
+    save_organized_training_data(str(raw_dir), str(trimmed_dir), str(normalized_dir),
+                                 str(mappings_dir), str(final_dir),
+                                 features,
+                                 trimmed_features, normalized_features,
+                                 input_sequences, normalized_input_sequences,
+                                 target_sequences, action_input_sequences,
+                                 raw_action_data, trimmed_raw_action_data,
+                                 normalized_action_data, feature_mappings,
+                                 id_mappings,
+                                 gamestates_metadata_raw,
+                                 screenshot_paths
+                                 )
+    
+    # -------------- RAW SLICE INFO --------------
+    raw_N = int(features.shape[0])
+    _write_slice_info(
+        str(raw_dir / "slice_info.json"),
+        0, raw_N - 1, raw_N,
+        first_ts=gamestates_metadata_raw[0]["absolute_timestamp"],
+        last_ts=gamestates_metadata_raw[raw_N - 1]["absolute_timestamp"]
     )
     
-    print(f"Normalized action targets created: {len(normalized_target_sequences)} sequences")
-    print(f"Normalized action input sequences created: {len(normalized_action_input_sequences)} sequences")
-    
-    # Sanity checks before saving
-    assert raw_input_sequences.ndim == 3 and raw_input_sequences.shape[1] == 10, "inputs must be (B, 10, 128)"
-    assert action_input_sequences.ndim == 4 and action_input_sequences.shape[1] == 10 and action_input_sequences.shape[2] == 100 and action_input_sequences.shape[3] == 8, "action_input_sequences must be (B, 10, 100, 8)"
-    assert target_sequences.ndim == 2+1 and target_sequences.shape[1] == 100 and target_sequences.shape[2] == 8, "action_targets must be (B, 100, 8)"
-    
-    # Create screenshot paths
-    print("Creating screenshot paths...")
-    screenshot_paths = create_screenshot_paths(gamestates_metadata, f"{args.data_dir}/runelite_screenshots")
-    
-    # Ensure the expected directory structure exists
-    print("Creating expected directory structure...")
-    Path(args.mappings_dir).mkdir(parents=True, exist_ok=True)
-    
-    # Copy the global feature mappings to the expected location
-    global_mappings_file = "data/features/feature_mappings.json"
-    expected_mappings_file = f"{args.mappings_dir}/feature_mappings.json"
-    if Path(global_mappings_file).exists():
-        import shutil
-        shutil.copy2(global_mappings_file, expected_mappings_file)
-        print(f"Copied feature mappings to: {expected_mappings_file}")
-    else:
-        print(f"Warning: Global feature mappings not found at {global_mappings_file}")
-    
-    # Save training data
-    print("Saving training data...")
-    save_organized_training_data(
-        args.raw_dir,
-        args.trimmed_dir,
-        args.normalized_dir,
-        args.mappings_dir,
-        args.final_dir,
-        features,
-        trimmed_features,
-        normalized_features,
-        input_sequences,  # raw sequences from trimmed_features
-        normalized_input_sequences,  # normalized sequences from normalized_features
-        target_sequences,  # raw targets from trimmed_action_targets
-        action_input_sequences,  # raw action input sequences
-        raw_action_data,
-        trimmed_raw_action_data,
-        normalized_action_data,
-        feature_mappings,
-        id_mappings,
-        gamestates_metadata,
-        screenshot_paths
+    # -------------- TRIMMED SLICE INFO --------------
+    # Use RAW metadata for absolute references to avoid index errors
+    s_trim = start_idx
+    e_trim = start_idx + len(trimmed_features) - 1
+    _write_slice_info(
+        str(trimmed_dir / "slice_info.json"),
+        s_trim, e_trim, len(trimmed_features),
+        first_ts=gamestates_metadata_raw[s_trim]["absolute_timestamp"],
+        last_ts=gamestates_metadata_raw[e_trim]["absolute_timestamp"]
     )
     
     # -------------- FINAL TRAINING SLICE INFO --------------
-    seq_B = int(input_sequences.shape[0])      # Batches
-    SEQ_LEN = 10                                   # keep in sync
-    final_count = seq_B + SEQ_LEN + 1
-    final_start = start_idx if start_idx is not None else 0
-    final_end   = (final_start + final_count - 1) if final_start is not None else None
-    first_ts = gamestates_metadata[0]["absolute_timestamp"] if gamestates_metadata else None
-    last_ts  = gamestates_metadata[-1]["absolute_timestamp"] if gamestates_metadata else None
-    _write_slice_info(os.path.join(args.data_dir, "06_final_training_data", "slice_info.json"),
-                      final_start, final_end, final_count, first_ts=first_ts, last_ts=last_ts)
+    seq_B = int(input_sequences.shape[0])                 # 34
+    first_seq_raw_idx = start_idx                         # 5 in your log
+    last_target_raw_idx = start_idx + len(trimmed_features) - 1  # 5+45-1 = 49
+    _write_slice_info(
+        str(final_dir / "slice_info.json"),
+        first_seq_raw_idx,
+        last_target_raw_idx,
+        seq_B,
+        first_ts=gamestates_metadata_raw[first_seq_raw_idx]["absolute_timestamp"],
+        last_ts=gamestates_metadata_raw[last_target_raw_idx]["absolute_timestamp"]
+    )
+
+    # -------------- NORMALIZED SLICE INFO --------------
+    # Normalized features are a 1:1 transform of trimmed features; reuse start/end.
+    _write_slice_info(
+        str(normalized_dir / "slice_info.json"),
+        s_trim, e_trim, len(trimmed_features),
+        first_ts=gamestates_metadata_raw[s_trim]["absolute_timestamp"],
+        last_ts=gamestates_metadata_raw[e_trim]["absolute_timestamp"]
+    )
 
 
 if __name__ == "__main__":

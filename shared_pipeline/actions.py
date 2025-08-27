@@ -103,10 +103,10 @@ def flatten_action_window(actions: List[Dict], encoder: ActionEncoder) -> List[f
         
     Returns:
         Flattened action sequence in training format:
-        [action_count, timestamp1, type1, x1, y1, button1, key1, scroll_dx1, scroll_dy1, ...]
+        [timestamp1, type1, x1, y1, button1, key1, scroll_dx1, scroll_dy1, ...]
     """
     if not actions:
-        return [0]  # No actions
+        return []  # No actions
     
     # Sort actions by timestamp
     sorted_actions = sorted(actions, key=lambda a: a.get('timestamp', 0))
@@ -166,44 +166,29 @@ def convert_actions_to_training_format(action_sequences: List[Dict], encoder: Ac
     return training_formats
 
 
-def extract_raw_action_data(gamestates: List[Dict], actions_file: str = "data/actions.csv") -> List[Dict]:
+def extract_raw_action_data(gamestates, actions_csv_path, align_to_gamestates: bool = False):
     """
-    Extract raw action data from the last 600ms for each gamestate.
-    
-    Args:
-        gamestates: List of gamestate dictionaries
-        actions_file: Path to actions.csv file
-        
-    Returns:
-        List of raw action data dictionaries with relative timestamps
+    Build per-gamestate action buckets. If align_to_gamestates=True, the "timestamp"
+    field stored on each atomic action is made **relative to the earliest gamestate ts**,
+    so features['timestamp'] and action['timestamp'] share the same zero-point.
     """
-    print("Extracting raw action data...")
+    import pandas as pd
+    df = pd.read_csv(actions_csv_path)
     
-    # Load actions from CSV
-    actions_path = Path(actions_file)
-    if not actions_path.exists():
-        raise FileNotFoundError(f"Actions file not found: {actions_path}")
+    # Find session start time
+    if align_to_gamestates:
+        session_start_time = int(min(gs.get("timestamp", 0) for gs in gamestates))
+    else:
+        session_start_time = int(df["timestamp"].min())
     
-    actions_df = pd.read_csv(actions_path)
-    actions_df['timestamp'] = pd.to_numeric(actions_df['timestamp'], errors='coerce')
-    actions_df = actions_df.dropna(subset=['timestamp'])
-    
-    # Find session start time (minimum timestamp across all actions)
-    all_timestamps = actions_df['timestamp'].tolist()
-    session_start_time = min(all_timestamps)
-    print(f"  Session start time: {session_start_time}")
-    
-    raw_action_data = []
-    
-    for gamestate in gamestates:
-        gamestate_timestamp = gamestate.get('timestamp', 0)
-        window_start = gamestate_timestamp - 600
+    # Build action buckets for each gamestate
+    buckets = []
+    for i, gs in enumerate(gamestates):
+        gs_ts = int(gs.get("timestamp", 0))
+        window_start = gs_ts - 600  # 600ms before gamestate
         
-        # Get actions in 600ms window BEFORE gamestate
-        relevant_actions = actions_df[
-            (actions_df['timestamp'] >= window_start) & 
-            (actions_df['timestamp'] < gamestate_timestamp)
-        ].sort_values('timestamp')
+        # Get actions in window
+        relevant = df[(df["timestamp"] >= window_start) & (df["timestamp"] < gs_ts)]
         
         # Separate by action type
         mouse_movements = []
@@ -212,43 +197,40 @@ def extract_raw_action_data(gamestates: List[Dict], actions_file: str = "data/ac
         key_releases = []
         scrolls = []
         
-        for _, action in relevant_actions.iterrows():
-            action_type = action.get('event_type', '')
-            absolute_action_timestamp = action.get('timestamp', 0)
-            # Convert to relative milliseconds from session start
-            relative_action_timestamp = absolute_action_timestamp - session_start_time
+        for _, row in relevant.iterrows():
+            abs_ts = int(row.timestamp)
+            rel_ts = abs_ts - session_start_time
+            # store both, to make verification trivial later
+            action_rec = {"timestamp": float(rel_ts),
+                          "absolute_timestamp": abs_ts}
             
-            if action_type == 'move':
-                mouse_movements.append({
-                    'timestamp': relative_action_timestamp,  # Use relative timestamp
-                    'x': action.get('x_in_window', 0),
-                    'y': action.get('y_in_window', 0)
+            if row["event_type"] == "move":
+                action_rec.update({
+                    "x": int(row.get("x_in_window", 0)),
+                    "y": int(row.get("y_in_window", 0))
                 })
-            elif action_type == 'click':
-                clicks.append({
-                    'timestamp': relative_action_timestamp,  # Use relative timestamp
-                    'x': action.get('x_in_window', 0),
-                    'y': action.get('y_in_window', 0),
-                    'button': action.get('btn', '')
+                mouse_movements.append(action_rec)
+            elif row["event_type"] == "click":
+                action_rec.update({
+                    "x": int(row.get("x_in_window", 0)),
+                    "y": int(row.get("y_in_window", 0)),
+                    "button": str(row.get("btn", ""))
                 })
-            elif action_type == 'key_press':
-                key_presses.append({
-                    'timestamp': relative_action_timestamp,  # Use relative timestamp
-                    'key': action.get('key', '')
+                clicks.append(action_rec)
+            elif row["event_type"] == "key_press":
+                action_rec.update({"key": str(row.get("key", ""))})
+                key_presses.append(action_rec)
+            elif row["event_type"] == "key_release":
+                action_rec.update({"key": str(row.get("key", ""))})
+                key_releases.append(action_rec)
+            elif row["event_type"] == "scroll":
+                action_rec.update({
+                    "dx": int(row.get("scroll_dx", 0)),
+                    "dy": int(row.get("scroll_dy", 0))
                 })
-            elif action_type == 'key_release':
-                key_releases.append({
-                    'timestamp': relative_action_timestamp,  # Use relative timestamp
-                    'key': action.get('key', '')
-                })
-            elif action_type == 'scroll':
-                scrolls.append({
-                    'timestamp': relative_action_timestamp,  # Use relative timestamp
-                    'dx': action.get('scroll_dx', 0),
-                    'dy': action.get('scroll_dy', 0)
-                })
+                scrolls.append(action_rec)
         
-        raw_action_data.append({
+        buckets.append({
             'mouse_movements': mouse_movements,
             'clicks': clicks,
             'key_presses': key_presses,
@@ -256,9 +238,12 @@ def extract_raw_action_data(gamestates: List[Dict], actions_file: str = "data/ac
             'scrolls': scrolls
         })
     
-    print(f"Extracted raw action data for {len(raw_action_data)} gamestates")
-    print(f"  - Timestamps converted to relative milliseconds from session start")
-    return raw_action_data
+    # attach the source gamestate absolute ts to each bucket (verification + UI)
+    for i, gs in enumerate(gamestates):
+        for key in ("mouse_movements", "clicks", "key_presses", "key_releases", "scrolls"):
+            bucket = buckets[i].get(key, [])
+        buckets[i]["gamestate_timestamp"] = int(gs.get("timestamp", 0))
+    return buckets
 
 
 def convert_raw_actions_to_tensors(raw_action_data: List[Dict], encoder: ActionEncoder) -> List[List[float]]:
@@ -284,8 +269,8 @@ def convert_raw_actions_to_tensors(raw_action_data: List[Dict], encoder: ActionE
                         len(gamestate_actions.get('key_releases', [])) + 
                         len(gamestate_actions.get('scrolls', [])))
         
-        # Start building the action tensor: [action_count, timestamp1, type1, x1, y1, button1, key1, scroll_dx1, scroll_dy1, ...]
-        action_tensor = [total_actions]
+        # Start building the action tensor: [timestamp1, type1, x1, y1, button1, key1, scroll_dx1, scroll_dy1, ...]
+        action_tensor = []
         
         # Collect all actions with their metadata
         all_actions = []
@@ -406,23 +391,23 @@ def analyze_action_distribution(action_targets: List[List[float]]) -> Dict:
     """
     print("Analyzing action distribution from targets...")
     
-    # Action counts per window
-    action_counts = [int(seq[0]) for seq in action_targets if len(seq) > 0]
+    # Action counts per window (derive from length since each action = 8 floats)
+    action_counts = [len(seq) // 8 for seq in action_targets]
     
-    # Action types distribution (type is at index 2, 10, 18, etc.)
+    # Action types distribution (type is at index 1, 9, 17, etc.)
     action_types = defaultdict(int)
     for seq in action_targets:
-        if len(seq) > 1:  # Has at least action count + 1 action
-            for i in range(1, len(seq), 8):  # Skip action count, then every 8 features
+        if len(seq) > 0:
+            for i in range(0, len(seq), 8):  # every action is 8 floats
                 if i + 1 < len(seq):  # Make sure we have the type
                     action_type = int(seq[i + 1])  # type is at index i+1
                     action_types[action_type] += 1
     
-    # Timing distribution (timestamp is at index 1, 9, 17, etc.)
+    # Timing distribution (timestamp is at index 0, 8, 16, etc.)
     timings = []
     for seq in action_targets:
-        if len(seq) > 1:
-            for i in range(1, len(seq), 8):  # Skip action count, then every 8 features
+        if len(seq) > 0:
+            for i in range(0, len(seq), 8):
                 if i < len(seq):  # Make sure we have the timestamp
                     timings.append(seq[i])  # timestamp is at index i
     

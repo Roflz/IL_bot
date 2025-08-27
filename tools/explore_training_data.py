@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-Simple Training Data Pipeline Explorer
-"""
-
 import numpy as np
 import json
 import tkinter as tk
@@ -11,7 +6,7 @@ import tkinter.font as tkfont
 import os, sys, time, traceback, logging
 from pathlib import Path
 import pandas as pd
-import numpy as np
+from typing import Optional, Tuple
 # Optional plotting (for the Actions Graph tab)
 try:
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -40,6 +35,7 @@ class SimpleDataExplorer:
         self.current_folder = None
         self.current_file_path = None
         self.current_numpy_data = None
+        self.current_data = None     # current loaded data for summary updates
         self._full_metadata = None  # lazy-loaded features/gamestates_metadata.json
         self._slice_info = None     # {'start_idx_raw','end_idx_raw','count'}
         self._slice_cache = {}      # folder -> slice_info (memoize)
@@ -51,7 +47,12 @@ class SimpleDataExplorer:
             "sequences": tk.StringVar(value="-"),  # B
             "range": tk.StringVar(value="-"),
             "current": tk.StringVar(value="-"),
-            "timestamp": tk.StringVar(value="-")
+            "timestamp": tk.StringVar(value="-"),
+            "source_range": tk.StringVar(value="-"),
+            "current_slice": tk.StringVar(value="-"),
+            "sequence_range": tk.StringVar(value="-"),  # Sequence range and slice info
+            "first_ts": tk.StringVar(value="-"),
+            "last_ts": tk.StringVar(value="-")
         }
         # --- Logging: console + file ---
         log_path = os.path.join(os.path.dirname(__file__), "explorer_debug.log")
@@ -76,8 +77,21 @@ class SimpleDataExplorer:
             traceback.print_exception(exctype, value, tb)
         sys.excepthook = _exhook
         
-        # Default data directory
-        self.data_dir = "D:/repos/bot_runelite_IL/data"
+        # --- Session roots + default selection ---
+        self.base_data_root = "D:/repos/bot_runelite_IL/data"
+        self.sessions_root = Path(self.base_data_root) / "recording_sessions"
+        # discover sessions (sorted ascending; newest is last)
+        try:
+            self.sessions = sorted([p.name for p in self.sessions_root.iterdir() if p.is_dir()])
+        except Exception:
+            self.sessions = []
+        # default to latest session if present, else fall back to base root
+        if self.sessions:
+            self.session_name = self.sessions[-1]
+            self.data_dir = str(self.sessions_root / self.session_name)
+        else:
+            self.session_name = ""
+            self.data_dir = str(self.base_data_root)
         
         self.setup_ui()
         # Initialize 3D data tracking
@@ -117,12 +131,28 @@ class SimpleDataExplorer:
         # Simple controls (top)
         control_frame = ttk.Frame(self.root)
         control_frame.pack(fill=tk.X, padx=10, pady=5)
-        
-        ttk.Label(control_frame, text="Data Directory:").pack(side=tk.LEFT)
+
+        # Session chooser: combobox over all recording session folders
+        ttk.Label(control_frame, text="Session:").pack(side=tk.LEFT)
+        self.session_var = tk.StringVar(value=getattr(self, "session_name", ""))
+        self.session_cb = ttk.Combobox(
+            control_frame,
+            textvariable=self.session_var,
+            values=getattr(self, "sessions", []),
+            state="readonly",
+            width=24
+        )
+        self.session_cb.pack(side=tk.LEFT, padx=5)
+        self.session_cb.bind("<<ComboboxSelected>>", self.on_session_change)
+
+        # Read-only display of the resolved session path (for visibility)
+        ttk.Label(control_frame, text="Folder:").pack(side=tk.LEFT, padx=(10, 2))
         self.dir_var = tk.StringVar(value=self.data_dir)
-        ttk.Entry(control_frame, textvariable=self.dir_var, width=50).pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_frame, text="Browse", command=self.browse_dir).pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_frame, text="Refresh", command=self.load_files).pack(side=tk.LEFT, padx=5)
+        dir_entry = ttk.Entry(control_frame, textvariable=self.dir_var, width=50, state="readonly")
+        dir_entry.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(control_frame, text="Refresh Sessions", command=self.refresh_sessions).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Refresh Files", command=self.load_files).pack(side=tk.LEFT, padx=5)
         
         # ---------- TOP: file tabs (left) + summary pane (right) ----------
         top_paned = ttk.Panedwindow(self.root, orient="horizontal")
@@ -162,9 +192,14 @@ class SimpleDataExplorer:
         row("# Gamestates:", self.summary_vars["count"], 3)     # N
         row("Sequences:", self.summary_vars["sequences"], 4)    # B
         row("Source range (raw):", self.summary_vars["range"], 5)
-        ttk.Separator(self.summary_tab, orient="horizontal").grid(row=6, column=0, columnspan=2, sticky="ew", pady=(8,8))
-        row("Current slice:", self.summary_vars["current"], 7)
-        row("Unix timestamp:", self.summary_vars["timestamp"], 8)
+        row("Source range:", self.summary_vars["source_range"], 6)
+        ttk.Separator(self.summary_tab, orient="horizontal").grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8,8))
+        row("Current slice:", self.summary_vars["current"], 8)
+        row("Current slice (source):", self.summary_vars["current_slice"], 9)
+        row("Sequence range:", self.summary_vars["sequence_range"], 10)
+        row("First timestamp:", self.summary_vars["first_ts"], 11)
+        row("Last timestamp:", self.summary_vars["last_ts"], 12)
+        row("Unix timestamp:", self.summary_vars["timestamp"], 13)
         for c in (0,1):
             self.summary_tab.grid_columnconfigure(c, weight=1)
         # Actions Graph tab
@@ -286,8 +321,9 @@ class SimpleDataExplorer:
         return data4d.swapaxes(1, 2) if data4d.shape[1] < data4d.shape[2] else data4d
 
     def _configure_numpy_tree_4d(self, tree):
-        """Columns like the print viewer: 8 feature headers; #0 label 'Action'."""
-        cols = ("count", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy")
+        """Columns like the print viewer: 8 feature headers; #0 label 'Action'.
+        First feature is now 'timestamp' (no action count)."""
+        cols = ("timestamp", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy")
         tree.configure(columns=cols, displaycolumns=cols)
         tree.column("#0", width=100, stretch=tk.NO, anchor="w")
         tree.heading("#0", text="Action")
@@ -334,11 +370,10 @@ class SimpleDataExplorer:
             row = view[batch_idx, timestep_idx, i, :]  # (8,)
             values = [self._fmt_num(v) for v in row]
             item = tree.insert("", tk.END, text=f"Action {i}", values=values)
-            # Optional row coloring: only when count > 0
+            # Optional row coloring keyed only by action_type now
             try:
-                action_count = int(float(values[0]))
                 action_type = int(float(values[1]))
-                if action_count > 0 and action_type in action_colors:
+                if action_type in action_colors:
                     tag = f"action_{action_type}"
                     tree.tag_configure(tag, background=action_colors[action_type])
                     tree.item(item, tags=(tag,))
@@ -457,7 +492,7 @@ class SimpleDataExplorer:
         
         if self.current_file_type == "state_features":
             self.display_current_gamestate_features()
-        elif self.current_file_type == "action_data":
+        elif self.current_file_type in ("action_data", "action_tensors"):
             self.display_current_gamestate()
         elif self.current_file_type in ("numpy_array", "numpy_array_4d"):
             # For numpy arrays, update the slice display without changing columns
@@ -475,6 +510,8 @@ class SimpleDataExplorer:
         # Update summary slice + timestamp
         try:
             self._update_summary_current_slice()
+            # Always update the main summary to refresh sequence range info
+            self._update_summary()
             self._update_actions_graph()  # move the cursor to new position
         except Exception:
             self._log("_navigate_gamestate: summary update failed", level="error")
@@ -524,6 +561,9 @@ class SimpleDataExplorer:
             # Update summary main info after any successful load
             try:
                 self._update_summary_on_file_load(file_path)
+                # Also update the new summary format for JSON files
+                if file_path.endswith('.json'):
+                    self._update_summary()
                 self._update_actions_graph()  # refresh chart for the selected dataset
             except Exception:
                 self._log("load_file: summary update failed", level="error")
@@ -633,10 +673,28 @@ class SimpleDataExplorer:
         except Exception:
             self._log("display_numpy: summary update failed", level="error")
     
+    def _display_json(self, filename: str, data_obj):
+        """Route JSON displays with no fallbacks."""
+        self.tree.delete(*self.tree.get_children())
+        self._clear_columns()
+        if self._is_action_tensor_file(filename):
+            # Show the currently selected gamestate's flattened tensor as rows of 8
+            idx = max(0, min(self.current_gamestate or 0, len(data_obj) - 1))
+            self._display_action_tensors(data_obj[idx] if idx < len(data_obj) else [])
+        elif filename.endswith("_action_data.json"):
+            # Like before: render selected gamestate's actions as rows (derived from dicts)
+            self._display_action_json_gamestate(data_obj)
+        else:
+            # Fallback only for *generic* JSON (not our action formats)
+            self._display_generic_json(data_obj)
+
     def display_json(self, data):
         self.tree.delete(*self.tree.get_children())
         # clear stale ndarray reference so summary derives shape from clicked file
         self.current_numpy_data = None
+        
+        # Store the current data for summary updates
+        self.current_data = data
         
         if isinstance(data, list):
             if data and isinstance(data[0], dict):
@@ -671,22 +729,19 @@ class SimpleDataExplorer:
                     for i, item in enumerate(data[:100]):  # Limit to first 100 items
                         values = [str(item.get(key, "")) for key in keys]
                         self.tree.insert("", tk.END, text=f"Row {i}", values=values)
-            elif data and isinstance(data[0], list):
-                # Check if this is action tensor format (list of lists)
-                if len(data[0]) > 0 and isinstance(data[0][0], (int, float)):
-                    # Store the action tensor data for 3D navigation
+            elif (isinstance(data[0], list) if data else True):
+                # Treat as action tensors if (a) file is *_action_tensors.json OR
+                # (b) first row is a numeric list (legacy heuristic).
+                is_tensor_file = self._is_current_file_action_tensors()
+                first_is_numeric_list = bool(data and len(data[0]) > 0 and isinstance(data[0][0], (int, float)))
+                if is_tensor_file or first_is_numeric_list:
                     self.action_data = data
                     self.total_gamestates = len(data)
-                    self.current_file_type = "action_data"
-                    
-                    # Try to preserve the current gamestate if possible
+                    self.current_file_type = "action_tensors"
                     if self.current_gamestate >= self.total_gamestates:
                         self.current_gamestate = 0
-                    
                     self.gamestate_var.set(str(self.current_gamestate))
                     self.total_gamestates_label.config(text=f"of {self.total_gamestates}")
-                    
-                    # Display the current gamestate
                     self.display_current_gamestate()
                     return
                 else:
@@ -738,7 +793,9 @@ class SimpleDataExplorer:
         gamestate = self.action_data[self.current_gamestate]
         
         # Check if this is action data format (with timestamps) or action tensor format
-        if isinstance(gamestate, dict) and "mouse_movements" in gamestate:
+        if self.current_file_type == "action_tensors":
+            self._display_action_tensor_gamestate(gamestate)
+        elif isinstance(gamestate, dict) and "mouse_movements" in gamestate:
             # Action data format - display timestamp-based view
             self._display_action_data_gamestate(gamestate)
         elif isinstance(gamestate, list):
@@ -747,6 +804,13 @@ class SimpleDataExplorer:
         
         # Force update the display
         self.root.update_idletasks()
+        
+        # Update summary if we have current data
+        if hasattr(self, 'current_data') and isinstance(self.current_data, list):
+            try:
+                self._update_summary()
+            except Exception:
+                self._log("display_current_gamestate: summary update failed", level="error")
     
     def _display_action_data_gamestate(self, gamestate):
         """Display action data gamestate with timestamps"""
@@ -809,70 +873,38 @@ class SimpleDataExplorer:
             self.tree.insert("", tk.END, text=f"Row {i}", values=values)
     
     def _display_action_tensor_gamestate(self, gamestate):
-        """Display action tensor gamestate with actions as rows and features as columns"""
-        # Completely reset the tree structure
         self.tree.delete(*self.tree.get_children())
+
+        # Define columns and configure the tree properly
+        cols = ['action', 'timestamp', 'type', 'x', 'y', 'button', 'key', 'scroll_dx', 'scroll_dy']
+        self.tree.configure(columns=cols, displaycolumns=cols)
         
-        # Get action count from index 0
-        action_count = gamestate[0] if gamestate else 0
+        # Set up column headers and widths
+        self.tree.column("#0", width=80, stretch=tk.NO)
+        self.tree.heading("#0", text="Action")
         
-        # Set up columns: action number + 8 features with meaningful names
-        columns = ["action", "timestamp", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy"]
-        
-        # Configure columns directly (avoid empty-tuple reset)
-        self.tree.configure(columns=columns, displaycolumns=columns)
-        
-        self.tree.column("#0", width=80)
-        self.tree.heading("#0", text="Row")
-        
-        for col in columns:
-            self.tree.column(col, width=100)
+        for col in cols:
+            self.tree.column(col, width=120, anchor=tk.CENTER)
             self.tree.heading(col, text=col)
-        
-        # Update status to show current gamestate
-        self.status_var.set(f"Showing gamestate {self.current_gamestate} of {self.total_gamestates} - {action_count} actions")
-        
-        # Display action count row
-        action_count_values = ["Action Count"] + [""] * 8
-        self.tree.insert("", tk.END, text="Row 0", values=action_count_values)
-        
-        # Display each action as a row with its 8 features as columns
-        for action_idx in range(action_count):
-            start_idx = 1 + (action_idx * 8)
-            end_idx = start_idx + 8
-            
-            # Get the 8 features for this action
-            features = gamestate[start_idx:end_idx] if end_idx <= len(gamestate) else gamestate[start_idx:]
-            
-            # Pad with empty strings if we don't have all 8 features
-            while len(features) < 8:
-                features.append("")
-            
-            # Convert codes to human-readable values or keep raw values based on toggle
-            if self.show_mapped_values:
-                timestamp = features[0] if len(features) > 0 else ""
-                action_type = self._convert_action_type_code(features[1]) if len(features) > 1 else ""
-                x = features[2] if len(features) > 2 else ""
-                y = features[3] if len(features) > 3 else ""
-                button = self._convert_button_code(features[4]) if len(features) > 4 else ""
-                key = self._convert_key_code(features[5]) if len(features) > 5 else ""
-                scroll_dx = features[6] if len(features) > 6 else ""
-                scroll_dy = features[7] if len(features) > 7 else ""
-            else:
-                # Show raw numeric values
-                timestamp = features[0] if len(features) > 0 else ""
-                action_type = features[1] if len(features) > 1 else ""
-                x = features[2] if len(features) > 2 else ""
-                y = features[3] if len(features) > 3 else ""
-                button = features[4] if len(features) > 4 else ""
-                key = features[5] if len(features) > 5 else ""
-                scroll_dx = features[6] if len(features) > 6 else ""
-                scroll_dy = features[7] if len(features) > 7 else ""
-            
-            # Create row values: action number + 8 features
-            row_values = [f"Action {action_idx + 1}", timestamp, action_type, x, y, button, key, scroll_dx, scroll_dy]
-            
-            self.tree.insert("", tk.END, text=f"Row {action_idx + 1}", values=row_values)
+
+        if not isinstance(gamestate, list) or len(gamestate) < 8:
+            self._safe_status("No actions in this gamestate.")
+            return
+
+        # Debug logging
+        self._log("_display_action_tensor_gamestate", 
+                  gamestate_length=len(gamestate), 
+                  current_gamestate=self.current_gamestate)
+
+        start = 1 if len(gamestate) % 8 != 0 else 0
+        for i in range(start, len(gamestate), 8):
+            row = gamestate[i:i+8]
+            action_idx = (i - start) // 8
+            values = [str(action_idx)] + [str(x) for x in row]
+            self.tree.insert("", "end", text=f"Action {action_idx}", values=values)
+
+        count = (len(gamestate) - start) // 8
+        self._safe_status(f"Gamestate {self.current_gamestate}: {count} actions")
     
     def _convert_action_type_code(self, code):
         """Convert action type code to string"""
@@ -986,29 +1018,53 @@ class SimpleDataExplorer:
             n_features = data.shape[2]
             # if 8 features, show nice names used in action arrays
             if n_features == 8:
-                cols = ("count", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy")
+                cols = ("timestamp", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy")
             else:
                 cols = tuple(f"F{i}" for i in range(n_features))
-            self._set_tree_columns(tree, cols)
-            tree.column("#0", width=100, stretch=tk.NO, anchor="w")
+            
+            # Configure columns properly for large feature counts
+            tree.configure(columns=cols, displaycolumns=cols)
+            tree.column("#0", width=150, stretch=tk.NO, anchor="w")
             tree.heading("#0", text="Timestep")
-            for name in cols:
-                tree.column(name, anchor=tk.CENTER, width=140, minwidth=120, stretch=True)
-                tree.heading(name, text=name)
+            
+            # Set reasonable column widths for large feature counts
+            if n_features > 50:
+                # For large feature counts, use smaller widths and enable horizontal scrolling
+                col_width = 80
+                for name in cols:
+                    tree.column(name, anchor=tk.CENTER, width=col_width, minwidth=60, stretch=False)
+                    tree.heading(name, text=name)
+            else:
+                # For smaller feature counts, use normal widths
+                for name in cols:
+                    tree.column(name, anchor=tk.CENTER, width=140, minwidth=120, stretch=True)
+                    tree.heading(name, text=name)
         else:
             self._log("configure_numpy_tree: 4D+")
             # For 4D+ arrays, show slice navigation for first two dimensions
             n_features = data.shape[-1]
             if n_features == 8:
-                cols = ("count", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy")
+                cols = ("timestamp", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy")
             else:
                 cols = tuple(f"F{i}" for i in range(n_features))
-            self._set_tree_columns(tree, cols)
-            tree.column("#0", width=100, stretch=tk.NO)
+            
+            # Configure columns properly for large feature counts
+            tree.configure(columns=cols, displaycolumns=cols)
+            tree.column("#0", width=150, stretch=tk.NO)
             tree.heading("#0", text="Timestep")
-            for name in cols:
-                tree.column(name, anchor=tk.CENTER, width=140, minwidth=120, stretch=True)
-                tree.heading(name, text=name)
+            
+            # Set reasonable column widths for large feature counts
+            if n_features > 50:
+                # For large feature counts, use smaller widths and enable horizontal scrolling
+                col_width = 80
+                for name in cols:
+                    tree.column(name, anchor=tk.CENTER, width=col_width, minwidth=60, stretch=False)
+                    tree.heading(name, text=name)
+            else:
+                # For smaller feature counts, use normal widths
+                for name in cols:
+                    tree.column(name, anchor=tk.CENTER, width=140, minwidth=120, stretch=True)
+                    tree.heading(name, text=name)
     
     def update_3d_slice_for_tab(self, tab_frame, slice_idx):
         """Update a specific tab's 3D slice display"""
@@ -1032,6 +1088,27 @@ class SimpleDataExplorer:
             # Clear existing items
             for item in tree.get_children():
                 tree.delete(item)
+            
+            # Add sequence context header
+            n_timesteps = data.shape[1]
+            n_features = data.shape[2]
+            
+            # Determine sequence type based on features
+            if n_features == 8:
+                sequence_type = "Action"
+            elif n_features == 128:
+                sequence_type = "Gamestate"
+            else:
+                sequence_type = "Feature"
+            
+            # Create context header
+            context_text = f"{sequence_type} Sequence (0-{n_timesteps-1}) | Features: {n_features}"
+            header_item = tree.insert("", "end", text=context_text, values=[""] * n_features)
+            
+            # Style the header
+            tree.tag_configure("header", background="lightgray", font=("Arial", 9, "bold"))
+            tree.item(header_item, tags=("header",))
+            
             # Action-type colors used in both 3-D (targets-as-features) and 4-D views
             action_colors = {
                 0: "lightblue",    # move
@@ -1039,6 +1116,7 @@ class SimpleDataExplorer:
                 2: "lightyellow",  # key_press/key_release
                 3: "lightcoral"    # scroll
             }
+            
             # Add ALL data for this slice
             if data.ndim == 3:
                 self._log("update_3d_slice_for_tab: rendering 3D rows",
@@ -1054,13 +1132,21 @@ class SimpleDataExplorer:
                                 return f"{float(v):.6f}"
                             return str(v)
                         values = [_fmt(val) for val in data[slice_idx, i]]
-                        item = tree.insert("", tk.END, text=f"Timestep {i}", values=values)
-                        # Color if it looks like an action row (8 features)
+                        
+                        # Create descriptive timestep label
+                        if i == 0:
+                            timestep_label = f"Timestep {i} (start)"
+                        elif i == data.shape[1] - 1:
+                            timestep_label = f"Timestep {i} (current)"
+                        else:
+                            timestep_label = f"Timestep {i}"
+                        
+                        item = tree.insert("", tk.END, text=timestep_label, values=values)
+                        # Color 8-feature rows by action_type (no count anymore)
                         if len(values) == 8:
                             try:
-                                action_count = int(float(values[0]))
                                 action_type = int(float(values[1]))
-                                if action_count > 0 and action_type in action_colors:
+                                if action_type in action_colors:
                                     tree.tag_configure(f"action_{action_type}", background=action_colors[action_type])
                                     tree.item(item, tags=(f"action_{action_type}",))
                             except (ValueError, IndexError):
@@ -1084,12 +1170,20 @@ class SimpleDataExplorer:
                                 return f"{float(v):.6f}"
                             return str(v)
                         values = [_fmt(v) for v in data[slice_idx, a, i, :]]
-                        item = tree.insert("", tk.END, text=f"Timestep {i}", values=values)
+                        
+                        # Create descriptive timestep label with action slice info
+                        if i == 0:
+                            timestep_label = f"Timestep {i} (start) | Action {a}"
+                        elif i == data.shape[2] - 1:
+                            timestep_label = f"Timestep {i} (current) | Action {a}"
+                        else:
+                            timestep_label = f"Timestep {i} | Action {a}"
+                        
+                        item = tree.insert("", tk.END, text=timestep_label, values=values)
                         if len(values) == 8:
                             try:
-                                action_count = int(float(values[0]))
                                 action_type = int(float(values[1]))
-                                if action_count > 0 and action_type in action_colors:
+                                if action_type in action_colors:
                                     tree.tag_configure(f"action_{action_type}", background=action_colors[action_type])
                                     tree.item(item, tags=(f"action_{action_type}",))
                             except (ValueError, IndexError):
@@ -1194,18 +1288,34 @@ class SimpleDataExplorer:
 
     # -------------------- Summary helpers --------------------
     def _load_full_metadata(self):
-        """Load raw metadata with absolute timestamps (features/gamestates_metadata.json)."""
+        """Load session-local metadata with absolute timestamps."""
         if self._full_metadata is not None:
             return self._full_metadata
-        try:
-            meta_path = os.path.join(self.data_dir, "features", "gamestates_metadata.json")
-            with open(meta_path, "r") as f:
-                self._full_metadata = json.load(f)
-            self._log("_load_full_metadata", count=len(self._full_metadata))
-        except Exception as e:
-            self._log("_load_full_metadata failed", level="error", error=str(e))
-            self._full_metadata = []
+        # Session-local only
+        candidates = [
+            os.path.join(self.data_dir, "05_mappings", "gamestates_metadata.json"),
+            os.path.join(self.data_dir, "mappings", "gamestates_metadata.json"),  # legacy session name
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                try:
+                    self._full_metadata = json.load(open(p, "r"))
+                    self._log("_load_full_metadata", count=len(self._full_metadata))
+                    return self._full_metadata
+                except Exception:
+                    pass
+        self._full_metadata = []
         return self._full_metadata
+
+    def _load_slice_info(self, folder_path: Path) -> Optional[dict]:
+        """Load slice info for exactly this folder. No fallbacks."""
+        p = folder_path / "slice_info.json"
+        if p.exists():
+            try:
+                return json.loads(p.read_text())
+            except Exception:
+                return None
+        return None
 
     def _infer_slice_info(self, folder: str) -> dict:
         """
@@ -1304,6 +1414,106 @@ class SimpleDataExplorer:
             self._slice_cache[folder] = info
             return info
 
+    def _compute_action_shape(self, action_list: list) -> Tuple[int, int, int]:
+        """Return (G, max_A, 8) for a list of per-gamestate action dicts."""
+        G = len(action_list)
+        def _count(gs):
+            return (len(gs.get("mouse_movements", [])) +
+                    len(gs.get("clicks", [])) +
+                    len(gs.get("key_presses", [])) +
+                    len(gs.get("key_releases", [])) +
+                    len(gs.get("scrolls", [])))
+        max_A = max((_count(gs) for gs in action_list), default=0)
+        return (G, max_A, 8)
+
+    def _is_action_tensor_file(self, filename: str) -> bool:
+        return filename.endswith("_action_tensors.json")
+
+    def _is_current_file_action_tensors(self) -> bool:
+        """True if the selected file is *_action_tensors.json (e.g., raw/trimmed/normalized)."""
+        try:
+            name = os.path.basename(self.current_file_path or "")
+            return name.endswith("_action_tensors.json") or name == "raw_action_tensors.json"
+        except Exception:
+            return False
+
+    def _display_action_tensors(self, flat_list_for_gamestate: list):
+        """Show one gamestate's flattened tensor as rows of 8 values."""
+        cols = ("timestamp", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy")
+        self.tree["columns"] = cols
+        for c in cols:
+            self.tree.heading(c, text=c)
+            self.tree.column(c, width=100, stretch=True, anchor="center")
+        self.tree.delete(*self.tree.get_children())
+        # Handle older files that accidentally included a leading count
+        start = 1 if (len(flat_list_for_gamestate) % 8 != 0) else 0
+        row = []
+        for i in range(start, len(flat_list_for_gamestate), 8):
+            chunk = flat_list_for_gamestate[i:i+8]
+            if len(chunk) < 8: break
+            self.tree.insert("", "end", values=[f"{v}" for v in chunk])
+
+    def _current_folder_path(self):
+        """Get the current folder path."""
+        if not self.current_folder:
+            return Path(self.data_dir)
+        return Path(self.data_dir) / self.current_folder
+
+    def _summary_set(self, key: str, value: str):
+        """Set a summary variable if it exists."""
+        if key in self.summary_vars:
+            self.summary_vars[key].set(value)
+
+    def _clear_columns(self):
+        """Clear all columns from the tree."""
+        self.tree.delete(*self.tree.get_children())
+        self.tree["columns"] = ()
+
+    def _display_action_json_gamestate(self, data_obj):
+        """Display action JSON gamestate."""
+        if not isinstance(data_obj, list) or not data_obj:
+            return
+        idx = max(0, min(self.current_gamestate or 0, len(data_obj) - 1))
+        self._display_action_data_gamestate(data_obj[idx] if idx < len(data_obj) else {})
+
+    def _display_generic_json(self, data_obj):
+        """Display generic JSON data."""
+        if isinstance(data_obj, list):
+            if data_obj and isinstance(data_obj[0], dict):
+                keys = list(data_obj[0].keys())
+                self.tree.configure(columns=keys, displaycolumns=keys)
+                self.tree.column("#0", width=100)
+                self.tree.heading("#0", text="Index")
+                
+                for key in keys:
+                    self.tree.column(key, width=120)
+                    self.tree.heading(key, text=key)
+                
+                for i, item in enumerate(data_obj[:100]):  # Limit to first 100 items
+                    values = [str(item.get(key, "")) for key in keys]
+                    self.tree.insert("", tk.END, text=f"Row {i}", values=values)
+            else:
+                self.tree.configure(columns=("index", "value"), displaycolumns=("index", "value"))
+                self.tree.column("#0", width=100)
+                self.tree.column("index", width=100)
+                self.tree.column("value", width=400)
+                self.tree.heading("#0", text="Row")
+                self.tree.heading("index", text="Index")
+                self.tree.heading("value", text="Value")
+                
+                for i, val in enumerate(data_obj[:100]):
+                    self.tree.insert("", tk.END, text=f"Row {i}", values=(i, str(val)))
+        elif isinstance(data_obj, dict):
+            self.tree.configure(columns=("key", "value"), displaycolumns=("key", "value"))
+            self.tree.column("#0", width=0, stretch=tk.NO)
+            self.tree.column("key", width=200)
+            self.tree.column("value", width=400)
+            self.tree.heading("key", text="Key")
+            self.tree.heading("value", text="Value")
+            
+            for key, value in data_obj.items():
+                self.tree.insert("", tk.END, values=(key, str(value)))
+
         if folder in ("02_trimmed_data", "03_normalized_data"):
             npy_name = "trimmed_features.npy" if folder == "02_trimmed_data" else "normalized_features.npy"
             n = _count_from_npy(os.path.join(self.data_dir, folder, npy_name)) or 0
@@ -1357,6 +1567,88 @@ class SimpleDataExplorer:
         info = {"start_idx_raw": None, "end_idx_raw": None, "count": 0}
         self._slice_cache[folder] = info
         return info
+
+    def _update_summary(self):
+        """Update the summary using only slice_info.json + the currently loaded data."""
+        folder = self._current_folder_path()
+        slice_info = self._load_slice_info(folder) or {}
+        # Accept both old and new keys from slice_info.json
+        start    = slice_info.get("start_idx_raw")
+        end      = slice_info.get("end_idx_raw")
+        total    = slice_info.get("count")
+        first_ts = slice_info.get("first_ts", slice_info.get("first_timestamp"))
+        last_ts  = slice_info.get("last_ts",  slice_info.get("last_timestamp"))
+
+        # shape
+        shape_text = "—"
+        if isinstance(self.current_data, list):
+            # action JSON
+            G, A, D = self._compute_action_shape(self.current_data)
+            shape_text = f"({G}, {A}, {D})"
+        elif hasattr(self.current_data, "shape"):
+            shape_text = str(self.current_data.shape)
+
+        # current slice (source-indexed)
+        cur = self.current_gamestate if isinstance(self.current_gamestate, int) else 0
+        cur_src = (start + cur) if isinstance(start, int) else cur
+
+        # Write directly into the visible summary fields (no hidden keys).
+        self.summary_vars["shape"].set(shape_text)
+        self.summary_vars["range"].set(
+            f"gamestate {start} → {end}" if (start is not None and end is not None) else "—"
+        )
+        self.summary_vars["count"].set(str(total) if total is not None else "—")
+        self.summary_vars["current"].set(str(cur_src))
+        # Fill the "Source range:" with dataset-local indices (0..N-1)
+        if isinstance(total, int) and total > 0:
+            self.summary_vars["source_range"].set(f"0 → {total - 1}")
+        else:
+            self.summary_vars["source_range"].set("—")
+        # Show first/last timestamps if present in slice_info.json
+        self.summary_vars["first_ts"].set(str(first_ts) if first_ts is not None else "—")
+        self.summary_vars["last_ts"].set(str(last_ts)   if last_ts  is not None else "—")
+        # Update sequence range information
+        sequence_range_text = "—"
+        if hasattr(self, 'current_numpy_data') and self.current_numpy_data is not None:
+            data = self.current_numpy_data
+            if data.ndim == 3:
+                # 3D: (batch, timesteps, features)
+                n_timesteps = data.shape[1]
+                n_features = data.shape[2]
+                
+                # Show the current batch (gamestate) being viewed
+                current_batch = self.current_gamestate
+                total_batches = data.shape[0]
+                
+                if n_features == 8:
+                    sequence_range_text = f"Batch {current_batch}/{total_batches-1} | Action Sequence: 0-{n_timesteps-1}"
+                elif n_features == 128:
+                    sequence_range_text = f"Batch {current_batch}/{total_batches-1} | Gamestate Sequence: 0-{n_timesteps-1}"
+                else:
+                    sequence_range_text = f"Batch {current_batch}/{total_batches-1} | Feature Sequence: 0-{n_timesteps-1}"
+                    
+            elif data.ndim == 4:
+                # 4D: (batch, timesteps, actions, features)
+                n_timesteps = data.shape[1]
+                n_actions = data.shape[2]
+                n_features = data.shape[3]
+                current_action_slice = getattr(self, "current_action_slice", 0)
+                
+                # Show the current batch (gamestate) being viewed
+                current_batch = self.current_gamestate
+                total_batches = data.shape[0]
+                
+                if n_features == 8:
+                    sequence_range_text = f"Batch {current_batch}/{total_batches-1} | Action Sequence: 0-{n_timesteps-1} | Slice: {current_action_slice}/{n_actions-1}"
+                else:
+                    sequence_range_text = f"Batch {current_batch}/{total_batches-1} | Feature Sequence: 0-{n_timesteps-1} | Slice: {current_action_slice}/{n_actions-1}"
+        
+        self.summary_vars["sequence_range"].set(sequence_range_text)
+        
+        # Leave the per-slice unix timestamp to _update_summary_current_slice().
+        # If slice_info has a slice-wide first_ts, show it as a fallback in "Unix timestamp".
+        if first_ts is not None:
+            self.summary_vars["timestamp"].set(str(first_ts))
 
     def _update_summary_on_file_load(self, file_path: str):
         """Update dataset/shape/range when a file is loaded."""
@@ -1473,8 +1765,9 @@ class SimpleDataExplorer:
             label = str(start_raw + b)
             raw_idx_for_ts = start_raw + b
 
-        # Set "Current slice"
+        # Set "Current slice" (dataset-local label) and "Current slice (source)" (raw index)
         self.summary_vars["current"].set(label)
+        self.summary_vars["current_slice"].set(str(raw_idx_for_ts))
 
         # Unix timestamp from metadata
         ts = "—"
@@ -1499,6 +1792,23 @@ class SimpleDataExplorer:
             return xs, ys
         except Exception as e:
             self._log("_compute_counts_from_json failed", level="error", path=json_path, error=str(e))
+            return None, None
+
+    def _compute_counts_from_tensors(self, json_path: str):
+        """Return counts per-gamestate from an action_tensors JSON (list of flat lists)."""
+        try:
+            arr = json.load(open(json_path, "r"))
+            ys = []
+            for flat_list in arr:
+                # Each gamestate is a flat list of 8-value chunks
+                # Handle older files that accidentally included a leading count
+                start = 1 if (len(flat_list) % 8 != 0) else 0
+                action_count = (len(flat_list) - start) // 8
+                ys.append(action_count)
+            xs = list(range(len(ys)))
+            return xs, ys
+        except Exception as e:
+            self._log("_compute_counts_from_tensors failed", level="error", path=json_path, error=str(e))
             return None, None
 
     def _compute_counts_from_sequences(self, folder: str):
@@ -1545,17 +1855,49 @@ class SimpleDataExplorer:
             self._log("_compute_counts_from_sequences failed", level="error", error=str(e))
             return None, None
 
+    def _build_actions_graph_data(self):
+        """Return (x_indices, per-gamestate counts) from the JSON that is currently loaded."""
+        if not isinstance(self.current_data, list):
+            return [], []
+        counts = []
+        first = self.current_data[0] if self.current_data else None
+        if isinstance(first, dict):
+            # action_data.json
+            for gs in self.current_data:
+                c = (len(gs.get("mouse_movements", [])) +
+                     len(gs.get("clicks", [])) +
+                     len(gs.get("key_presses", [])) +
+                     len(gs.get("key_releases", [])) +
+                     len(gs.get("scrolls", [])))
+                counts.append(c)
+        else:
+            # *_action_tensors.json (each gs is a flat list of 8-value chunks)
+            for flat_list in self.current_data:
+                start = 1 if (len(flat_list) % 8 != 0) else 0  # tolerate old files with a leading count
+                action_count = max(0, (len(flat_list) - start) // 8)
+                counts.append(action_count)
+        return list(range(len(counts))), counts
+
     def _get_action_counts_for_folder(self, folder: str):
         """Memoized counts for the active folder."""
         if folder in self._counts_cache:
             return self._counts_cache[folder]
         xs, ys = None, None
         if folder == "01_raw_data":
-            xs, ys = self._compute_counts_from_json(os.path.join(self.data_dir, folder, "raw_action_data.json"))
+            # Try tensor file first, fall back to action data
+            xs, ys = self._compute_counts_from_tensors(os.path.join(self.data_dir, folder, "raw_action_tensors.json"))
+            if xs is None:
+                xs, ys = self._compute_counts_from_json(os.path.join(self.data_dir, folder, "raw_action_data.json"))
         elif folder == "02_trimmed_data":
-            xs, ys = self._compute_counts_from_json(os.path.join(self.data_dir, folder, "trimmed_raw_action_data.json"))
+            # Try tensor file first, fall back to action data
+            xs, ys = self._compute_counts_from_tensors(os.path.join(self.data_dir, folder, "trimmed_raw_action_tensors.json"))
+            if xs is None:
+                xs, ys = self._compute_counts_from_json(os.path.join(self.data_dir, folder, "trimmed_raw_action_data.json"))
         elif folder == "03_normalized_data":
-            xs, ys = self._compute_counts_from_json(os.path.join(self.data_dir, folder, "normalized_action_data.json"))
+            # Try tensor file first, fall back to action data
+            xs, ys = self._compute_counts_from_tensors(os.path.join(self.data_dir, folder, "normalized_action_tensors.json"))
+            if xs is None:
+                xs, ys = self._compute_counts_from_json(os.path.join(self.data_dir, folder, "normalized_action_data.json"))
         elif folder == "06_final_training_data":
             xs, ys = self._compute_counts_from_sequences(folder)
         # Store even if None (avoid repeated work)
@@ -1575,7 +1917,7 @@ class SimpleDataExplorer:
             self._ax.set_title("No range available")
             self._canvas.draw_idle()
             return
-        xs, ys = self._get_action_counts_for_folder(folder)
+        xs, ys = self._build_actions_graph_data()
         if not xs or ys is None:
             self._ax.set_title("No action data for this folder")
             self._canvas.draw_idle()
@@ -1606,8 +1948,90 @@ class SimpleDataExplorer:
         if cur_idx is not None:
             self._ax.axvline(cur_idx, linestyle="--", linewidth=1.0)
         self._ax.set_xlim(start - 0.5, end + 0.5)
-        self._ax.set_title(f"Action counts per gamestate [{start} … {end}]")
+        
+        # Create enhanced title with sequence context
+        title = f"Action counts per gamestate [{start} … {end}]"
+        
+        # Add sequence range and slice information if available
+        if hasattr(self, 'current_numpy_data') and self.current_numpy_data is not None:
+            data = self.current_numpy_data
+            if data.ndim == 3:
+                # 3D: (batch, timesteps, features)
+                n_timesteps = data.shape[1]
+                n_features = data.shape[2]
+                
+                # Show the current batch being viewed
+                current_batch = self.current_gamestate
+                total_batches = data.shape[0]
+                
+                if n_features == 8:
+                    title += f" | Batch {current_batch}/{total_batches-1} | Action Sequence: 0-{n_timesteps-1}"
+                elif n_features == 128:
+                    title += f" | Batch {current_batch}/{total_batches-1} | Gamestate Sequence: 0-{n_timesteps-1}"
+                else:
+                    title += f" | Batch {current_batch}/{total_batches-1} | Feature Sequence: 0-{n_timesteps-1}"
+                    
+            elif data.ndim == 4:
+                # 4D: (batch, timesteps, actions, features)
+                n_timesteps = data.shape[1]
+                n_actions = data.shape[2]
+                n_features = data.shape[3]
+                current_action_slice = getattr(self, "current_action_slice", 0)
+                
+                # Show the current batch being viewed
+                current_batch = self.current_gamestate
+                total_batches = data.shape[0]
+                
+                if n_features == 8:
+                    title += f" | Batch {current_batch}/{total_batches-1} | Action Sequence: 0-{n_timesteps-1} | Slice: {current_action_slice}/{n_actions-1}"
+                else:
+                    title += f" | Batch {current_batch}/{total_batches-1} | Feature Sequence: 0-{n_timesteps-1} | Slice: {current_action_slice}/{n_actions-1}"
+        
+        self._ax.set_title(title)
         self._canvas.draw_idle()
+
+    def browse_dir(self):
+        new_dir = filedialog.askdirectory(initialdir=self.data_dir)
+        if new_dir:
+            self.data_dir = new_dir
+            self.dir_var.set(new_dir)
+            self.load_files()
+
+    def _scan_sessions(self):
+        """Return (sessions_root_path, sorted_session_names)."""
+        try:
+            root = Path(self.base_data_root) / "recording_sessions"
+            sessions = sorted([p.name for p in root.iterdir() if p.is_dir()])
+            return root, sessions
+        except Exception as e:
+            self._log("_scan_sessions failed", level="error", error=str(e))
+            return Path(self.base_data_root) / "recording_sessions", []
+
+    def refresh_sessions(self):
+        """Re-scan sessions and update the combobox; keep selection if possible."""
+        self.sessions_root, self.sessions = self._scan_sessions()
+        self.session_cb["values"] = self.sessions
+        cur = self.session_var.get()
+        if cur not in self.sessions:
+            # select latest if current is missing
+            if self.sessions:
+                self.session_var.set(self.sessions[-1])
+                self.on_session_change()
+        else:
+            # make sure dir reflects current choice
+            self.data_dir = str(self.sessions_root / cur)
+            self.dir_var.set(self.data_dir)
+            self.load_files()
+
+    def on_session_change(self, event=None):
+        """When the user chooses a different session in the combobox."""
+        sel = self.session_var.get().strip()
+        if not sel:
+            return
+        self.session_name = sel
+        self.data_dir = str(self.sessions_root / sel)
+        self.dir_var.set(self.data_dir)
+        self.load_files()
 
 def main():
     try:
