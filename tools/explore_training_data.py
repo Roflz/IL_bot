@@ -12,12 +12,47 @@ import os, sys, time, traceback, logging
 from pathlib import Path
 import pandas as pd
 import numpy as np
+# Optional plotting (for the Actions Graph tab)
+try:
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.figure import Figure
+    _HAS_MPL = True
+except Exception:
+    _HAS_MPL = False
 
 class SimpleDataExplorer:
     def __init__(self, root):
         self.root = root
         self.root.title("Training Data Explorer")
         self.root.geometry("1200x800")
+        # Tabs (folder -> listbox) MUST be defined before setup_ui() uses them
+        self.folders = [
+            "01_raw_data",
+            "02_trimmed_data",
+            "03_normalized_data",
+            "04_sequences",
+            "05_mappings",
+            "06_final_training_data",
+        ]
+        self.tab_lists = {}
+        # summary + mapping state
+        self.sequence_length = 10
+        self.current_folder = None
+        self.current_file_path = None
+        self.current_numpy_data = None
+        self._full_metadata = None  # lazy-loaded features/gamestates_metadata.json
+        self._slice_info = None     # {'start_idx_raw','end_idx_raw','count'}
+        self._slice_cache = {}      # folder -> slice_info (memoize)
+        self._counts_cache = {}     # folder -> (xs, ys) action counts memo
+        self.summary_vars = {
+            "dataset": tk.StringVar(value="-"),
+            "shape": tk.StringVar(value="-"),
+            "count": tk.StringVar(value="-"),      # underlying gamestates N
+            "sequences": tk.StringVar(value="-"),  # B
+            "range": tk.StringVar(value="-"),
+            "current": tk.StringVar(value="-"),
+            "timestamp": tk.StringVar(value="-")
+        }
         # --- Logging: console + file ---
         log_path = os.path.join(os.path.dirname(__file__), "explorer_debug.log")
         self.logger = logging.getLogger("explore_training_data")
@@ -79,7 +114,7 @@ class SimpleDataExplorer:
             pass
     
     def setup_ui(self):
-        # Simple controls
+        # Simple controls (top)
         control_frame = ttk.Frame(self.root)
         control_frame.pack(fill=tk.X, padx=10, pady=5)
         
@@ -89,16 +124,65 @@ class SimpleDataExplorer:
         ttk.Button(control_frame, text="Browse", command=self.browse_dir).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Refresh", command=self.load_files).pack(side=tk.LEFT, padx=5)
         
-        # File selector
-        ttk.Label(control_frame, text="File:").pack(side=tk.LEFT, padx=(20,5))
-        self.file_var = tk.StringVar()
-        self.file_combo = ttk.Combobox(control_frame, textvariable=self.file_var, width=40)
-        self.file_combo.pack(side=tk.LEFT, padx=5)
-        self.file_combo.bind('<<ComboboxSelected>>', self.on_file_selected)
-        # Log user typing/enter as well
-        self.file_combo.bind('<Return>', self.on_file_selected)
+        # ---------- TOP: file tabs (left) + summary pane (right) ----------
+        top_paned = ttk.Panedwindow(self.root, orient="horizontal")
+        top_paned.pack(fill=tk.X, padx=10, pady=(0,5))
+
+        # Left: tabs + file list
+        files_panel = ttk.Frame(top_paned)
+        top_paned.add(files_panel, weight=3)
+        self.notebook = ttk.Notebook(files_panel)
+        self.notebook.pack(fill=tk.X, expand=True)
+        for folder in self.folders:
+            tab = ttk.Frame(self.notebook)
+            label = folder.split('_', 1)[1] if '_' in folder else folder
+            self.notebook.add(tab, text=label)
+            lb = tk.Listbox(tab, height=8, exportselection=False)
+            lb.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            sb = ttk.Scrollbar(tab, orient="vertical", command=lb.yview)
+            lb.configure(yscrollcommand=sb.set)
+            sb.pack(side=tk.RIGHT, fill=tk.Y)
+            lb.bind('<<ListboxSelect>>', lambda e, f=folder: self.on_tab_file_select(f, e))
+            self.tab_lists[folder] = lb
+
+        # Right: info notebook with "Summary" + "Actions Graph"
+        info_panel = ttk.Frame(top_paned)
+        top_paned.add(info_panel, weight=2)
+        self.info_nb = ttk.Notebook(info_panel)
+        self.info_nb.pack(fill=tk.BOTH, expand=True)
+        # Summary tab
+        self.summary_tab = ttk.Frame(self.info_nb, padding=(10,10,10,10))
+        self.info_nb.add(self.summary_tab, text="Summary")
+        ttk.Label(self.summary_tab, text="Summary", style="Heading.TLabel").grid(row=0, column=0, sticky="w", pady=(0,8))
+        def row(label, var, r):
+            ttk.Label(self.summary_tab, text=label).grid(row=r, column=0, sticky="w", pady=2)
+            ttk.Label(self.summary_tab, textvariable=var, foreground="#333", wraplength=360, justify="left").grid(row=r, column=1, sticky="w", pady=2)
+        row("Dataset:", self.summary_vars["dataset"], 1)
+        row("Shape:", self.summary_vars["shape"], 2)
+        row("# Gamestates:", self.summary_vars["count"], 3)     # N
+        row("Sequences:", self.summary_vars["sequences"], 4)    # B
+        row("Source range (raw):", self.summary_vars["range"], 5)
+        ttk.Separator(self.summary_tab, orient="horizontal").grid(row=6, column=0, columnspan=2, sticky="ew", pady=(8,8))
+        row("Current slice:", self.summary_vars["current"], 7)
+        row("Unix timestamp:", self.summary_vars["timestamp"], 8)
+        for c in (0,1):
+            self.summary_tab.grid_columnconfigure(c, weight=1)
+        # Actions Graph tab
+        self.graph_tab = ttk.Frame(self.info_nb)
+        self.info_nb.add(self.graph_tab, text="Actions Graph")
+        if _HAS_MPL:
+            self._fig = Figure(figsize=(4.2, 2.6), dpi=100)
+            self._ax = self._fig.add_subplot(111)
+            self._ax.set_xlabel("Gamestate")
+            self._ax.set_ylabel("Action count")
+            self._ax.grid(True, alpha=0.25)
+            self._graph_cursor = None
+            self._canvas = FigureCanvasTkAgg(self._fig, master=self.graph_tab)
+            self._canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        else:
+            ttk.Label(self.graph_tab, text="Matplotlib not available — install it to see the Actions Graph.").pack(padx=12, pady=12, anchor="w")
         
-        # Gamestate navigation (for 3D data)
+        # ---------- MIDDLE: navigation (3D/4D) ----------
         nav_frame = ttk.Frame(self.root)
         nav_frame.pack(fill=tk.X, padx=10, pady=5)
         
@@ -139,10 +223,11 @@ class SimpleDataExplorer:
         for w in (self.slice_prev_btn, self.slice_entry, self.slice_next_btn, self.total_action_slices_label):
             w.state(["disabled"])
         
-        # Data display
+        # ---------- BOTTOM: viewer (full width) ----------
         tree_frame = ttk.Frame(self.root)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
+
+        # (summary is now at the top; viewer uses the whole bottom width)
         self.tree = ttk.Treeview(tree_frame, show="tree headings")
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
@@ -283,27 +368,51 @@ class SimpleDataExplorer:
             self.status_var.set(f"Directory not found: {self.data_dir}")
             return
         
-        # Find all data files
-        files = []
-        for folder in ["01_raw_data", "02_trimmed_data", "03_normalized_data", "04_sequences", "05_mappings", "06_final_training_data"]:
+        # Populate tabs
+        total = 0
+        first_loaded = False
+        for folder, lb in self.tab_lists.items():
+            lb.delete(0, tk.END)
             folder_path = os.path.join(self.data_dir, folder)
             if os.path.exists(folder_path):
-                for file in os.listdir(folder_path):
-                    if file.endswith(('.json', '.npy', '.csv')):
-                        files.append(f"{folder}/{file}")
-        
-        self._log("load_files: found files", count=len(files))
-        self.file_combo['values'] = files
-        if files:
-            self.file_combo.set(files[0])
-            self._log("load_files: auto-select first file", file=files[0])
+                files = [f for f in os.listdir(folder_path) if f.endswith(('.json', '.npy', '.csv'))]
+                files.sort()
+                for f in files:
+                    lb.insert(tk.END, f)
+                total += len(files)
+                # Auto-load the first file in the first non-empty tab
+                if files and not first_loaded:
+                    lb.selection_set(0)
+                    self.on_tab_file_select(folder)
+                    first_loaded = True
+        self.status_var.set(f"Found {total} files across {len(self.tab_lists)} tabs")
+    
+    def on_tab_file_select(self, folder, event=None):
+        """Load the selected file from a given folder tab"""
+        lb = self.tab_lists.get(folder)
+        if not lb:
+            return
+        sel = lb.curselection()
+        if not sel:
+            return
+        filename = lb.get(sel[0])
+        file_path = os.path.join(self.data_dir, folder, filename)
+        self._log("on_tab_file_select", folder=folder, filename=filename, path=file_path)
+        self.current_folder = folder
+        self.current_file_path = file_path
+        try:
+            self.load_file(file_path)
+            # update summary (dataset + shape + range)
+            self._update_summary_on_file_load(file_path)
+        except Exception:
+            self._log("on_tab_file_select: load_file crashed", level="error", file=file_path)
+            traceback.print_exc()
+            self._safe_status(f"Error while loading {os.path.basename(file_path)}")
             try:
-                self.on_file_selected()
+                messagebox.showerror("Explorer Error",
+                                     f"Failed to load:\n{file_path}\n\n{traceback.format_exc()}")
             except Exception:
-                self._log("load_files: on_file_selected crashed", level="error")
-                traceback.print_exc()
-        
-        self.status_var.set(f"Found {len(files)} files")
+                pass
     
     def prev_gamestate(self):
         if not self.total_gamestates:
@@ -363,6 +472,12 @@ class SimpleDataExplorer:
                     self.update_3d_slice_for_tab(mock_tab, self.current_gamestate)
         # Update status to show current gamestate
         self.status_var.set(f"Showing gamestate {self.current_gamestate} of {self.total_gamestates}")
+        # Update summary slice + timestamp
+        try:
+            self._update_summary_current_slice()
+            self._update_actions_graph()  # move the cursor to new position
+        except Exception:
+            self._log("_navigate_gamestate: summary update failed", level="error")
     
     def on_mapped_toggle(self):
         """Handle toggle between mapped and raw display"""
@@ -371,26 +486,7 @@ class SimpleDataExplorer:
         if self.action_data:
             self.display_current_gamestate()
     
-    def on_file_selected(self, event=None):
-        sel = self.file_var.get()
-        self._log("on_file_selected: event", event=str(event), selection=sel)
-        if not sel:
-            return
-        file_path = os.path.join(self.data_dir, sel)
-        exists = os.path.exists(file_path)
-        size = os.path.getsize(file_path) if exists else -1
-        self._log("on_file_selected: resolved",
-                  file_path=file_path, exists=exists, size=size)
-        try:
-            self.load_file(file_path)
-        except Exception:
-            self._log("on_file_selected: load_file crashed", level="error", file=file_path)
-            traceback.print_exc()
-            self._safe_status(f"Error while loading {os.path.basename(file_path)}")
-            try:
-                messagebox.showerror("Explorer Error", f"Failed to load:\n{file_path}\n\n{traceback.format_exc()}")
-            except Exception:
-                pass
+    # (combobox-based on_file_selected removed in favor of tab file picker)
     
     def load_file(self, file_path):
         try:
@@ -413,15 +509,24 @@ class SimpleDataExplorer:
                     data = json.load(f)
                 self._log("load_file: json loaded", type=type(data).__name__)
                 self.display_json(data)
+                # prevent stale shapes from persisting
+                self.current_numpy_data = None
             elif file_path.endswith('.csv'):
                 data = pd.read_csv(file_path)
                 self._log("load_file: csv loaded", rows=len(data), cols=len(data.columns))
                 self.display_csv(data)
+                self.current_numpy_data = None
             else:
                 self._log("load_file: unsupported extension", level="warning")
                 pass
             
             self._safe_status(f"Loaded {os.path.basename(file_path)}")
+            # Update summary main info after any successful load
+            try:
+                self._update_summary_on_file_load(file_path)
+                self._update_actions_graph()  # refresh chart for the selected dataset
+            except Exception:
+                self._log("load_file: summary update failed", level="error")
             
         except Exception as e:
             self._log("load_file: exception", level="error", error=str(e))
@@ -438,6 +543,8 @@ class SimpleDataExplorer:
         
         # Check if this is a features file (2D array with 128 features)
         if len(data.shape) == 2 and data.shape[1] == 128:
+            # 2-D features -> do NOT retain current_numpy_data for summary
+            self.current_numpy_data = None
             self._log("display_numpy: 2D features view")
             # This is a features file - show as 2 columns with 128 rows
             self.tree.configure(columns=("feature_index", "feature_value"),
@@ -520,9 +627,16 @@ class SimpleDataExplorer:
                 except Exception:
                     self._log("display_numpy: _update_numpy_4d_view crashed", level="error")
                     traceback.print_exc()
+        # Update summary main info for numpy
+        try:
+            self._update_summary_on_file_load(self.current_file_path or "")
+        except Exception:
+            self._log("display_numpy: summary update failed", level="error")
     
     def display_json(self, data):
         self.tree.delete(*self.tree.get_children())
+        # clear stale ndarray reference so summary derives shape from clicked file
+        self.current_numpy_data = None
         
         if isinstance(data, list):
             if data and isinstance(data[0], dict):
@@ -1077,6 +1191,423 @@ class SimpleDataExplorer:
                 self._navigate_gamestate()
         except ValueError:
             pass
+
+    # -------------------- Summary helpers --------------------
+    def _load_full_metadata(self):
+        """Load raw metadata with absolute timestamps (features/gamestates_metadata.json)."""
+        if self._full_metadata is not None:
+            return self._full_metadata
+        try:
+            meta_path = os.path.join(self.data_dir, "features", "gamestates_metadata.json")
+            with open(meta_path, "r") as f:
+                self._full_metadata = json.load(f)
+            self._log("_load_full_metadata", count=len(self._full_metadata))
+        except Exception as e:
+            self._log("_load_full_metadata failed", level="error", error=str(e))
+            self._full_metadata = []
+        return self._full_metadata
+
+    def _infer_slice_info(self, folder: str) -> dict:
+        """
+        Best-effort inference of the source raw gamestate range for the selected folder.
+        Returns dict with: {'start_idx_raw': int|None, 'end_idx_raw': int|None, 'count': int}
+        """
+        # Memoized?
+        if folder in self._slice_cache:
+            return self._slice_cache[folder]
+
+        full_meta = self._load_full_metadata() or []
+        full_ts   = [m.get("absolute_timestamp") for m in full_meta] if full_meta else []
+
+        def _count_from_npy(path):
+            try:
+                return int(np.load(path, mmap_mode="r").shape[0])
+            except Exception:
+                return None
+
+        def _range_from_json(json_path):
+            """Match first/last gamestate timestamps against full metadata."""
+            if not os.path.exists(json_path):
+                return None
+            try:
+                arr = json.load(open(json_path, "r"))
+                if not arr:
+                    return None
+                # handle either {"gamestate_timestamp": ...} or {"timestamp": ...}
+                def _ts(rec):
+                    return rec.get("gamestate_timestamp", rec.get("timestamp"))
+                first_ts = _ts(arr[0]); last_ts = _ts(arr[-1])
+                if first_ts in full_ts and last_ts in full_ts:
+                    s = full_ts.index(first_ts); e = full_ts.index(last_ts)
+                    return {"start_idx_raw": s, "end_idx_raw": e, "count": e - s + 1}
+            except Exception as e:
+                self._log("_range_from_json failed", level="error", path=json_path, error=str(e))
+            return None
+
+        def _match_rows_in_raw(sample_rows: np.ndarray, tol: float = 1e-6) -> int|None:
+            """Find the starting index in raw state_features that matches the first K rows."""
+            try:
+                raw_path = os.path.join(self.data_dir, "01_raw_data", "state_features.npy")
+                if not os.path.exists(raw_path):
+                    return None
+                raw = np.load(raw_path, mmap_mode="r")   # (N,128)
+                if raw.ndim != 2 or raw.shape[1] != sample_rows.shape[1]:
+                    return None
+                K = min(3, sample_rows.shape[0])  # compare first 1..3 rows to be robust
+                tgt = sample_rows[:K]
+                N = raw.shape[0] - K + 1
+                for s in range(max(N, 0)):
+                    # quick reject using first row
+                    if not np.allclose(raw[s], tgt[0], atol=tol, rtol=0):
+                        continue
+                    if K == 1 or np.allclose(raw[s:s+K], tgt, atol=tol, rtol=0):
+                        return s
+            except Exception as e:
+                self._log("_match_rows_in_raw failed", level="error", error=str(e))
+            return None
+
+        def _denormalize_if_needed(norm_rows: np.ndarray) -> np.ndarray:
+            """
+            Undo the feature normalization we use: only time-like features were scaled /180.
+            Uses data/features/feature_mappings.json to find those indices.
+            """
+            try:
+                fmap = os.path.join(self.data_dir, "features", "feature_mappings.json")
+                if not os.path.exists(fmap):
+                    return norm_rows
+                with open(fmap, "r") as f:
+                    mappings = json.load(f)
+                time_idx = []
+                for m in mappings:
+                    idx = m.get("feature_index")
+                    name = m.get("feature_name", "")
+                    dtype = m.get("data_type", "")
+                    if idx is None: 
+                        continue
+                    if (dtype in ("time_ms","duration_ms") or
+                        name in ("time_since_interaction","phase_start_time","phase_duration","timestamp")):
+                        time_idx.append(idx)
+                if not time_idx:
+                    return norm_rows
+                out = np.array(norm_rows, copy=True)
+                out[:, time_idx] = out[:, time_idx] * 180.0
+                return out
+            except Exception as e:
+                self._log("_denormalize_if_needed failed", level="error", error=str(e))
+                return norm_rows
+
+        if folder == "01_raw_data":
+            n = _count_from_npy(os.path.join(self.data_dir, "01_raw_data", "state_features.npy"))
+            if n is None:
+                n = len(full_meta) or 0
+            info = {"start_idx_raw": 0 if n else None, "end_idx_raw": (n - 1) if n else None, "count": n}
+            self._slice_cache[folder] = info
+            return info
+
+        if folder in ("02_trimmed_data", "03_normalized_data"):
+            npy_name = "trimmed_features.npy" if folder == "02_trimmed_data" else "normalized_features.npy"
+            n = _count_from_npy(os.path.join(self.data_dir, folder, npy_name)) or 0
+            # best effort: align by timestamps if the action json exists
+            json_name = "trimmed_raw_action_data.json" if folder == "02_trimmed_data" else "normalized_action_data.json"
+            info = _range_from_json(os.path.join(self.data_dir, folder, json_name))
+            if info:
+                self._slice_cache[folder] = info
+                return info
+            # Fallback: match features back into raw
+            try:
+                fpath = os.path.join(self.data_dir, folder, npy_name)
+                if os.path.exists(fpath):
+                    arr = np.load(fpath, mmap_mode="r")
+                    sample = arr[: min(arr.shape[0], 3)]
+                    if folder == "03_normalized_data":
+                        sample = _denormalize_if_needed(sample)
+                    s = _match_rows_in_raw(sample)
+                    if s is not None:
+                        info = {"start_idx_raw": s, "end_idx_raw": s + n - 1, "count": n}
+                        self._slice_cache[folder] = info
+                        return info
+            except Exception as e:
+                self._log("feature match fallback failed", level="error", folder=folder, error=str(e))
+            info = {"start_idx_raw": None, "end_idx_raw": None, "count": n}
+            self._slice_cache[folder] = info
+            return info
+
+        if folder == "06_final_training_data":
+            # Reconstruct underlying count from sequences: N = B + L
+            seq = os.path.join(self.data_dir, folder, "gamestate_sequences.npy")
+            n = None
+            if os.path.exists(seq):
+                try:
+                    B = int(np.load(seq, mmap_mode="r").shape[0])
+                    n = B + self.sequence_length
+                except Exception:
+                    n = None
+            # anchor to trimmed range start if we can find it
+            trimmed = self._infer_slice_info("02_trimmed_data")
+            if trimmed and n:
+                s = trimmed["start_idx_raw"]
+                info = {"start_idx_raw": s, "end_idx_raw": s + n - 1, "count": n}
+                self._slice_cache[folder] = info
+                return info
+            info = {"start_idx_raw": None, "end_idx_raw": None, "count": n or 0}
+            self._slice_cache[folder] = info
+            return info
+
+        # Default/unknown
+        info = {"start_idx_raw": None, "end_idx_raw": None, "count": 0}
+        self._slice_cache[folder] = info
+        return info
+
+    def _update_summary_on_file_load(self, file_path: str):
+        """Update dataset/shape/range when a file is loaded."""
+        if not file_path:
+            return
+        folder = self.current_folder or os.path.basename(os.path.dirname(file_path))
+        self.summary_vars["dataset"].set(folder)
+        # shape: always derive from the clicked file (prevents stale shapes)
+        shp = "-"
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == ".npy":
+            try:
+                shp = str(tuple(np.load(file_path, mmap_mode="r").shape))
+            except Exception:
+                shp = "-"
+        elif ext == ".json":
+            try:
+                j = json.load(open(file_path, "r"))
+                if isinstance(j, list):
+                    shp = f"{len(j)} records"
+                elif isinstance(j, dict):
+                    shp = f"{len(j)} keys"
+                else:
+                    shp = type(j).__name__
+            except Exception:
+                shp = "-"
+        elif ext == ".csv":
+            try:
+                # cheap count: first pass only
+                import pandas as pd
+                cols = len(pd.read_csv(file_path, nrows=1).columns)
+                shp = f"{cols} columns"
+            except Exception:
+                shp = "-"
+        self.summary_vars["shape"].set(shp)
+        # sequences (B) when this file is a sequence tensor; also compute N = B + L
+        B_val = None
+        try:
+            if ext == ".npy":
+                arr = np.load(file_path, mmap_mode="r")
+                if arr.ndim == 4 and arr.shape[1] == 10 and arr.shape[2] == 100 and arr.shape[3] == 8:
+                    B_val = arr.shape[0]  # action_input_sequences
+                elif arr.ndim == 3 and arr.shape[1] == 10 and arr.shape[2] == 128:
+                    B_val = arr.shape[0]  # gamestate_sequences
+                elif arr.ndim == 3 and arr.shape[1] == 100 and arr.shape[2] == 8:
+                    B_val = arr.shape[0]  # action_targets
+        except Exception:
+            pass
+        self.summary_vars["sequences"].set(str(B_val) if B_val is not None else "—")
+
+        # range + count (N): infer slice; if this is a sequence tensor and in final set, prefer N=B+L
+        self._slice_info = self._infer_slice_info(folder)
+        si = self._slice_info or {}
+        start = si.get("start_idx_raw")
+        end   = si.get("end_idx_raw")
+        N     = si.get("count", 0)
+        # If we know B for a sequence tensor, recompute N = B + L (more reliable)
+        if B_val is not None:
+            N = (B_val + self.sequence_length)
+            if start is not None:
+                end = start + N - 1
+        self.summary_vars["count"].set(str(N))
+        if start is not None and end is not None:
+            self.summary_vars["range"].set(f"gamestate {start} → {end}")
+        else:
+            self.summary_vars["range"].set("—")
+        # current + ts
+        self._update_summary_current_slice()
+        # also reflect the current position on the graph
+        try:
+            self._update_actions_graph()
+        except Exception:
+            self._log("display_numpy: graph update failed", level="error")
+
+    def _update_summary_current_slice(self):
+        """Update the current slice and timestamp based on current indices + mapping."""
+        si = self._slice_info or {}
+        start_raw = si.get("start_idx_raw")
+        if start_raw is None:
+            self.summary_vars["current"].set("—")
+            self.summary_vars["timestamp"].set("—")
+            return
+
+        b = int(self.current_gamestate or 0)
+        s = int(self.current_action_slice or 0)
+        L = int(self.sequence_length)
+
+        # Default: 2D features / JSON -> single index
+        label = None
+        raw_idx_for_ts = start_raw + b
+
+        if isinstance(self.current_numpy_data, np.ndarray):
+            arr = self.current_numpy_data
+            if arr.ndim == 4 and arr.shape[1] == L and arr.shape[2] == 100 and arr.shape[3] == 8:
+                # action_input_sequences: window [t .. t+L-1], show range and in-window slice
+                t0 = start_raw + b
+                t1 = t0 + L - 1
+                label = f"{t0}-{t1} ({s})"
+                raw_idx_for_ts = t0 + s
+            elif arr.ndim == 3 and arr.shape[1] == L and arr.shape[2] == 128:
+                # gamestate_sequences: window [t .. t+L-1], show range
+                t0 = start_raw + b
+                t1 = t0 + L - 1
+                label = f"{t0}-{t1}"
+                raw_idx_for_ts = t0  # timestamp at window start
+            elif arr.ndim == 3 and arr.shape[1] == 100 and arr.shape[2] == 8:
+                # action_targets: single target time t = S + b + L
+                t = start_raw + b + L
+                label = str(t)
+                raw_idx_for_ts = t
+
+        if label is None:
+            # 2D features / JSON fallback
+            label = str(start_raw + b)
+            raw_idx_for_ts = start_raw + b
+
+        # Set "Current slice"
+        self.summary_vars["current"].set(label)
+
+        # Unix timestamp from metadata
+        ts = "—"
+        full = self._load_full_metadata() or []
+        if 0 <= raw_idx_for_ts < len(full):
+            ts = str(full[raw_idx_for_ts].get("absolute_timestamp", "—"))
+        self.summary_vars["timestamp"].set(ts)
+
+    # -------- Actions Graph helpers --------
+    def _compute_counts_from_json(self, json_path: str):
+        """Return counts per-gamestate from an action_data JSON (list of dicts)."""
+        try:
+            arr = json.load(open(json_path, "r"))
+            ys = []
+            for rec in arr:
+                c = 0
+                for key in ("mouse_movements","clicks","key_presses","key_releases","scrolls"):
+                    v = rec.get(key, [])
+                    if isinstance(v, list): c += len(v)
+                ys.append(c)
+            xs = list(range(len(ys)))
+            return xs, ys
+        except Exception as e:
+            self._log("_compute_counts_from_json failed", level="error", path=json_path, error=str(e))
+            return None, None
+
+    def _compute_counts_from_sequences(self, folder: str):
+        """
+        Build counts per raw index for the final set using:
+          - action_input_sequences.npy as primary (sum of 'count' over actions at each timestep)
+          - action_targets.npy for the target step t+L (fills the tail)
+        """
+        try:
+            seq_in = os.path.join(self.data_dir, folder, "action_input_sequences.npy")
+            seq_tg = os.path.join(self.data_dir, folder, "action_targets.npy")
+            if not os.path.exists(seq_in):
+                return None, None
+            L = self.sequence_length
+            X = np.load(seq_in, mmap_mode="r")  # expect (B,10,100,8) or (B, A, T, F) then swapped by viewer
+            if X.ndim != 4: return None, None
+            # Make sure axis-1 is timestep as in the viewer (B, T, A, F)
+            Xt = X if X.shape[1] == L else X.swapaxes(1,2)
+            B = Xt.shape[0]; A = Xt.shape[2]
+            N = B + L
+            counts = np.full((N,), np.nan, dtype=float)
+            # Fill from inputs: raw index r = b + s
+            for b in range(B):
+                # sum 'count' feature (col 0) over actions for each timestep
+                # Xt[b, s, :, 0] -> counts at raw r=b+s
+                step_counts = Xt[b, :, :, 0].sum(axis=1)  # shape (L,)
+                for s in range(L):
+                    r = b + s
+                    if np.isnan(counts[r]):
+                        counts[r] = float(step_counts[s])
+            # Fill last tail (t = b + L) from targets if available
+            if os.path.exists(seq_tg):
+                T = np.load(seq_tg, mmap_mode="r")  # (B,100,8) or (B, A, F)
+                if T.ndim == 3 and T.shape[-1] >= 1:
+                    for b in range(min(B, T.shape[0])):
+                        r = b + L
+                        if np.isnan(counts[r]):
+                            counts[r] = float(T[b, :, 0].sum())
+            # Fallback: replace any remaining NaNs with 0
+            counts = np.nan_to_num(counts, nan=0.0)
+            xs = list(range(int(counts.shape[0])))
+            return xs, counts.tolist()
+        except Exception as e:
+            self._log("_compute_counts_from_sequences failed", level="error", error=str(e))
+            return None, None
+
+    def _get_action_counts_for_folder(self, folder: str):
+        """Memoized counts for the active folder."""
+        if folder in self._counts_cache:
+            return self._counts_cache[folder]
+        xs, ys = None, None
+        if folder == "01_raw_data":
+            xs, ys = self._compute_counts_from_json(os.path.join(self.data_dir, folder, "raw_action_data.json"))
+        elif folder == "02_trimmed_data":
+            xs, ys = self._compute_counts_from_json(os.path.join(self.data_dir, folder, "trimmed_raw_action_data.json"))
+        elif folder == "03_normalized_data":
+            xs, ys = self._compute_counts_from_json(os.path.join(self.data_dir, folder, "normalized_action_data.json"))
+        elif folder == "06_final_training_data":
+            xs, ys = self._compute_counts_from_sequences(folder)
+        # Store even if None (avoid repeated work)
+        self._counts_cache[folder] = (xs, ys)
+        return xs, ys
+
+    def _update_actions_graph(self):
+        """Draw/refresh the actions graph for the current folder + position."""
+        if not _HAS_MPL:
+            return
+        folder = self.current_folder or ""
+        si = self._slice_info or self._infer_slice_info(folder) or {}
+        start = si.get("start_idx_raw"); end = si.get("end_idx_raw"); N = si.get("count", 0)
+        self._ax.clear()
+        self._ax.set_xlabel("Gamestate"); self._ax.set_ylabel("Action count"); self._ax.grid(True, alpha=0.25)
+        if not folder or start is None or end is None or N <= 0:
+            self._ax.set_title("No range available")
+            self._canvas.draw_idle()
+            return
+        xs, ys = self._get_action_counts_for_folder(folder)
+        if not xs or ys is None:
+            self._ax.set_title("No action data for this folder")
+            self._canvas.draw_idle()
+            return
+        # xs begin at 0 for that dataset; align to raw space
+        raw_xs = [start + i for i in xs]
+        self._ax.plot(raw_xs, ys, linewidth=1.25)
+        # cursor at current raw index (based on the same logic as summary)
+        cur_label = self.summary_vars["current"].get()
+        cur_idx = None
+        if "-" in cur_label:  # range like "5-14" or "5-14 (8)"
+            base = cur_label.split(" ", 1)[0]
+            a, b = base.split("-")
+            # if "(s)" present, put cursor at the in-window position
+            if "(" in cur_label and ")" in cur_label:
+                try:
+                    s = int(cur_label.split("(")[1].split(")")[0])
+                    cur_idx = int(a) + s
+                except Exception:
+                    cur_idx = int(a)
+            else:
+                cur_idx = int(a)  # window start
+        else:
+            try:
+                cur_idx = int(cur_label)
+            except Exception:
+                cur_idx = None
+        if cur_idx is not None:
+            self._ax.axvline(cur_idx, linestyle="--", linewidth=1.0)
+        self._ax.set_xlim(start - 0.5, end + 0.5)
+        self._ax.set_title(f"Action counts per gamestate [{start} … {end}]")
+        self._canvas.draw_idle()
 
 def main():
     try:

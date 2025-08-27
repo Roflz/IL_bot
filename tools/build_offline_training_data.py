@@ -8,6 +8,8 @@ using the modularized shared pipeline. It preserves byte-for-byte output where f
 
 import sys
 import argparse
+import os
+import json
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -23,6 +25,17 @@ from shared_pipeline import (
     derive_encodings_from_data, derive_encodings_from_raw_actions,
     save_organized_training_data
 )
+
+def _write_slice_info(path, start_idx_raw, end_idx_raw, count, first_ts=None, last_ts=None):
+    info = {
+        "start_idx_raw": int(start_idx_raw) if start_idx_raw is not None else None,
+        "end_idx_raw": int(end_idx_raw) if end_idx_raw is not None else None,
+        "count": int(count) if count is not None else 0,
+    }
+    if first_ts is not None: info["first_timestamp"] = int(first_ts)
+    if last_ts  is not None: info["last_timestamp"]  = int(last_ts)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f: json.dump(info, f, indent=2)
 
 
 def main():
@@ -177,6 +190,13 @@ def process_with_existing_features(args):
     feature_mappings = load_feature_mappings(f"{args.data_dir}/features/feature_mappings.json")
     gamestates_metadata = load_gamestates_metadata(f"{args.data_dir}/features/gamestates_metadata.json")
     
+    # -------------- RAW SLICE INFO --------------
+    raw_N = int(features.shape[0])  # or len(raw_action_data)
+    _write_slice_info(os.path.join(args.data_dir, "01_raw_data", "slice_info.json"),
+                      0, raw_N - 1, raw_N,
+                      first_ts=gamestates_metadata[0]["absolute_timestamp"],
+                      last_ts=gamestates_metadata[raw_N-1]["absolute_timestamp"])
+    
     # Load or extract raw action data
     raw_action_file = f"{args.data_dir}/features/raw_action_data.json"
     if Path(raw_action_file).exists():
@@ -196,6 +216,21 @@ def process_with_existing_features(args):
     # Update metadata to match trimmed data
     if gamestates_metadata:
         gamestates_metadata = gamestates_metadata[start_idx:len(features) - end_idx]
+    
+    # -------------- TRIMMED SLICE INFO --------------
+    # Derive start/end by matching first/last trimmed action timestamps into full metadata
+    def _find_index_by_ts(ts, meta):
+        for i, m in enumerate(meta):
+            if m.get("absolute_timestamp") == ts:
+                return i
+        return None
+    trim_first_ts = trimmed_action_data[0]["gamestate_timestamp"]
+    trim_last_ts  = trimmed_action_data[-1]["gamestate_timestamp"]
+    trim_start = _find_index_by_ts(trim_first_ts, gamestates_metadata)
+    trim_end   = _find_index_by_ts(trim_last_ts, gamestates_metadata)
+    _write_slice_info(os.path.join(args.data_dir, "02_trimmed_data", "slice_info.json"),
+                      trim_start, trim_end, (trim_end - trim_start + 1) if (trim_start is not None and trim_end is not None) else len(trimmed_features),
+                      first_ts=trim_first_ts, last_ts=trim_last_ts)
     
     # Normalize features
     print("Normalizing features...")
@@ -412,6 +447,17 @@ def process_with_feature_extraction(args):
         gamestates_metadata,
         screenshot_paths
     )
+    
+    # -------------- FINAL TRAINING SLICE INFO --------------
+    seq_B = int(input_sequences.shape[0])      # Batches
+    SEQ_LEN = 10                                   # keep in sync
+    final_count = seq_B + SEQ_LEN + 1
+    final_start = start_idx if start_idx is not None else 0
+    final_end   = (final_start + final_count - 1) if final_start is not None else None
+    first_ts = gamestates_metadata[0]["absolute_timestamp"] if gamestates_metadata else None
+    last_ts  = gamestates_metadata[-1]["absolute_timestamp"] if gamestates_metadata else None
+    _write_slice_info(os.path.join(args.data_dir, "06_final_training_data", "slice_info.json"),
+                      final_start, final_end, final_count, first_ts=first_ts, last_ts=last_ts)
 
 
 if __name__ == "__main__":
