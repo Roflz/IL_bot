@@ -878,15 +878,35 @@ class BotController:
     
     def get_action_features(self) -> List[List[float]]:
         """Get last 10 action frames aligned to the gamestate timeline for display."""
+        print("\n🔍 DEBUG: CONTROLLER get_action_features() called")
+        
         try:
+            # Use the actions service if available
+            if hasattr(self, "actions_service") and self.actions_service:
+                print("🔍 DEBUG: Using actions_service.get_action_features()")
+                result = self.actions_service.get_action_features()
+                print(f"🔍 DEBUG: actions_service returned {len(result)} tensors")
+                for i, tensor in enumerate(result[:3]):  # Show first 3 tensors
+                    print(f"🔍 DEBUG: Tensor {i}: {tensor[:10]}... (length: {len(tensor)})")
+                return result
+            
+            # Fallback to feature pipeline if actions service not available
             if hasattr(self, "feature_pipeline"):
+                print("🔍 DEBUG: Falling back to feature_pipeline.get_last_action_windows()")
                 frames = self.feature_pipeline.get_last_action_windows(10)
+                print(f"🔍 DEBUG: feature_pipeline returned {len(frames)} frames")
+                for i, frame in enumerate(frames[:3]):  # Show first 3 frames
+                    print(f"🔍 DEBUG: Frame {i}: {frame[:10]}... (length: {len(frame)})")
                 # Pad to 10 so the table always has T0..T9
                 if len(frames) < 10:
                     frames = frames + ([[0.0]] * (10 - len(frames)))
                 return frames
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"🔍 DEBUG: Error in get_action_features: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        print("🔍 DEBUG: Returning fallback empty tensors")
         return [[0.0]] * 10
     
     def on_feature_data(self, feature_data):

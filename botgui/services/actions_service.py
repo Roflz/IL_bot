@@ -103,123 +103,67 @@ class ActionsService:
         LOG.info("Actions data cleared")
     
     def get_action_features(self) -> List[List[float]]:
-        """
-        Get action features as individual tensors for each timestep.
-        
-        Each timestep gets an action tensor representing actions in the 600ms window
-        BEFORE that gamestate, processed exactly like shared_pipeline/actions.py.
-        
-        Returns:
-            List of action tensors, one per timestep, in format:
-            [action_count, timestamp1, type1, x1, y1, button1, key1, scroll_dx1, scroll_dy1, ...]
-        """
-        # FIXED: Only check if actions exist, not if recording is active
-        # We should be able to access previously recorded actions even when recording is stopped
+        print("\n=== DEBUG: ENTERING get_action_features ===")
+        print(f"Raw action count: {len(self.actions)}")
+        for a in self.actions[:5]:
+            print(f"Sample Action: {a}")
+
         if not self.actions:
-            return [[0.0]] * 10  # Return 10 empty tensors for T0-T9
-        
-        # FIXED: Use action timestamps instead of current gamestate timestamps
-        # The actions were recorded at specific times, so we need to use those timestamps
-        # not current gamestate timestamps which are from the current time
-        
-        # Get the timestamp range of recorded actions
-        if not self.actions:
+            print("No actions recorded. Returning empty tensors.")
             return [[0.0]] * 10
-        
+
         action_timestamps = [action.get('timestamp', 0) for action in self.actions]
         min_timestamp = min(action_timestamps)
         max_timestamp = max(action_timestamps)
-        
-        # Create 10 evenly spaced timesteps within the action time range
-        # T0 = most recent actions, T9 = oldest actions
-        timestep_duration = (max_timestamp - min_timestamp) // 10  # Duration per timestep
-        
-        # Create 10 timesteps (T0-T9) with 600ms windows
+        print(f"Timestamp range: {min_timestamp} to {max_timestamp}")
+
+        timestep_duration = max((max_timestamp - min_timestamp) // 10, 1)
         action_tensors = []
+
         for i in range(10):
-            # Calculate the center timestamp for this timestep
-            # T0 = most recent (max_timestamp), T9 = oldest (min_timestamp)
             if i == 0:
-                # T0: center around most recent actions
                 center_timestamp = max_timestamp - (timestep_duration // 2)
             elif i == 9:
-                # T9: center around oldest actions  
                 center_timestamp = min_timestamp + (timestep_duration // 2)
             else:
-                # T1-T8: evenly spaced between oldest and newest
                 center_timestamp = max_timestamp - (i * timestep_duration) - (timestep_duration // 2)
-            
-            # Calculate the 600ms window around this center timestamp
-            window_start = center_timestamp - 300  # 300ms before center
-            window_end = center_timestamp + 300    # 300ms after center
-            
-            # Get actions in this window
+
+            window_start = center_timestamp - 300
+            window_end = center_timestamp + 300
+            print(f"\n--- Timestep T{i} ---")
+            print(f"Window: {window_start} to {window_end}")
+
             window_actions = []
             for action in self.actions:
-                action_timestamp = action.get('timestamp', 0)
-                if window_start <= action_timestamp <= window_end:
+                ts = action.get('timestamp', 0)
+                if window_start <= ts <= window_end:
+                    print(f"Included action: {action}")
                     window_actions.append(action)
-            
-            # Sort actions by timestamp
-            window_actions.sort(key=lambda a: a.get('timestamp', 0))
-            
-            # Convert to action tensor format: [count, timestamp1, type1, x1, y1, button1, key1, scroll_dx1, scroll_dy1, ...]
-            action_tensor = [len(window_actions)]  # Start with action count
-            
-            for action in window_actions:
-                # Timestamp (relative to window start)
+
+            action_tensor_elements = []
+            for action in sorted(window_actions, key=lambda a: a.get('timestamp', 0)):
                 rel_timestamp = action.get('timestamp', 0) - window_start
-                action_tensor.append(float(rel_timestamp))
-                
-                # Action type (encode as: 0=move, 1=click, 2=key_press, 3=key_release, 4=scroll)
-                event_type = action.get('event_type', 'move')
-                if event_type == 'move':
-                    action_type = 0
-                elif event_type == 'click':
-                    action_type = 1
-                elif event_type == 'key_press':
-                    action_type = 2
-                elif event_type == 'key_release':
-                    action_type = 3
-                elif event_type == 'scroll':
-                    action_type = 4
-                else:
-                    action_type = 0
-                action_tensor.append(float(action_type))
-                
-                # Coordinates
-                action_tensor.append(float(action.get('x_in_window', 0)))
-                action_tensor.append(float(action.get('y_in_window', 0)))
-                
-                # Button (encode as: 0=none, 1=left, 2=right, 3=middle)
-                button = action.get('btn', '')
-                if button == 'left':
-                    button_code = 1
-                elif button == 'right':
-                    button_code = 2
-                elif button == 'middle':
-                    button_code = 3
-                else:
-                    button_code = 0
-                action_tensor.append(float(button_code))
-                
-                # Key (simple hash for now)
+                etype = action.get('event_type', '')
+                btn = action.get('btn', '')
                 key = action.get('key', '')
-                key_code = hash(key) % 10000 if key else 0
-                action_tensor.append(float(key_code))
-                
-                # Scroll deltas
-                action_tensor.append(float(action.get('scroll_dx', 0)))
-                action_tensor.append(float(action.get('scroll_dy', 0)))
-            
+                tensor_fragment = [
+                    float(rel_timestamp),
+                    float({'move': 0, 'click': 1, 'key_press': 2, 'key_release': 3, 'scroll': 4}.get(etype, 0)),
+                    float(action.get('x_in_window', 0)),
+                    float(action.get('y_in_window', 0)),
+                    float({'left': 1, 'right': 2, 'middle': 3}.get(btn, 0)),
+                    float(hash(key) % 10000 if key else 0),
+                    float(action.get('scroll_dx', 0)),
+                    float(action.get('scroll_dy', 0)),
+                ]
+                print(f"Tensor fragment: {tensor_fragment}")
+                action_tensor_elements.extend(tensor_fragment)
+
+            action_tensor = [float(len(window_actions))] + action_tensor_elements
+            print(f"Final tensor T{i} (length {len(action_tensor)}): {action_tensor[:10]}...")
             action_tensors.append(action_tensor)
-        
-        # Count non-empty tensors
-        non_empty_count = sum(1 for tensor in action_tensors if len(tensor) > 1)  # > 1 because [0] is empty
-        
-        # T0 is already most recent (index 0), T9 is oldest (index 9)
-        # No need to reverse since we sorted gamestate_timestamps in reverse order
-        
+
+        print("\n=== DEBUG: EXITING get_action_features ===\n")
         return action_tensors
 
     def get_actions_in_window(self, window_start_ms: int, window_end_ms: int) -> List[Dict[str, Any]]:

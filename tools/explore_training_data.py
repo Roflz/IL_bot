@@ -40,6 +40,7 @@ class SimpleDataExplorer:
         self._slice_info = None     # {'start_idx_raw','end_idx_raw','count'}
         self._slice_cache = {}      # folder -> slice_info (memoize)
         self._counts_cache = {}     # folder -> (xs, ys) action counts memo
+        self._id_mappings = None    # lazy-loaded id_mappings.json for hash mapping
         self.summary_vars = {
             "dataset": tk.StringVar(value="-"),
             "shape": tk.StringVar(value="-"),
@@ -101,14 +102,91 @@ class SimpleDataExplorer:
         self.current_action_slice = 0   # used as TIMESTEP index for 4D numpy arrays
         self.total_action_slices = 0
         self.action_data = None
-        self.show_mapped_values = True  # Toggle for mapped vs raw display
-        self.current_file_type = None  # Track current file type
-        self.state_features_scroll_position = 0  # Save scroll position for state features
+        self.show_mapped_values = False
+        self._id_mappings = None
+        self._rev_idx = None  # flat key->label index across all categories/subcategories
         self.load_files()
+
+    # -- Utilities ------------------------------------------------------------------
+    # -- Utilities ------------------------------------------------------------------
+    def _sanitize_label(self, s: str) -> str:
+        """Remove inline color tags and odd bytes for display."""
+        try:
+            import re
+            s = re.sub(r"<col=[0-9a-fA-F]{4,6}>", "", s)
+            s = s.replace("</col>", "")
+            s = s.replace("\u00C2\u00A0", " ")
+            return s
+        except Exception:
+            return s
+
+    def _normalize_key_candidates(self, value):
+        """Generate tolerant string keys for mapping lookups."""
+        c = {str(value)}
+        try:
+            import math
+            f = float(value)
+            i = int(round(f))
+            if math.isfinite(f) and abs(f - i) < 1e-9:
+                c.update({str(i), str(float(i))})
+        except Exception:
+            pass
+        return c
+
+    def _get_feature_column_names(self, n_features):
+        """Get meaningful column names for features using feature mappings if available."""
+        # Try to load feature mappings
+        if not hasattr(self, 'feature_mappings') or not self.feature_mappings:
+            try:
+                # Get the session root directory first
+                session_root = self._get_session_root_dir()
+                
+                # Try session root first, then fall back to current data_dir
+                candidates = [
+                    os.path.join(session_root, '05_mappings', 'feature_mappings.json'),
+                    os.path.join(session_root, 'mappings', 'feature_mappings.json'),  # legacy session name
+                    os.path.join(self.data_dir, '05_mappings', 'feature_mappings.json'),
+                    os.path.join(self.data_dir, 'features', 'feature_mappings.json'),
+                ]
+                
+                feature_mappings_path = None
+                for candidate in candidates:
+                    if os.path.exists(candidate):
+                        feature_mappings_path = candidate
+                        break
+                
+                if feature_mappings_path:
+                    with open(feature_mappings_path, 'r') as f:
+                        self.feature_mappings = json.load(f)
+                    self._log(f"Loaded feature mappings for column names from: {feature_mappings_path}")
+                else:
+                    self._log("No feature mappings file found for column names", level="warning")
+                    self.feature_mappings = None
+            except Exception as e:
+                self._log(f"Warning: Could not load feature mappings for column names: {e}", level="warning")
+                self.feature_mappings = None
+        
+        # If we have feature mappings and they match the expected count, use them
+        if (self.feature_mappings and 
+            len(self.feature_mappings) == n_features and 
+            all('feature_name' in mapping for mapping in self.feature_mappings)):
+            
+            # Extract feature names and truncate if too long
+            feature_names = []
+            for mapping in self.feature_mappings:
+                name = mapping.get('feature_name', '')
+                # Truncate long names to keep columns readable
+                if len(name) > 20:
+                    name = name[:17] + "..."
+                feature_names.append(name)
+            return tuple(feature_names)
+        
+        # Fallback to generic names
+        return tuple(f"F{i}" for i in range(n_features))
 
     # --- Treeview column helper: ALWAYS set columns + displaycolumns together ---
     def _set_tree_columns(self, tree, cols):
-        self._log("_set_tree_columns", cols=list(cols))
+        self._log("_set_tree_columns")
         tree.configure(columns=cols, displaycolumns=cols)
 
     # ---------- logging helpers ----------
@@ -222,27 +300,38 @@ class SimpleDataExplorer:
         nav_frame.pack(fill=tk.X, padx=10, pady=5)
         
         ttk.Label(nav_frame, text="Gamestate:").pack(side=tk.LEFT)
+        ttk.Button(nav_frame, text="⟪", command=self.first_gamestate).pack(side=tk.LEFT, padx=2)
+        ttk.Button(nav_frame, text="←←", command=self.prev_gamestate_10).pack(side=tk.LEFT, padx=2)
         ttk.Button(nav_frame, text="←", command=self.prev_gamestate).pack(side=tk.LEFT, padx=2)
         self.gamestate_var = tk.StringVar(value="0")
         gamestate_entry = ttk.Entry(nav_frame, textvariable=self.gamestate_var, width=10)
         gamestate_entry.pack(side=tk.LEFT, padx=5)
         gamestate_entry.bind('<Return>', lambda e: self.on_gamestate_entry_change())
         ttk.Button(nav_frame, text="→", command=self.next_gamestate).pack(side=tk.LEFT, padx=2)
+        ttk.Button(nav_frame, text="→→", command=self.next_gamestate_10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(nav_frame, text="⟫", command=self.last_gamestate).pack(side=tk.LEFT, padx=2)
         self.total_gamestates_label = ttk.Label(nav_frame, text="of 0")
         self.total_gamestates_label.pack(side=tk.LEFT, padx=5)
+        
+        # Add button to find next gamestate with actions
+        ttk.Button(nav_frame, text="Find Actions", command=self.find_next_gamestate_with_actions).pack(side=tk.LEFT, padx=5)
         
         # Bind entry field to update display
         self.gamestate_var.trace('w', self.on_gamestate_entry_change)
         
         # Toggle for mapped vs raw display
         ttk.Label(nav_frame, text="Display:").pack(side=tk.LEFT, padx=(20,5))
-        self.mapped_var = tk.BooleanVar(value=True)
-        self.mapped_check = ttk.Checkbutton(nav_frame, text="Mapped Values", variable=self.mapped_var, 
+        self.mapped_var = tk.BooleanVar(value=False)  # Start with raw values
+        self.mapped_check = ttk.Checkbutton(nav_frame, text="Hash Mappings", variable=self.mapped_var, 
                                            command=self.on_mapped_toggle)
         self.mapped_check.pack(side=tk.LEFT, padx=5)
 
         # --- Secondary navigator for 4D arrays (action slice) ---
         ttk.Label(nav_frame, text="  Timestep:").pack(side=tk.LEFT, padx=(16, 5))
+        self.slice_first_btn = ttk.Button(nav_frame, text="⟪", command=self.first_action_slice)
+        self.slice_first_btn.pack(side=tk.LEFT, padx=2)
+        self.slice_prev_10_btn = ttk.Button(nav_frame, text="←←", command=self.prev_action_slice_10)
+        self.slice_prev_10_btn.pack(side=tk.LEFT, padx=2)
         self.slice_prev_btn = ttk.Button(nav_frame, text="←", command=self.prev_action_slice)
         self.slice_prev_btn.pack(side=tk.LEFT, padx=2)
         self.action_slice_var = tk.StringVar(value="0")
@@ -251,11 +340,15 @@ class SimpleDataExplorer:
         self.slice_entry.bind('<Return>', lambda e: self.on_action_slice_entry_change())
         self.slice_next_btn = ttk.Button(nav_frame, text="→", command=self.next_action_slice)
         self.slice_next_btn.pack(side=tk.LEFT, padx=2)
+        self.slice_next_10_btn = ttk.Button(nav_frame, text="→→", command=self.next_action_slice_10)
+        self.slice_next_10_btn.pack(side=tk.LEFT, padx=2)
+        self.slice_last_btn = ttk.Button(nav_frame, text="⟫", command=self.last_action_slice)
+        self.slice_last_btn.pack(side=tk.LEFT, padx=2)
         self.total_action_slices_label = ttk.Label(nav_frame, text="of 0")
         self.total_action_slices_label.pack(side=tk.LEFT, padx=5)
 
         # Hide/disable slice controls by default (only shown for 4D)
-        for w in (self.slice_prev_btn, self.slice_entry, self.slice_next_btn, self.total_action_slices_label):
+        for w in (self.slice_first_btn, self.slice_prev_10_btn, self.slice_prev_btn, self.slice_entry, self.slice_next_btn, self.slice_next_10_btn, self.slice_last_btn, self.total_action_slices_label):
             w.state(["disabled"])
         
         # ---------- BOTTOM: viewer (full width) ----------
@@ -280,7 +373,7 @@ class SimpleDataExplorer:
         
     def _autosize_columns(self, tree, padding=20, max_px=260):
         """Resize Treeview columns to fit content (headers + visible rows)."""
-        self._log("_autosize_columns: start", columns=list(tree["columns"]))
+        self._log("_autosize_columns: start")
         # Safe font lookup across Tk builds
         try:
             style = ttk.Style(tree)
@@ -305,8 +398,7 @@ class SimpleDataExplorer:
                 width = max(width, f.measure(str(cell)) if f else width)
             tree.column(col, width=min(width + padding, max_px))
         self._log("_autosize_columns: done",
-                  item_count=len(tree.get_children()),
-                  columns=list(tree["columns"]))
+                  item_count=len(tree.get_children()))
     
     # --- BEGIN: exact 4D numpy viewer behavior (copied/adapted from print_numpy_array.py) ---
     def _ensure_4d_order_batch_timestep_action_feature(self, data4d: np.ndarray) -> np.ndarray:
@@ -333,9 +425,9 @@ class SimpleDataExplorer:
 
     def _fmt_num(self, v):
         if isinstance(v, (np.integer, int)):
-            return str(int(v))
+            return self._display_maybe_mapped(v)
         if isinstance(v, (np.floating, float)):
-            return f"{float(v):.6f}"
+            return self._display_maybe_mapped(v)
         return str(v)
 
     def _update_numpy_4d_view(self, batch_idx: int, timestep_idx: int):
@@ -368,11 +460,21 @@ class SimpleDataExplorer:
         self._log("_update_numpy_4d_view: rendering", actions=A, features=view.shape[3])
         for i in range(A):
             row = view[batch_idx, timestep_idx, i, :]  # (8,)
-            values = [self._fmt_num(v) for v in row]
+            # Use mapping if enabled for action features
+            if self.show_mapped_values:
+                values = []
+                for j, v in enumerate(row):
+                    if j == 1 and isinstance(v, (int, float)):  # Action type column
+                        values.append(self._map_hash_value(int(v), 'Interaction', 'action_type_hashes'))
+                    else:
+                        values.append(self._display_maybe_mapped(v))
+            else:
+                values = [self._display_maybe_mapped(v) for v in row]
+            
             item = tree.insert("", tk.END, text=f"Action {i}", values=values)
             # Optional row coloring keyed only by action_type now
             try:
-                action_type = int(float(values[1]))
+                action_type = int(float(row[1]))  # Use original value for coloring
                 if action_type in action_colors:
                     tag = f"action_{action_type}"
                     tree.tag_configure(tag, background=action_colors[action_type])
@@ -469,6 +571,45 @@ class SimpleDataExplorer:
             self.gamestate_var.set(str(self.current_gamestate))
             self._navigate_gamestate()
     
+    def prev_gamestate_10(self):
+        """Move back 10 gamestates at once"""
+        if not self.total_gamestates:
+            return
+        new_gamestate = max(0, self.current_gamestate - 10)
+        if new_gamestate != self.current_gamestate:
+            self.current_gamestate = new_gamestate
+            self.gamestate_var.set(str(self.current_gamestate))
+            self._navigate_gamestate()
+    
+    def next_gamestate_10(self):
+        """Move forward 10 gamestates at once"""
+        if not self.total_gamestates:
+            return
+        new_gamestate = min(self.total_gamestates - 1, self.current_gamestate + 10)
+        if new_gamestate != self.current_gamestate:
+            self.current_gamestate = new_gamestate
+            self.gamestate_var.set(str(self.current_gamestate))
+            self._navigate_gamestate()
+    
+    def first_gamestate(self):
+        """Jump to the very first gamestate"""
+        if not self.total_gamestates:
+            return
+        if self.current_gamestate != 0:
+            self.current_gamestate = 0
+            self.gamestate_var.set("0")
+            self._navigate_gamestate()
+    
+    def last_gamestate(self):
+        """Jump to the very last gamestate"""
+        if not self.total_gamestates:
+            return
+        last_idx = self.total_gamestates - 1
+        if self.current_gamestate != last_idx:
+            self.current_gamestate = last_idx
+            self.gamestate_var.set(str(last_idx))
+            self._navigate_gamestate()
+    
     def on_gamestate_entry_change(self, *args):
         """Handle manual entry in gamestate field"""
         self._log("on_gamestate_entry_change", args=args, total=self.total_gamestates)
@@ -513,15 +654,30 @@ class SimpleDataExplorer:
             # Always update the main summary to refresh sequence range info
             self._update_summary()
             self._update_actions_graph()  # move the cursor to new position
-        except Exception:
-            self._log("_navigate_gamestate: summary update failed", level="error")
+        except Exception as e:
+            self._log("_navigate_gamestate: summary update failed", level="error", error=str(e))
+            # Don't let summary failures break navigation
+            pass
     
     def on_mapped_toggle(self):
         """Handle toggle between mapped and raw display"""
         self._log("on_mapped_toggle", mapped=self.mapped_var.get())
         self.show_mapped_values = self.mapped_var.get()
-        if self.action_data:
-            self.display_current_gamestate()
+        self._log(f"show_mapped_values set to: {self.show_mapped_values}")
+        
+        # Refresh current display based on file type
+        if self.current_file_path:
+            if self.current_file_path.endswith('.npy'):
+                # For NumPy arrays, refresh the current view
+                if hasattr(self, 'current_numpy_data') and self.current_numpy_data is not None:
+                    self._log("Refreshing NumPy array view")
+                    self._navigate_gamestate()
+            else:
+                # For JSON files, refresh the current gamestate
+                self._log("Refreshing JSON view")
+                self._navigate_gamestate()
+        else:
+            self._log("No current file path to refresh")
     
     # (combobox-based on_file_selected removed in favor of tab file picker)
     
@@ -565,8 +721,10 @@ class SimpleDataExplorer:
                 if file_path.endswith('.json'):
                     self._update_summary()
                 self._update_actions_graph()  # refresh chart for the selected dataset
-            except Exception:
-                self._log("load_file: summary update failed", level="error")
+            except Exception as e:
+                self._log("load_file: summary update failed", level="error", error=str(e))
+                # Don't let summary failures break file loading
+                pass
             
         except Exception as e:
             self._log("load_file: exception", level="error", error=str(e))
@@ -577,6 +735,9 @@ class SimpleDataExplorer:
         self._log("display_numpy: enter",
                   ndim=int(getattr(data, 'ndim', -1)),
                   shape=tuple(getattr(data, 'shape', ())))
+        
+
+        
         # Hard reset the tree to avoid duplicated/old headers
         self.tree.delete(*self.tree.get_children())
         # Avoid setting empty () columns which can cause Tk errors on some builds
@@ -667,6 +828,10 @@ class SimpleDataExplorer:
                 except Exception:
                     self._log("display_numpy: _update_numpy_4d_view crashed", level="error")
                     traceback.print_exc()
+            
+            # Replicate the same pattern as JSON files and 2D arrays:
+            # Call _navigate_gamestate() to properly show the gamestate position
+            self._navigate_gamestate()
         # Update summary main info for numpy
         try:
             self._update_summary_on_file_load(self.current_file_path or "")
@@ -727,7 +892,13 @@ class SimpleDataExplorer:
                         self.tree.heading(key, text=key)
                     
                     for i, item in enumerate(data[:100]):  # Limit to first 100 items
-                        values = [str(item.get(key, "")) for key in keys]
+                        values = []
+                        for key in keys:
+                            val = item.get(key, "")
+                            if isinstance(val, (int, float, np.number)):
+                                values.append(self._display_maybe_mapped(val))
+                            else:
+                                values.append(str(val))
                         self.tree.insert("", tk.END, text=f"Row {i}", values=values)
             elif (isinstance(data[0], list) if data else True):
                 # Treat as action tensors if (a) file is *_action_tensors.json OR
@@ -756,7 +927,11 @@ class SimpleDataExplorer:
                     self.tree.heading("value", text="Value")
                     
                     for i, val in enumerate(data[:100]):
-                        self.tree.insert("", tk.END, text=f"Row {i}", values=(i, str(val)))
+                        if isinstance(val, (int, float, np.number)):
+                            display_val = self._display_maybe_mapped(val)
+                        else:
+                            display_val = str(val)
+                        self.tree.insert("", tk.END, text=f"Row {i}", values=(i, display_val))
             else:
                 # Simple list
                 self.tree.configure(columns=("index", "value"),
@@ -768,7 +943,11 @@ class SimpleDataExplorer:
                 self.tree.heading("value", text="Value")
                 
                 for i, val in enumerate(data[:100]):
-                    self.tree.insert("", tk.END, values=(i, str(val)))
+                    if isinstance(val, (int, float, np.number)):
+                        display_val = self._display_maybe_mapped(val)
+                    else:
+                        display_val = str(val)
+                    self.tree.insert("", tk.END, values=(i, display_val))
         
         elif isinstance(data, dict):
             self.tree.configure(columns=("key", "value"),
@@ -780,7 +959,11 @@ class SimpleDataExplorer:
             self.tree.heading("value", text="Value")
             
             for key, value in data.items():
-                self.tree.insert("", tk.END, values=(key, str(value)))
+                if isinstance(value, (int, float, np.number)):
+                    display_val = self._display_maybe_mapped(value)
+                else:
+                    display_val = str(value)
+                self.tree.insert("", tk.END, values=(key, display_val))
     
     def display_current_gamestate(self):
         """Display the current gamestate's data"""
@@ -790,7 +973,11 @@ class SimpleDataExplorer:
         # Clear the table completely first
         self.tree.delete(*self.tree.get_children())
         
-        gamestate = self.action_data[self.current_gamestate]
+        try:
+            gamestate = self.action_data[self.current_gamestate]
+        except (IndexError, KeyError):
+            self._safe_status(f"Gamestate {self.current_gamestate} not found in data")
+            return
         
         # Check if this is action data format (with timestamps) or action tensor format
         if self.current_file_type == "action_tensors":
@@ -801,6 +988,8 @@ class SimpleDataExplorer:
         elif isinstance(gamestate, list):
             # Action tensor format - display tensor values
             self._display_action_tensor_gamestate(gamestate)
+        else:
+            self._safe_status(f"Unknown gamestate format: {type(gamestate)}")
         
         # Force update the display
         self.root.update_idletasks()
@@ -809,8 +998,10 @@ class SimpleDataExplorer:
         if hasattr(self, 'current_data') and isinstance(self.current_data, list):
             try:
                 self._update_summary()
-            except Exception:
-                self._log("display_current_gamestate: summary update failed", level="error")
+            except Exception as e:
+                self._log("display_current_gamestate: summary update failed", level="error", error=str(e))
+                # Don't let summary failures break the display
+                pass
     
     def _display_action_data_gamestate(self, gamestate):
         """Display action data gamestate with timestamps"""
@@ -828,12 +1019,19 @@ class SimpleDataExplorer:
             self.tree.column(col, width=120)
             self.tree.heading(col, text=col)
         
+        # Handle empty gamestates gracefully
+        if not isinstance(gamestate, dict):
+            self._safe_status("Invalid gamestate data format.")
+            return
+            
         # Collect all actions with their timestamps
         all_actions = []
         for action_type in ["mouse_movements", "clicks", "key_presses", "key_releases", "scrolls"]:
-            for action in gamestate.get(action_type, []):
-                if "timestamp" in action:
-                    all_actions.append((action["timestamp"], action_type, action))
+            actions = gamestate.get(action_type, [])
+            if isinstance(actions, list):
+                for action in actions:
+                    if isinstance(action, dict) and "timestamp" in action:
+                        all_actions.append((action["timestamp"], action_type, action))
         
         # Sort by timestamp
         all_actions.sort(key=lambda x: x[0])
@@ -887,8 +1085,13 @@ class SimpleDataExplorer:
             self.tree.column(col, width=120, anchor=tk.CENTER)
             self.tree.heading(col, text=col)
 
-        if not isinstance(gamestate, list) or len(gamestate) < 8:
-            self._safe_status("No actions in this gamestate.")
+        # Handle empty gamestates gracefully
+        if not isinstance(gamestate, list):
+            self._safe_status("Invalid gamestate data format.")
+            return
+            
+        if len(gamestate) == 0:
+            self._safe_status("No actions in this gamestate (empty array).")
             return
 
         # Debug logging
@@ -896,15 +1099,36 @@ class SimpleDataExplorer:
                   gamestate_length=len(gamestate), 
                   current_gamestate=self.current_gamestate)
 
+        # Handle the case where the first element might be a count (legacy format)
         start = 1 if len(gamestate) % 8 != 0 else 0
-        for i in range(start, len(gamestate), 8):
-            row = gamestate[i:i+8]
-            action_idx = (i - start) // 8
-            values = [str(action_idx)] + [str(x) for x in row]
-            self.tree.insert("", "end", text=f"Action {action_idx}", values=values)
+        
+        # Ensure we have at least 8 values to work with
+        if len(gamestate) < (start + 8):
+            self._safe_status(f"Gamestate {self.current_gamestate}: Insufficient data ({len(gamestate)} values, need at least {start + 8})")
+            return
 
-        count = (len(gamestate) - start) // 8
-        self._safe_status(f"Gamestate {self.current_gamestate}: {count} actions")
+        # Display each action as a row
+        action_count = 0
+        for i in range(start, len(gamestate), 8):
+            if i + 8 <= len(gamestate):  # Ensure we have a complete 8-value chunk
+                row = gamestate[i:i+8]
+                action_idx = (i - start) // 8
+                
+                # Use mapping if enabled for action features
+                if self.show_mapped_values:
+                    values = [str(action_idx)]
+                    for j, x in enumerate(row):
+                        if j == 1 and isinstance(x, (int, float)):  # Action type column
+                            values.append(self._map_hash_value(int(x), 'Interaction', 'action_type_hashes'))
+                        else:
+                            values.append(str(x))
+                else:
+                    values = [str(action_idx)] + [str(x) for x in row]
+                
+                self.tree.insert("", "end", text=f"Action {action_idx}", values=values)
+                action_count += 1
+
+        self._safe_status(f"Gamestate {self.current_gamestate}: {action_count} actions")
     
     def _convert_action_type_code(self, code):
         """Convert action type code to string"""
@@ -968,7 +1192,13 @@ class SimpleDataExplorer:
         
         for i in range(min(100, len(data))):  # Limit to first 100 rows
             row = data.iloc[i]
-            values = [str(row[col]) for col in columns]
+            values = []
+            for col in columns:
+                val = row[col]
+                if isinstance(val, (int, float, np.number)):
+                    values.append(self._display_maybe_mapped(val))
+                else:
+                    values.append(str(val))
             self.tree.insert("", tk.END, text=f"Row {i}", values=values)
     
     def configure_numpy_tree(self, tree, data):
@@ -990,7 +1220,10 @@ class SimpleDataExplorer:
             
             for i, val in enumerate(data):
                 try:
-                    formatted_val = f"{val:.6f}" if isinstance(val, (int, float, np.number)) else str(val)
+                    if isinstance(val, (int, float, np.number)):
+                        formatted_val = self._display_maybe_mapped(val)
+                    else:
+                        formatted_val = str(val)
                 except:
                     formatted_val = str(val)
                 tree.insert("", tk.END, values=(i, formatted_val))
@@ -1007,7 +1240,12 @@ class SimpleDataExplorer:
             
             for i in range(data.shape[0]):
                 try:
-                    values = [f"{val:.6f}" if isinstance(val, (int, float, np.number)) else str(val) for val in data[i]]
+                    values = []
+                    for val in data[i]:
+                        if isinstance(val, (int, float, np.number)):
+                            values.append(self._display_maybe_mapped(val))
+                        else:
+                            values.append(str(val))
                 except:
                     values = [str(val) for val in data[i]]
                 tree.insert("", tk.END, text=f"Row {i}", values=values)
@@ -1020,7 +1258,8 @@ class SimpleDataExplorer:
             if n_features == 8:
                 cols = ("timestamp", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy")
             else:
-                cols = tuple(f"F{i}" for i in range(n_features))
+                # Try to use feature mappings for meaningful column names
+                cols = self._get_feature_column_names(n_features)
             
             # Configure columns properly for large feature counts
             tree.configure(columns=cols, displaycolumns=cols)
@@ -1046,7 +1285,8 @@ class SimpleDataExplorer:
             if n_features == 8:
                 cols = ("timestamp", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy")
             else:
-                cols = tuple(f"F{i}" for i in range(n_features))
+                # Try to use feature mappings for meaningful column names
+                cols = self._get_feature_column_names(n_features)
             
             # Configure columns properly for large feature counts
             tree.configure(columns=cols, displaycolumns=cols)
@@ -1125,13 +1365,17 @@ class SimpleDataExplorer:
                 for i in range(data.shape[1]):  # timesteps
                     try:
                         # Format like print_numpy_array.py: ints as ints, floats to 6dp
-                        def _fmt(v):
+                        # But use mapping if enabled for action features
+                        def _fmt(v, idx):
                             if isinstance(v, (np.integer, int)):
-                                return str(int(v))
+                                if self.show_mapped_values and len(data[slice_idx, i]) == 8 and idx == 1:
+                                    # Map action type (index 1) if it's an action feature
+                                    return self._map_hash_value(v, 'Interaction', 'action_type_hashes')
+                                return self._display_maybe_mapped(v)
                             if isinstance(v, (np.floating, float)):
-                                return f"{float(v):.6f}"
+                                return self._display_maybe_mapped(v)
                             return str(v)
-                        values = [_fmt(val) for val in data[slice_idx, i]]
+                        values = [_fmt(val, j) for j, val in enumerate(data[slice_idx, i])]
                         
                         # Create descriptive timestep label
                         if i == 0:
@@ -1154,7 +1398,7 @@ class SimpleDataExplorer:
                     except Exception:
                         self._log("update_3d_slice_for_tab: row render error (3D)", level="error", i=i)
                         traceback.print_exc()
-                        values = [str(val) for val in data[slice_idx, i]]
+                        values = [self._display_maybe_mapped(val) for val in data[slice_idx, i]]
                         tree.insert("", tk.END, text=f"Timestep {i}", values=values)
             elif data.ndim == 4:
                 self._log("update_3d_slice_for_tab: rendering 4D rows",
@@ -1163,13 +1407,16 @@ class SimpleDataExplorer:
                 a = max(0, min(getattr(self, "current_action_slice", 0), data.shape[1] - 1))
                 for i in range(data.shape[2]):  # timesteps
                     try:
-                        def _fmt(v):
+                        def _fmt(v, idx):
                             if isinstance(v, (np.integer, int)):
-                                return str(int(v))
+                                if self.show_mapped_values and len(data[slice_idx, a, i, :]) == 8 and idx == 1:
+                                    # Map action type (index 1) if it's an action feature
+                                    return self._map_hash_value(v, 'Interaction', 'action_type_hashes')
+                                return self._display_maybe_mapped(v)
                             if isinstance(v, (np.floating, float)):
-                                return f"{float(v):.6f}"
+                                return self._display_maybe_mapped(v)
                             return str(v)
-                        values = [_fmt(v) for v in data[slice_idx, a, i, :]]
+                        values = [_fmt(v, j) for j, v in enumerate(data[slice_idx, a, i, :])]
                         
                         # Create descriptive timestep label with action slice info
                         if i == 0:
@@ -1191,7 +1438,7 @@ class SimpleDataExplorer:
                     except Exception:
                         self._log("update_3d_slice_for_tab: row render error (4D)", level="error", i=i, a=a)
                         traceback.print_exc()
-                        values = [str(v) for v in data[slice_idx, a, i, :]]
+                        values = [self._display_maybe_mapped(v) for v in data[slice_idx, a, i, :]]
                         tree.insert("", tk.END, text=f"Timestep {i}", values=values)
 
         # auto-size after rows are inserted
@@ -1213,11 +1460,32 @@ class SimpleDataExplorer:
         # Load feature mappings if not already loaded
         if not hasattr(self, 'feature_mappings'):
             try:
-                feature_mappings_path = os.path.join(self.data_dir, 'features', 'feature_mappings.json')
-                with open(feature_mappings_path, 'r') as f:
-                    self.feature_mappings = json.load(f)
+                # Get the session root directory first
+                session_root = self._get_session_root_dir()
+                
+                # Try session root first, then fall back to current data_dir
+                candidates = [
+                    os.path.join(session_root, '05_mappings', 'feature_mappings.json'),
+                    os.path.join(session_root, 'mappings', 'feature_mappings.json'),  # legacy session name
+                    os.path.join(self.data_dir, '05_mappings', 'feature_mappings.json'),
+                    os.path.join(self.data_dir, 'features', 'feature_mappings.json'),
+                ]
+                
+                feature_mappings_path = None
+                for candidate in candidates:
+                    if os.path.exists(candidate):
+                        feature_mappings_path = candidate
+                        break
+                
+                if feature_mappings_path:
+                    with open(feature_mappings_path, 'r') as f:
+                        self.feature_mappings = json.load(f)
+                    self._log(f"Loaded feature mappings from: {feature_mappings_path}")
+                else:
+                    self._log("No feature mappings file found", level="warning")
+                    self.feature_mappings = None
             except Exception as e:
-                print(f"Warning: Could not load feature mappings: {e}")
+                self._log(f"Warning: Could not load feature mappings: {e}", level="warning")
                 self.feature_mappings = None
         
         # Clear the table and set up columns for state features
@@ -1234,7 +1502,15 @@ class SimpleDataExplorer:
         # Display each feature as a row
         for i, feature_value in enumerate(features):
             try:
-                formatted_value = f"{feature_value:.6f}" if isinstance(feature_value, (int, float, np.number)) else str(feature_value)
+                if isinstance(feature_value, (int, float, np.number)):
+                    # Use mapping if enabled, otherwise format as float
+                    if self.show_mapped_values:
+                        self._log(f"Mapping feature {i}: {feature_value} (show_mapped_values={self.show_mapped_values})")
+                        formatted_value = self._map_feature_value(feature_value, i)
+                    else:
+                        formatted_value = f"{feature_value:.6f}"
+                else:
+                    formatted_value = str(feature_value)
             except:
                 formatted_value = str(feature_value)
             
@@ -1273,6 +1549,49 @@ class SimpleDataExplorer:
             self.current_action_slice += 1
             self.action_slice_var.set(str(self.current_action_slice))
             self._navigate_gamestate()
+    
+    def prev_action_slice_10(self):
+        """Move back 10 timesteps at once"""
+        self._log("prev_action_slice_10", current=self.current_action_slice, total=self.total_action_slices)
+        if self.total_action_slices <= 0:
+            return
+        new_slice = max(0, self.current_action_slice - 10)
+        if new_slice != self.current_action_slice:
+            self.current_action_slice = new_slice
+            self.action_slice_var.set(str(self.current_action_slice))
+            self._navigate_gamestate()
+    
+    def next_action_slice_10(self):
+        """Move forward 10 timesteps at once"""
+        self._log("next_action_slice_10", current=self.current_action_slice, total=self.total_action_slices)
+        if self.total_action_slices <= 0:
+            return
+        new_slice = min(self.total_action_slices - 1, self.current_action_slice + 10)
+        if new_slice != self.current_action_slice:
+            self.current_action_slice = new_slice
+            self.action_slice_var.set(str(self.current_action_slice))
+            self._navigate_gamestate()
+    
+    def first_action_slice(self):
+        """Jump to the very first timestep"""
+        self._log("first_action_slice", current=self.current_action_slice, total=self.total_action_slices)
+        if self.total_action_slices <= 0:
+            return
+        if self.current_action_slice != 0:
+            self.current_action_slice = 0
+            self.action_slice_var.set("0")
+            self._navigate_gamestate()
+    
+    def last_action_slice(self):
+        """Jump to the very last timestep"""
+        self._log("last_action_slice", current=self.current_action_slice, total=self.total_action_slices)
+        if self.total_action_slices <= 0:
+            return
+        last_idx = self.total_action_slices - 1
+        if self.current_action_slice != last_idx:
+            self.current_action_slice = last_idx
+            self.action_slice_var.set(str(last_idx))
+            self._navigate_gamestate()
 
     def on_action_slice_entry_change(self, *args):
         self._log("on_action_slice_entry_change", value=self.action_slice_var.get(), total=self.total_action_slices)
@@ -1285,14 +1604,77 @@ class SimpleDataExplorer:
                 self._navigate_gamestate()
         except ValueError:
             pass
+    
+    def find_next_gamestate_with_actions(self):
+        """Find the next gamestate that has actual action data"""
+        if not hasattr(self, 'action_data') or not self.action_data:
+            self._safe_status("No action data loaded")
+            return
+        
+        current_idx = self.current_gamestate
+        total_gamestates = len(self.action_data)
+        
+        # Start searching from the next gamestate
+        for i in range(current_idx + 1, total_gamestates):
+            gamestate = self.action_data[i]
+            if self._has_actions(gamestate):
+                self.current_gamestate = i
+                self.gamestate_var.set(str(i))
+                self._navigate_gamestate()
+                self._safe_status(f"Found gamestate {i} with actions")
+                return
+        
+        # If not found after current, search from beginning
+        for i in range(0, current_idx):
+            gamestate = self.action_data[i]
+            if self._has_actions(gamestate):
+                self.current_gamestate = i
+                self.gamestate_var.set(str(i))
+                self._navigate_gamestate()
+                self._safe_status(f"Found gamestate {i} with actions (wrapped around)")
+                return
+        
+        self._safe_status("No gamestates with actions found")
+    
+    def _has_actions(self, gamestate):
+        """Check if a gamestate has any actions"""
+        if isinstance(gamestate, list):
+            # Action tensor format - check if list has data
+            return len(gamestate) >= 8
+        elif isinstance(gamestate, dict):
+            # Action data format - check if any action lists have data
+            action_keys = ["mouse_movements", "clicks", "key_presses", "key_releases", "scrolls"]
+            return any(len(gamestate.get(key, [])) > 0 for key in action_keys)
+        return False
+    
+    # keep the method for callers that still call it, but route to simple global mapping
+    def _map_hash_value(self, value, category=None, subcategory=None):
+        return self._display_maybe_mapped(value)
+    
+    def _map_feature_value(self, value, feature_index=None):
+        return self._display_maybe_mapped(value)
 
     # -------------------- Summary helpers --------------------
+    def _get_session_root_dir(self):
+        """Get the session root directory that contains the 05_mappings folder."""
+        # If we're in a recording session, return the session root
+        if self.session_name and self.sessions_root:
+            return str(self.sessions_root / self.session_name)
+        # Otherwise, fall back to the base data root
+        return self.base_data_root
+    
     def _load_full_metadata(self):
         """Load session-local metadata with absolute timestamps."""
         if self._full_metadata is not None:
             return self._full_metadata
-        # Session-local only
+        
+        # Get the session root directory first
+        session_root = self._get_session_root_dir()
+        
+        # Look in session root first, then fall back to current data_dir
         candidates = [
+            os.path.join(session_root, "05_mappings", "gamestates_metadata.json"),
+            os.path.join(session_root, "mappings", "gamestates_metadata.json"),  # legacy session name
             os.path.join(self.data_dir, "05_mappings", "gamestates_metadata.json"),
             os.path.join(self.data_dir, "mappings", "gamestates_metadata.json"),  # legacy session name
         ]
@@ -1300,12 +1682,71 @@ class SimpleDataExplorer:
             if os.path.exists(p):
                 try:
                     self._full_metadata = json.load(open(p, "r"))
-                    self._log("_load_full_metadata", count=len(self._full_metadata))
+                    self._log("_load_full_metadata", count=len(self._full_metadata), path=p)
                     return self._full_metadata
                 except Exception:
                     pass
         self._full_metadata = []
         return self._full_metadata
+    
+    def _load_id_mappings(self):
+        """Load ID mappings for hash value translation."""
+        if self._id_mappings is not None:
+            return self._id_mappings
+        
+        # Get the session root directory first
+        session_root = self._get_session_root_dir()
+        
+        # Look ONLY in session root directory
+        candidates = [
+            os.path.join(session_root, "05_mappings", "id_mappings.json"),
+            os.path.join(session_root, "mappings", "id_mappings.json"),  # legacy session name
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                try:
+                    self._id_mappings = json.load(open(p, "r"))
+                    # Build a flat reverse index once for fast global lookup
+                    rev = {}
+                    for category, subcats in self._id_mappings.items():
+                        if not isinstance(subcats, dict):
+                            continue
+                        for subcat, mapping in subcats.items():
+                            if not isinstance(mapping, dict):
+                                continue
+                            for k, label in mapping.items():
+                                # Prefer first-seen non-empty label
+                                if label and k not in rev:
+                                    rev[k] = label
+                    self._rev_idx = rev
+                    self._log("_load_id_mappings", count=len(self._id_mappings), path=p)
+                    return self._id_mappings
+                except Exception:
+                    pass
+        self._id_mappings = {}
+        self._rev_idx = {}
+        return self._id_mappings
+
+    def _display_maybe_mapped(self, value):
+        """
+        Single, dead-simple policy:
+        - if checkbox off -> str(value)
+        - else: try global reverse index with tolerant keys; if label found & non-empty:
+                show 'value (label)'; otherwise str(value)
+        """
+        if not self.show_mapped_values:
+            return str(value)
+        try:
+            self._load_id_mappings()  # ensures _rev_idx
+            for k in self._normalize_key_candidates(value):
+                lbl = (self._rev_idx or {}).get(k)
+                if lbl:
+                    clean = self._sanitize_label(lbl)
+                    if clean.strip():
+                        return clean
+            return str(value)
+        except Exception:
+            return str(value)
 
     def _load_slice_info(self, folder_path: Path) -> Optional[dict]:
         """Load slice info for exactly this folder. No fallbacks."""
@@ -1375,36 +1816,6 @@ class SimpleDataExplorer:
             except Exception as e:
                 self._log("_match_rows_in_raw failed", level="error", error=str(e))
             return None
-
-        def _denormalize_if_needed(norm_rows: np.ndarray) -> np.ndarray:
-            """
-            Undo the feature normalization we use: only time-like features were scaled /180.
-            Uses data/features/feature_mappings.json to find those indices.
-            """
-            try:
-                fmap = os.path.join(self.data_dir, "features", "feature_mappings.json")
-                if not os.path.exists(fmap):
-                    return norm_rows
-                with open(fmap, "r") as f:
-                    mappings = json.load(f)
-                time_idx = []
-                for m in mappings:
-                    idx = m.get("feature_index")
-                    name = m.get("feature_name", "")
-                    dtype = m.get("data_type", "")
-                    if idx is None: 
-                        continue
-                    if (dtype in ("time_ms","duration_ms") or
-                        name in ("time_since_interaction","phase_start_time","phase_duration","timestamp")):
-                        time_idx.append(idx)
-                if not time_idx:
-                    return norm_rows
-                out = np.array(norm_rows, copy=True)
-                out[:, time_idx] = out[:, time_idx] * 180.0
-                return out
-            except Exception as e:
-                self._log("_denormalize_if_needed failed", level="error", error=str(e))
-                return norm_rows
 
         if folder == "01_raw_data":
             n = _count_from_npy(os.path.join(self.data_dir, "01_raw_data", "state_features.npy"))
@@ -1529,8 +1940,6 @@ class SimpleDataExplorer:
                 if os.path.exists(fpath):
                     arr = np.load(fpath, mmap_mode="r")
                     sample = arr[: min(arr.shape[0], 3)]
-                    if folder == "03_normalized_data":
-                        sample = _denormalize_if_needed(sample)
                     s = _match_rows_in_raw(sample)
                     if s is not None:
                         info = {"start_idx_raw": s, "end_idx_raw": s + n - 1, "count": n}
@@ -2019,8 +2428,17 @@ class SimpleDataExplorer:
                 self.on_session_change()
         else:
             # make sure dir reflects current choice
+            old_data_dir = self.data_dir
             self.data_dir = str(self.sessions_root / cur)
             self.dir_var.set(self.data_dir)
+            
+            # Clear cached mappings if the data directory changed
+            if old_data_dir != self.data_dir:
+                self._full_metadata = None
+                self._id_mappings = None
+                if hasattr(self, 'feature_mappings'):
+                    delattr(self, 'feature_mappings')
+            
             self.load_files()
 
     def on_session_change(self, event=None):
@@ -2031,6 +2449,14 @@ class SimpleDataExplorer:
         self.session_name = sel
         self.data_dir = str(self.sessions_root / sel)
         self.dir_var.set(self.data_dir)
+        
+        # Clear cached mappings when switching sessions so they can be reloaded
+        self._full_metadata = None
+        self._id_mappings = None
+        self._rev_idx = None
+        if hasattr(self, 'feature_mappings'):
+            delattr(self, 'feature_mappings')
+        
         self.load_files()
 
 def main():

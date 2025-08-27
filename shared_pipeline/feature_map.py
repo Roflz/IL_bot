@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple, Any
 def load_feature_mappings(mappings_file: str = "data/features/feature_mappings.json") -> List[Dict]:
     """
     Load feature mappings from JSON file.
+    If the file doesn't exist, automatically create default mappings.
     
     Args:
         mappings_file: Path to feature_mappings.json
@@ -24,15 +25,28 @@ def load_feature_mappings(mappings_file: str = "data/features/feature_mappings.j
         - feature_name: str
         - data_type: str
         - feature_group: str
-        
-    Raises:
-        FileNotFoundError: If mappings file doesn't exist
-        ValueError: If mappings structure is invalid
     """
     mappings_path = Path(mappings_file)
-    if not mappings_path.exists():
-        raise FileNotFoundError(f"Feature mappings file not found: {mappings_path}")
     
+    # If mappings file doesn't exist, create default mappings
+    if not mappings_path.exists():
+        print(f"Feature mappings file not found: {mappings_path}")
+        print("Creating default feature mappings...")
+        
+        # Ensure the directory exists
+        mappings_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Create default mappings based on the standard 128-feature structure
+        default_mappings = create_default_feature_mappings()
+        
+        # Save the default mappings
+        with open(mappings_path, 'w') as f:
+            json.dump(default_mappings, f, indent=2)
+        
+        print(f"Default feature mappings created and saved to: {mappings_path}")
+        return default_mappings
+    
+    # Load existing mappings
     with open(mappings_path, 'r') as f:
         mappings = json.load(f)
     
@@ -40,6 +54,179 @@ def load_feature_mappings(mappings_file: str = "data/features/feature_mappings.j
     validate_feature_mappings(mappings)
     
     return mappings
+
+
+def ensure_feature_mappings_exist(data_root: str = "data") -> str:
+    """
+    Ensure feature mappings exist in the standard location (data/05_mappings/feature_mappings.json).
+    If they don't exist, create default mappings there.
+    
+    Args:
+        data_root: Root data directory
+        
+    Returns:
+        Path to the feature mappings file
+    """
+    # Check both possible locations
+    possible_paths = [
+        Path(data_root) / "05_mappings" / "feature_mappings.json",
+        Path(data_root) / "features" / "feature_mappings.json"
+    ]
+    
+    # First, try to find existing mappings
+    for path in possible_paths:
+        if path.exists():
+            print(f"Found existing feature mappings at: {path}")
+            return str(path)
+    
+    # If no mappings exist, create them in the standard location (05_mappings)
+    standard_path = Path(data_root) / "05_mappings" / "feature_mappings.json"
+    print(f"No feature mappings found, creating default mappings at: {standard_path}")
+    
+    # Ensure the directory exists
+    standard_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Create default mappings
+    default_mappings = create_default_feature_mappings()
+    
+    # Save the default mappings
+    with open(standard_path, 'w') as f:
+        json.dump(default_mappings, f, indent=2)
+    
+    print(f"Default feature mappings created and saved to: {standard_path}")
+    return str(standard_path)
+
+
+def create_default_id_mappings() -> Dict:
+    """
+    Create default ID mappings for the standard feature structure.
+    
+    Returns:
+        Dictionary containing default ID mappings
+    """
+    print("Creating default ID mappings...")
+    
+    default_mappings = {
+        "Player": {
+            "player_animation_ids": {
+                -1: "idle",
+                899: "crafting"
+            },
+            "player_movement_direction_hashes": {
+                0: "stationary"
+            }
+        },
+        "Interaction": {
+            "action_type_hashes": {
+                0: "none"
+            },
+            "item_name_hashes": {
+                0: "none"
+            },
+            "target_hashes": {
+                0: "none"
+            }
+        },
+        "Inventory": {
+            "item_ids": {
+                -1: "empty_slot"
+            },
+            "empty_slot_ids": {
+                -1: "empty_slot"
+            }
+        },
+        "Bank": {
+            "slot_ids": {
+                -1: "no_slot"
+            },
+            "boolean_states": {
+                0: "false",
+                1: "true"
+            }
+        },
+        "Game Objects": {
+            "object_ids": {
+                0: "no_object"
+            }
+        },
+        "NPCs": {
+            "npc_ids": {
+                0: "no_npc"
+            }
+        },
+        "Tabs": {
+            "tab_ids": {
+                0: "Combat",
+                1: "Skills", 
+                2: "Quests",
+                3: "Inventory",
+                4: "Equipment",
+                5: "Prayer",
+                6: "Magic",
+                7: "Friends",
+                8: "Friends Chat",
+                9: "Clan Chat",
+                10: "Settings",
+                11: "Emotes",
+                12: "Music",
+                13: "Logout"
+            }
+        },
+        "Phase Context": {
+            "phase_type_hashes": {
+                0: "unknown"
+            }
+        },
+        "Global": {
+            "hash_mappings": {
+                0: "none"
+            }
+        }
+    }
+    
+    print(f"Created default ID mappings with {len(default_mappings)} groups")
+    return default_mappings
+
+
+def ensure_id_mappings_exist(data_root: str = "data") -> str:
+    """
+    Ensure ID mappings exist in the standard location (data/05_mappings/id_mappings.json).
+    If they don't exist, create default mappings there.
+    
+    Args:
+        data_root: Root data directory
+        
+    Returns:
+        Path to the ID mappings file
+    """
+    # Check both possible locations
+    possible_paths = [
+        Path(data_root) / "05_mappings" / "id_mappings.json",
+        Path(data_root) / "features" / "id_mappings.json"
+    ]
+    
+    # First, try to find existing mappings
+    for path in possible_paths:
+        if path.exists():
+            print(f"Found existing ID mappings at: {path}")
+            return str(path)
+    
+    # If no mappings exist, create them in the standard location (05_mappings)
+    standard_path = Path(data_root) / "05_mappings" / "id_mappings.json"
+    print(f"No ID mappings found, creating default mappings at: {standard_path}")
+    
+    # Ensure the directory exists
+    standard_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Create default mappings
+    default_mappings = create_default_id_mappings()
+    
+    # Save the default mappings
+    with open(standard_path, 'w') as f:
+        json.dump(default_mappings, f, indent=2)
+    
+    print(f"Default ID mappings created and saved to: {standard_path}")
+    return str(standard_path)
 
 
 def validate_feature_mappings(mappings: List[Dict]) -> bool:
@@ -154,6 +341,157 @@ def create_feature_mapping(feature_index: int, feature_name: str,
         'data_type': data_type,
         'feature_group': feature_group
     }
+
+
+def create_default_feature_mappings() -> List[Dict]:
+    """
+    Create default feature mappings for the standard 128-feature structure.
+    
+    Returns:
+        List of default feature mapping dictionaries
+    """
+    print("Creating default 128-feature mappings...")
+    
+    mappings = []
+    feature_index = 0
+    
+    # Player features (5 features)
+    for i in range(5):
+        if i == 0:
+            mappings.append(create_feature_mapping(feature_index, "player_world_x", None, None, None, "world_coordinate", "Player"))
+        elif i == 1:
+            mappings.append(create_feature_mapping(feature_index, "player_world_y", None, None, None, "world_coordinate", "Player"))
+        elif i == 2:
+            mappings.append(create_feature_mapping(feature_index, "player_animation_id", None, None, None, "animation_id", "Player"))
+        elif i == 3:
+            mappings.append(create_feature_mapping(feature_index, "player_is_moving", None, None, None, "boolean", "Player"))
+        elif i == 4:
+            mappings.append(create_feature_mapping(feature_index, "player_movement_direction", None, None, None, "hashed_string", "Player"))
+        feature_index += 1
+    
+    # Interaction features (4 features)
+    for i in range(4):
+        if i == 0:
+            mappings.append(create_feature_mapping(feature_index, "action_type", None, None, None, "hashed_string", "Interaction"))
+        elif i == 1:
+            mappings.append(create_feature_mapping(feature_index, "item_name", None, None, None, "hashed_string", "Interaction"))
+        elif i == 2:
+            mappings.append(create_feature_mapping(feature_index, "target", None, None, None, "hashed_string", "Interaction"))
+        elif i == 3:
+            mappings.append(create_feature_mapping(feature_index, "time_since_interaction", None, None, None, "time_ms", "Interaction"))
+        feature_index += 1
+    
+    # Camera features (5 features)
+    for i in range(5):
+        if i == 0:
+            mappings.append(create_feature_mapping(feature_index, "camera_x", None, None, None, "camera_coordinate", "Camera"))
+        elif i == 1:
+            mappings.append(create_feature_mapping(feature_index, "camera_y", None, None, None, "camera_coordinate", "Camera"))
+        elif i == 2:
+            mappings.append(create_feature_mapping(feature_index, "camera_z", None, None, None, "camera_coordinate", "Camera"))
+        elif i == 3:
+            mappings.append(create_feature_mapping(feature_index, "camera_pitch", None, None, None, "angle_degrees", "Camera"))
+        elif i == 4:
+            mappings.append(create_feature_mapping(feature_index, "camera_yaw", None, None, None, "angle_degrees", "Camera"))
+        feature_index += 1
+    
+    # Inventory features (28 features)
+    for i in range(28):
+        mappings.append(create_feature_mapping(feature_index, f"inventory_slot_{i}", None, None, None, "item_id", "Inventory"))
+        feature_index += 1
+    
+    # Bank features (21 features)
+    mappings.append(create_feature_mapping(feature_index, "bank_open", None, None, None, "boolean", "Bank"))
+    feature_index += 1
+    
+    # Bank material features (20 features: 4 materials × 5 features each)
+    material_types = ['sapphires', 'gold_bars', 'rings', 'moulds']
+    for material in material_types:
+        for j in range(5):
+            if j == 0:
+                mappings.append(create_feature_mapping(feature_index, f"bank_{material}_exists", None, None, None, "boolean", "Bank"))
+            elif j == 1:
+                mappings.append(create_feature_mapping(feature_index, f"bank_{material}_quantity", None, None, None, "count", "Bank"))
+            elif j == 2:
+                mappings.append(create_feature_mapping(feature_index, f"bank_{material}_slot", None, None, None, "slot_id", "Bank"))
+            elif j == 3:
+                mappings.append(create_feature_mapping(feature_index, f"bank_{material}_x", None, None, None, "screen_coordinate", "Bank"))
+            elif j == 4:
+                mappings.append(create_feature_mapping(feature_index, f"bank_{material}_y", None, None, None, "screen_coordinate", "Bank"))
+            feature_index += 1
+    
+    # Phase context features (4 features)
+    for i in range(4):
+        if i == 0:
+            mappings.append(create_feature_mapping(feature_index, "phase_type", None, None, None, "hashed_string", "Phase Context"))
+        elif i == 1:
+            mappings.append(create_feature_mapping(feature_index, "phase_start_time", None, None, None, "time_ms", "Phase Context"))
+        elif i == 2:
+            mappings.append(create_feature_mapping(feature_index, "phase_duration", None, None, None, "time_ms", "Phase Context"))
+        elif i == 3:
+            mappings.append(create_feature_mapping(feature_index, "gamestates_in_phase", None, None, None, "count", "Phase Context"))
+        feature_index += 1
+    
+    # Game objects features (42 features)
+    # 10 closest objects × 3 features each + 1 furnace × 3 features + 3 bank booths × 3 features
+    for i in range(10):
+        for j in range(3):
+            if j == 0:
+                mappings.append(create_feature_mapping(feature_index, f"game_object_{i+1}_id", None, None, None, "object_id", "Game Objects"))
+            elif j == 1:
+                mappings.append(create_feature_mapping(feature_index, f"game_object_{i+1}_x", None, None, None, "world_coordinate", "Game Objects"))
+            elif j == 2:
+                mappings.append(create_feature_mapping(feature_index, f"game_object_{i+1}_y", None, None, None, "world_coordinate", "Game Objects"))
+            feature_index += 1
+    
+    # 1 closest furnace × 3 features
+    for j in range(3):
+        if j == 0:
+            mappings.append(create_feature_mapping(feature_index, "closest_furnace_id", None, None, None, "object_id", "Game Objects"))
+        elif j == 1:
+            mappings.append(create_feature_mapping(feature_index, "closest_furnace_x", None, None, None, "world_coordinate", "Game Objects"))
+        elif j == 2:
+            mappings.append(create_feature_mapping(feature_index, "closest_furnace_y", None, None, None, "world_coordinate", "Game Objects"))
+        feature_index += 1
+    
+    # 3 closest bank booths × 3 features
+    for i in range(3):
+        for j in range(3):
+            if j == 0:
+                mappings.append(create_feature_mapping(feature_index, f"bank_booth_{i+1}_id", None, None, None, "object_id", "Game Objects"))
+            elif j == 1:
+                mappings.append(create_feature_mapping(feature_index, f"bank_booth_{i+1}_x", None, None, None, "world_coordinate", "Game Objects"))
+            elif j == 2:
+                mappings.append(create_feature_mapping(feature_index, f"bank_booth_{i+1}_y", None, None, None, "world_coordinate", "Game Objects"))
+            feature_index += 1
+    
+    # NPC features (15 features: 5 NPCs × 3 features each)
+    for i in range(5):
+        for j in range(3):
+            if j == 0:
+                mappings.append(create_feature_mapping(feature_index, f"npc_{i+1}_id", None, None, None, "npc_id", "NPCs"))
+            elif j == 1:
+                mappings.append(create_feature_mapping(feature_index, f"npc_{i+1}_x", None, None, None, "world_coordinate", "NPCs"))
+            elif j == 2:
+                mappings.append(create_feature_mapping(feature_index, f"npc_{i+1}_y", None, None, None, "world_coordinate", "NPCs"))
+            feature_index += 1
+    
+    # Tabs features (1 feature)
+    mappings.append(create_feature_mapping(feature_index, "current_tab", None, None, None, "tab_id", "Tabs"))
+    feature_index += 1
+    
+    # Skills features (2 features)
+    mappings.append(create_feature_mapping(feature_index, "crafting_level", None, None, None, "skill_level", "Skills"))
+    feature_index += 1
+    mappings.append(create_feature_mapping(feature_index, "crafting_xp", None, None, None, "skill_xp", "Skills"))
+    feature_index += 1
+    
+    # Timestamp feature (1 feature)
+    mappings.append(create_feature_mapping(feature_index, "timestamp", None, None, None, "time_ms", "System"))
+    feature_index += 1
+    
+    print(f"Created {len(mappings)} default feature mappings")
+    return mappings
 
 
 def print_feature_summary(mappings: List[Dict]) -> None:

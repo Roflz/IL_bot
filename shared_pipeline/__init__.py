@@ -11,7 +11,10 @@ This package provides modular, pure functions for:
 All functions preserve exact behavior from legacy scripts.
 """
 
-from .feature_map import load_feature_mappings, validate_feature_mappings
+from .feature_map import (
+    load_feature_mappings, validate_feature_mappings, ensure_feature_mappings_exist,
+    create_default_feature_mappings, create_default_id_mappings, ensure_id_mappings_exist
+)
 from .features import extract_features_from_gamestate, FeatureExtractor
 from .actions import (
     extract_action_sequences, flatten_action_window, convert_actions_to_training_format,
@@ -37,6 +40,10 @@ __all__ = [
     # Feature mapping
     "load_feature_mappings",
     "validate_feature_mappings",
+    "ensure_feature_mappings_exist",
+    "create_default_feature_mappings",
+    "create_default_id_mappings",
+    "ensure_id_mappings_exist",
     
     # Feature extraction
     "extract_features_from_gamestate",

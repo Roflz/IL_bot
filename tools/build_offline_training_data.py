@@ -45,6 +45,15 @@ Examples:
   
   # Custom data directory
   python tools/build_offline_training_data.py --data-dir /path/to/data --use-existing-features
+  
+  # Custom trimming (trim 10 from start, 30 from end)
+  python tools/build_offline_training_data.py --trim-start 10 --trim-end 30
+  
+  # Minimal trimming (just safety buffer)
+  python tools/build_offline_training_data.py --trim-start 5 --trim-end 0
+  
+  # No trimming (keep all data)
+  python tools/build_offline_training_data.py --trim-start 0 --trim-end 0
         """
     )
     
@@ -77,6 +86,20 @@ Examples:
         '--validate-only',
         action='store_true',
         help='Only validate data files, don\'t process'
+    )
+    
+    # Trimming control arguments
+    parser.add_argument(
+        '--trim-start',
+        type=int,
+        default=5,
+        help='Number of gamestates to trim from the start of the session (default: 5, minimum safety buffer)'
+    )
+    parser.add_argument(
+        '--trim-end',
+        type=int,
+        default=20,
+        help='Number of gamestates to trim from the end of the session (default: 20, session boundaries)'
     )
     
     args = parser.parse_args()
@@ -139,7 +162,8 @@ Examples:
     try:
         print("\n🔍 Extracting features from session gamestates (fresh)…")
         process_fresh(session_root, gamestates_dir, actions_csv,
-                      raw_dir, trimmed_dir, normalized_dir, mappings_dir, final_dir)
+                      raw_dir, trimmed_dir, normalized_dir, mappings_dir, final_dir,
+                      args.trim_start, args.trim_end)
         
         print("\n✅ Training data build completed successfully!")
         return 0
@@ -150,7 +174,8 @@ Examples:
 
 
 def process_fresh(session_root, gamestates_dir, actions_csv,
-                  raw_dir, trimmed_dir, normalized_dir, mappings_dir, final_dir):
+                  raw_dir, trimmed_dir, normalized_dir, mappings_dir, final_dir,
+                  trim_start=0, trim_end=0):
     """Fresh, session-scoped build. No fallbacks; no external metadata."""
     # Load session gamestates (sorted) for use throughout this function
     gamestates = load_gamestates_sorted(str(gamestates_dir))
@@ -200,9 +225,9 @@ def process_fresh(session_root, gamestates_dir, actions_csv,
     (raw_dir / "raw_action_data.json").write_text(_json.dumps(raw_action_data, indent=2))
 
     # ---- 4) Trimming (features + action_data) --------------------------------------
-    print("Applying data trimming…")
+    print(f"Applying data trimming (start: {trim_start}, end: {trim_end})…")
     trimmed_features, trimmed_raw_action_data, start_idx, end_idx = trim_sequences(
-        features, raw_action_data
+        features, raw_action_data, trim_start, trim_end
     )
     # DO NOT mutate raw metadata. Keep a raw copy and make a trimmed view when needed.
     gamestates_metadata_raw = gamestates_metadata
@@ -235,6 +260,12 @@ def process_fresh(session_root, gamestates_dir, actions_csv,
     # Normalize action data
     print("Normalizing action data...")
     normalized_action_data = normalize_action_data(trimmed_raw_action_data, normalized_features)
+
+    # Create normalized sequences from normalized action data
+    print("Creating normalized action sequences...")
+    _, normalized_action_input_sequences, normalized_target_sequences = create_temporal_sequences(
+        normalized_features, normalized_action_data
+    )
 
     # (optional but helpful) persist the trimmed raw actions for inspection
     try:
@@ -272,7 +303,9 @@ def process_fresh(session_root, gamestates_dir, actions_csv,
                                  normalized_action_data, feature_mappings,
                                  id_mappings,
                                  gamestates_metadata_raw,
-                                 screenshot_paths
+                                 screenshot_paths,
+                                 normalized_target_sequences,
+                                 normalized_action_input_sequences
                                  )
     
     # -------------- RAW SLICE INFO --------------

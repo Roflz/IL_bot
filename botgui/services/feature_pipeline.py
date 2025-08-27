@@ -40,6 +40,7 @@ class FeaturePipeline:
         # Gamestate storage for final 10 timesteps
         self._gamestate_windows: deque[Dict[str, Any]] = deque(maxlen=20)
         self._feature_windows: deque[np.ndarray] = deque(maxlen=20)
+        self.gamestate_timestamps: deque[float] = deque(maxlen=10)  # Track timestamps for action alignment
         
         # Load feature mappings
         try:
@@ -250,6 +251,10 @@ class FeaturePipeline:
             # Store gamestate and features for final 10 timesteps
             self._gamestate_windows.append(gamestate)
             self._feature_windows.append(window[-1].copy())  # Store a copy of the newest feature vector
+
+            # Track timestamp for action alignment
+            ts = gamestate.get("timestamp", 0)
+            self.gamestate_timestamps.append(ts)
             print("🔍 DEBUG [feature_pipeline.py:270] Stored gamestate and features in buffers")
             
             # Compute change mask
@@ -369,6 +374,8 @@ class FeaturePipeline:
         return None
 
     def build_action_frame(self, actions: List[Dict[str, Any]]) -> List[float]:
+        print(f"\n🔍 DEBUG: build_action_frame called with {len(actions)} actions")
+        
         # Use shared pipeline normalization workflow:
         # 1) Build raw_action_data structure for a single gamestate window
         # 2) Normalize via normalize_action_data
@@ -414,25 +421,52 @@ class FeaturePipeline:
                 for a in actions if a.get('event_type') == 'scroll'
             ]
         }]
+        
+        print(f"🔍 DEBUG: Built raw_action_data: {raw_action_data}")
 
         # Normalize action data using shared pipeline (non-None gate)
         normalized_raw = normalize_action_data(raw_action_data, normalized_features=np.zeros((1,1)))
+        print(f"🔍 DEBUG: normalize_action_data returned: {normalized_raw}")
 
         # Convert to training tensors using shared pipeline
         tensors = convert_raw_actions_to_tensors(normalized_raw, self._encoder)
+        print(f"🔍 DEBUG: convert_raw_actions_to_tensors returned {len(tensors)} tensors")
+        if tensors:
+            print(f"🔍 DEBUG: First tensor: {tensors[0][:10]}... (length: {len(tensors[0])})")
 
         frame = tensors[0] if tensors else [0]
+        print(f"🔍 DEBUG: Returning frame: {frame[:10]}... (length: {len(frame)})")
         return frame
 
     def record_action_window_from_actions(self, actions: List[Dict[str, Any]]) -> None:
+        print(f"\n🔍 DEBUG: record_action_window_from_actions called with {len(actions)} actions")
+        for i, action in enumerate(actions[:3]):
+            print(f"🔍 DEBUG: Action {i}: {action}")
+        
         frame = self.build_action_frame(actions)
+        print(f"🔍 DEBUG: build_action_frame returned frame: {frame[:10]}... (length: {len(frame)})")
+        
         self._action_windows.append(frame)
+        print(f"🔍 DEBUG: Appended frame to _action_windows, now has {len(self._action_windows)} items")
 
     def get_last_action_windows(self, count: int = 10) -> List[List[float]]:
+        print(f"\n🔍 DEBUG: FEATURE_PIPELINE get_last_action_windows({count}) called")
+        print(f"🔍 DEBUG: self._action_windows has {len(self._action_windows)} items")
+        
         if count <= 0:
+            print("🔍 DEBUG: count <= 0, returning empty list")
             return []
+        
         items = list(self._action_windows)[-count:]
-        return list(reversed(items))
+        print(f"🔍 DEBUG: Got {len(items)} items from _action_windows")
+        
+        # Show the actual data in the first few items
+        for i, item in enumerate(items[:3]):
+            print(f"🔍 DEBUG: Item {i}: {item[:10]}... (length: {len(item)})")
+        
+        result = list(reversed(items))
+        print(f"🔍 DEBUG: Returning {len(result)} reversed items")
+        return result
     
     def _pad_action_sequences_to_fixed_length(self, action_tensors: List[List[float]], max_actions: int = 100) -> np.ndarray:
         """
