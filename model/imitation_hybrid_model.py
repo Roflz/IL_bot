@@ -435,8 +435,8 @@ class ImitationHybridModel(nn.Module):
             nn.Dropout(0.1)
         )
         
-        # Action type encoder (categorical: 0,1,2,3) - 4 classes: move, click, key, scroll
-        self.action_type_embedding = nn.Embedding(4, hidden_dim // 16)  # 4 categories -> 16 dims
+        # Action type encoder (categorical: 0,1,2,3,4) - 5 classes: move, click, key_press, key_release, scroll
+        self.action_type_embedding = nn.Embedding(5, hidden_dim // 16)  # 5 categories -> 16 dims
         self.action_type_encoder = nn.Sequential(
             nn.LayerNorm(hidden_dim // 16),
             nn.ReLU(),

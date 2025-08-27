@@ -134,7 +134,7 @@ def extract_features_from_gamestates(gamestates: List[Dict],
         mappings_file: Path to save feature mappings (if save_mappings is True)
         
     Returns:
-        Tuple of (features_array, feature_mappings)
+        Tuple of (features_array, feature_mappings, id_mappings)
     """
     print("Extracting features from gamestates...")
     
@@ -150,14 +150,19 @@ def extract_features_from_gamestates(gamestates: List[Dict],
     # Extract features from each gamestate
     all_features = []
     all_feature_mappings = []
+    all_timestamps = []
     
     for gamestate in tqdm(gamestates, desc="Extracting features"):
         try:
             features = extractor.extract_features_from_gamestate(gamestate)
             mappings = extractor.get_feature_mappings()
             
+            # Extract timestamp from gamestate
+            timestamp = gamestate.get('timestamp', 0)
+            
             all_features.append(features)
             all_feature_mappings.append(mappings)
+            all_timestamps.append(timestamp)
             
         except Exception as e:
             print(f"Error extracting features from gamestate: {e}")
@@ -171,6 +176,7 @@ def extract_features_from_gamestates(gamestates: List[Dict],
     
     print(f"Successfully extracted features: {features_array.shape}")
     print(f"Feature mappings: {len(all_feature_mappings)} gamestates")
+    print(f"Timestamps: {len(all_timestamps)} gamestates")
     
     # Automatically save feature mappings if requested
     if save_mappings and all_feature_mappings:
@@ -315,7 +321,7 @@ def load_action_targets(action_targets_file: str = "data/training_data/action_ta
     return action_targets
 
 
-def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir: str, sequences_dir: str, 
+def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir: str, 
                                 mappings_dir: str, final_dir: str, features: np.ndarray, 
                                 trimmed_features: np.ndarray, normalized_features: np.ndarray,
                                 input_sequences: np.ndarray, normalized_input_sequences: np.ndarray,
@@ -332,7 +338,7 @@ def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir:
         raw_dir: Directory for raw extracted data
         trimmed_dir: Directory for trimmed data
         normalized_dir: Directory for normalized data
-        sequences_dir: Directory for sequence data
+        sequences_dir: Directory for sequence data (SKIPPED - only final training data needed)
         mappings_dir: Directory for mappings and metadata
         final_dir: Directory for final clean training data
         features: Raw extracted features
@@ -350,8 +356,8 @@ def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir:
     """
     print("\n📁 Saving organized training data...")
     
-    # Create directories
-    for directory in [raw_dir, trimmed_dir, normalized_dir, sequences_dir, mappings_dir, final_dir]:
+    # Create directories (skip sequences_dir - only final training data needed)
+    for directory in [raw_dir, trimmed_dir, normalized_dir, mappings_dir, final_dir]:
         Path(directory).mkdir(parents=True, exist_ok=True)
     
     # 1. RAW DATA (data/raw_data/)
@@ -514,27 +520,8 @@ def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir:
     except Exception as e:
         print(f"    ⚠ Could not generate normalized_action_training_format.json: {e}")
     
-    # 4. SEQUENCES (data/sequences/)
-    print("  📂 Sequences directory...")
-    np.save(Path(sequences_dir) / "input_sequences.npy", input_sequences)
-    print(f"    ✓ input_sequences.npy: {input_sequences.shape}")
-
-    # Save normalized input sequences (same as input_sequences since they were created from normalized features)
-    if normalized_input_sequences is not None:
-        np.save(Path(sequences_dir) / "normalized_input_sequences.npy", normalized_input_sequences)
-        print(f"    ✓ normalized_input_sequences.npy: {normalized_input_sequences.shape}")
-    else:
-        # Use input_sequences as they are already normalized
-        np.save(Path(sequences_dir) / "normalized_input_sequences.npy", input_sequences)
-        print(f"    ✓ normalized_input_sequences.npy: {input_sequences.shape} (from input_sequences)")
-
-    with open(Path(sequences_dir) / "target_sequences.json", 'w') as f:
-        json.dump(target_sequences, f, indent=2)
-    print(f"    ✓ target_sequences.json: {len(target_sequences)} sequences")
-
-    with open(Path(sequences_dir) / "action_input_sequences.json", 'w') as f:
-        json.dump(action_input_sequences, f, indent=2)
-    print(f"    ✓ action_input_sequences.json: {len(action_input_sequences)} sequences")
+    # 4. SEQUENCES (data/sequences/) - SKIPPED - only final training data needed
+    print("  📂 Sequences directory... SKIPPED (only final training data needed)")
     
     # 5. MAPPINGS (data/mappings/)
     print("  📂 Mappings directory...")
@@ -560,24 +547,20 @@ def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir:
 
     # Save normalized action sequences and targets for final training
     if normalized_action_input_sequences is not None:
-        with open(Path(final_dir) / "action_input_sequences.json", 'w') as f:
-            json.dump(normalized_action_input_sequences, f, indent=2)
-        print(f"    ✓ action_input_sequences.json (normalized): {len(normalized_action_input_sequences)} sequences")
+        np.save(Path(final_dir) / "action_input_sequences.npy", normalized_action_input_sequences)
+        print(f"    ✓ action_input_sequences.npy (normalized): {normalized_action_input_sequences.shape}")
     else:
         # Fallback to raw if normalized not available
-        with open(Path(final_dir) / "action_input_sequences.json", 'w') as f:
-            json.dump(action_input_sequences, f, indent=2)
-        print(f"    ✓ action_input_sequences.json (raw): {len(action_input_sequences)} sequences")
+        np.save(Path(final_dir) / "action_input_sequences.npy", action_input_sequences)
+        print(f"    ✓ action_input_sequences.npy (raw): {action_input_sequences.shape}")
 
     if normalized_target_sequences is not None:
-        with open(Path(final_dir) / "action_targets.json", 'w') as f:
-            json.dump(normalized_target_sequences, f, indent=2)
-        print(f"    ✓ action_targets.json (normalized): {len(normalized_target_sequences)} targets")
+        np.save(Path(final_dir) / "action_targets.npy", normalized_target_sequences)
+        print(f"    ✓ action_targets.npy (normalized): {normalized_target_sequences.shape}")
     else:
         # Fallback to raw if normalized not available
-        with open(Path(final_dir) / "action_targets.json", 'w') as f:
-            json.dump(target_sequences, f, indent=2)
-        print(f"    ✓ action_targets.json (raw): {len(target_sequences)} targets")
+        np.save(Path(final_dir) / "action_targets.npy", target_sequences)
+        print(f"    ✓ action_targets.npy (raw): {target_sequences.shape}")
     
     # Create clean metadata
     final_metadata = {
@@ -595,14 +578,14 @@ def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir:
                 'description': '10 timesteps of gamestate features (t-9 to t-0)'
             },
             'action_input_sequences': {
-                'file': 'action_input_sequences.json',
+                'file': 'action_input_sequences.npy',
                 'count': len(action_input_sequences),
                 'description': '10 timesteps of action history (t-9 to t-0)'
             }
         },
         'targets': {
             'action_targets': {
-                'file': 'action_targets.json',
+                'file': 'action_targets.npy',
                 'count': len(target_sequences),
                 'description': 'Action sequences to predict for timestep t+1'
             }
@@ -643,7 +626,7 @@ def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir:
     print(f"  Raw data: {raw_dir}")
     print(f"  Trimmed data: {trimmed_dir}")
     print(f"  Normalized data: {normalized_dir}")
-    print(f"  Sequences: {sequences_dir}")
+    print(f"  Sequences: SKIPPED (only final training data needed)")
     print(f"  Mappings: {mappings_dir}")
     print(f"  Final training data: {final_dir}")
     print("=" * 60)
@@ -740,17 +723,17 @@ def save_final_training_data(final_dir: str, normalized_input_sequences: np.ndar
     
     print(f"Saving final training data to {final_path}")
     
-    # Save final training data (clean, no debug files)
-    np.save(final_path / "gamestate_sequences.npy", normalized_input_sequences)
-    print(f"✓ Saved gamestate sequences: {normalized_input_sequences.shape}")
+    # Save final training data with correct names and formats
+    np.save(final_path / "gamestate_input_sequences.npy", normalized_input_sequences)
+    print(f"✓ Saved gamestate_input_sequences.npy: {normalized_input_sequences.shape}")
     
-    with open(final_path / "action_input_sequences.json", 'w') as f:
-        json.dump(action_input_sequences, f, indent=2)
-    print(f"✓ Saved action input sequences: {len(action_input_sequences)} sequences")
+    # Save action_input_sequences as numpy array
+    np.save(final_path / "action_input_sequences.npy", action_input_sequences)
+    print(f"✓ Saved action_input_sequences.npy: {action_input_sequences.shape}")
     
-    with open(final_path / "action_targets.json", 'w') as f:
-        json.dump(target_sequences, f, indent=2)
-    print(f"✓ Saved action targets: {len(target_sequences)} targets")
+    # Save target_sequences as numpy array
+    np.save(final_path / "action_target_tensors.npy", target_sequences)
+    print(f"✓ Saved action_target_tensors.npy: {target_sequences.shape}")
     
     # Create clean metadata
     final_metadata = {
@@ -763,20 +746,20 @@ def save_final_training_data(final_dir: str, normalized_input_sequences: np.ndar
         },
         'input_sequences': {
             'gamestate_sequences': {
-                'file': 'gamestate_sequences.npy',
+                'file': 'gamestate_input_sequences.npy',
                 'shape': normalized_input_sequences.shape,
                 'description': '10 timesteps of normalized gamestate features (t-9 to t-0)'
             },
             'action_input_sequences': {
-                'file': 'action_input_sequences.json',
-                'count': len(normalized_action_input_sequences) if normalized_action_input_sequences else len(action_input_sequences),
+                'file': 'action_input_sequences.npy',
+                'count': len(action_input_sequences),
                 'description': '10 timesteps of normalized action history (t-9 to t-0)'
             }
         },
         'targets': {
             'action_targets': {
-                'file': 'action_targets.json',
-                'count': len(normalized_target_sequences) if normalized_target_sequences else len(target_sequences),
+                'file': 'action_target_tensors.npy',
+                'count': len(target_sequences),
                 'description': 'Normalized action sequences to predict for timestep t+1'
             }
         },

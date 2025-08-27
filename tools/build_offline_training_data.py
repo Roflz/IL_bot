@@ -177,9 +177,6 @@ def process_with_existing_features(args):
     feature_mappings = load_feature_mappings(f"{args.data_dir}/features/feature_mappings.json")
     gamestates_metadata = load_gamestates_metadata(f"{args.data_dir}/features/gamestates_metadata.json")
     
-    # Load actions
-    actions_df = load_actions(f"{args.data_dir}/actions.csv")
-    
     # Load or extract raw action data
     raw_action_file = f"{args.data_dir}/features/raw_action_data.json"
     if Path(raw_action_file).exists():
@@ -190,18 +187,10 @@ def process_with_existing_features(args):
         gamestates = load_gamestates(f"{args.data_dir}/gamestates")
         raw_action_data = extract_raw_action_data(gamestates, f"{args.data_dir}/actions.csv")
     
-    # Derive encodings from existing training targets
-    print("Deriving action encodings from existing training data...")
-    action_encoder = derive_encodings_from_data(f"{args.data_dir}/training_data/action_targets.json")
-    
-    # Convert raw actions to training format
-    print("Converting raw actions to training format...")
-    action_targets = convert_raw_actions_to_tensors(raw_action_data, action_encoder)
-    
     # Apply data trimming
     print("Applying data trimming...")
-    trimmed_features, trimmed_action_targets, start_idx, end_idx = trim_sequences(
-        features, action_targets
+    trimmed_features, trimmed_action_data, start_idx, end_idx = trim_sequences(
+        features, raw_action_data
     )
     
     # Update metadata to match trimmed data
@@ -214,14 +203,14 @@ def process_with_existing_features(args):
     
     # Create temporal sequences from raw (trimmed) features
     print("Creating temporal sequences from raw features...")
-    raw_input_sequences, target_sequences, action_input_sequences = create_temporal_sequences(
-        trimmed_features, trimmed_action_targets
+    raw_input_sequences, action_input_sequences, target_sequences = create_temporal_sequences(
+        trimmed_features, raw_action_data
     )
     
     # Create temporal sequences from normalized features
     print("Creating temporal sequences from normalized features...")
     normalized_input_sequences, _, _ = create_temporal_sequences(
-        normalized_features, trimmed_action_targets
+        normalized_features, raw_action_data
     )
     
     # Use raw sequences as the default input sequences
@@ -255,7 +244,6 @@ def process_with_existing_features(args):
         args.raw_dir,
         args.trimmed_dir,
         args.normalized_dir,
-        args.sequences_dir,
         args.mappings_dir,
         args.final_dir,
         features,
@@ -266,6 +254,7 @@ def process_with_existing_features(args):
         target_sequences,
         action_input_sequences,
         raw_action_data,
+        raw_action_data,  # trimmed_raw_action_data (using raw for now)
         normalized_action_data,
         feature_mappings,
         id_mappings,
@@ -341,18 +330,22 @@ def process_with_feature_extraction(args):
 
     # Normalize features (features are already relative timestamps, just need scaling)
     print("Normalizing features...")
-    normalized_features = normalize_features(trimmed_features, f"{args.data_dir}/05_mappings/feature_mappings.json")
+    # Use the global feature mappings that were just created, not session-specific ones
+    global_mappings_file = "data/features/feature_mappings.json"
+    if not Path(global_mappings_file).exists():
+        raise FileNotFoundError(f"Feature mappings file not found: {global_mappings_file}. Feature extraction should have created this file.")
+    normalized_features = normalize_features(trimmed_features, global_mappings_file)
 
     # Create temporal sequences from raw (trimmed) features
     print("Creating temporal sequences from raw features...")
-    raw_input_sequences, target_sequences, action_input_sequences = create_temporal_sequences(
-        trimmed_features, trimmed_action_targets
+    raw_input_sequences, action_input_sequences, target_sequences = create_temporal_sequences(
+        trimmed_features, trimmed_raw_action_data
     )
     
     # Create temporal sequences from normalized features
     print("Creating temporal sequences from normalized features...")
     normalized_input_sequences, _, _ = create_temporal_sequences(
-        normalized_features, trimmed_action_targets
+        normalized_features, trimmed_raw_action_data
     )
     
     # Use raw sequences as the default input sequences
@@ -366,17 +359,35 @@ def process_with_feature_extraction(args):
     
     # Create normalized action sequences and targets
     print("Creating normalized action sequences and targets...")
-    normalized_action_targets = convert_raw_actions_to_tensors(normalized_action_data, action_encoder)
-    _, normalized_target_sequences, normalized_action_input_sequences = create_temporal_sequences(
-        normalized_features, normalized_action_targets
+    _, normalized_action_input_sequences, normalized_target_sequences = create_temporal_sequences(
+        normalized_features, normalized_action_data
     )
     
     print(f"Normalized action targets created: {len(normalized_target_sequences)} sequences")
     print(f"Normalized action input sequences created: {len(normalized_action_input_sequences)} sequences")
     
+    # Sanity checks before saving
+    assert raw_input_sequences.ndim == 3 and raw_input_sequences.shape[1] == 10, "inputs must be (B, 10, 128)"
+    assert action_input_sequences.ndim == 4 and action_input_sequences.shape[1] == 10 and action_input_sequences.shape[2] == 100 and action_input_sequences.shape[3] == 8, "action_input_sequences must be (B, 10, 100, 8)"
+    assert target_sequences.ndim == 2+1 and target_sequences.shape[1] == 100 and target_sequences.shape[2] == 8, "action_targets must be (B, 100, 8)"
+    
     # Create screenshot paths
     print("Creating screenshot paths...")
     screenshot_paths = create_screenshot_paths(gamestates_metadata, f"{args.data_dir}/runelite_screenshots")
+    
+    # Ensure the expected directory structure exists
+    print("Creating expected directory structure...")
+    Path(args.mappings_dir).mkdir(parents=True, exist_ok=True)
+    
+    # Copy the global feature mappings to the expected location
+    global_mappings_file = "data/features/feature_mappings.json"
+    expected_mappings_file = f"{args.mappings_dir}/feature_mappings.json"
+    if Path(global_mappings_file).exists():
+        import shutil
+        shutil.copy2(global_mappings_file, expected_mappings_file)
+        print(f"Copied feature mappings to: {expected_mappings_file}")
+    else:
+        print(f"Warning: Global feature mappings not found at {global_mappings_file}")
     
     # Save training data
     print("Saving training data...")
@@ -384,7 +395,6 @@ def process_with_feature_extraction(args):
         args.raw_dir,
         args.trimmed_dir,
         args.normalized_dir,
-        args.sequences_dir,
         args.mappings_dir,
         args.final_dir,
         features,
@@ -400,9 +410,7 @@ def process_with_feature_extraction(args):
         feature_mappings,
         id_mappings,
         gamestates_metadata,
-        screenshot_paths,
-        normalized_target_sequences,  # normalized targets from normalized_action_targets
-        normalized_action_input_sequences  # normalized action input sequences
+        screenshot_paths
     )
 
 

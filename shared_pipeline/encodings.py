@@ -18,7 +18,7 @@ class ActionEncoder:
     Encoder for action data that derives mappings from existing training targets.
     
     This class preserves the exact encoding scheme from the legacy code:
-    - Action types: 0=move, 1=click, 2=key, 3=scroll
+    - Action types: 0=move, 1=click, 2=key_press, 3=key_release, 4=scroll
     - Button types: 0=none, 1=left, 2=right, 3=middle
     - Key encodings: Derived from KeyboardKeyMapper
     - Scroll deltas: Preserved as original pixel values
@@ -30,8 +30,8 @@ class ActionEncoder:
             'move': 0,
             'click': 1, 
             'key_press': 2,
-            'key_release': 2,  # Both press and release use type 2
-            'scroll': 3
+            'key_release': 3,  # Separate type for key_release
+            'scroll': 4
         }
         
         # Button type encodings (fixed from legacy code)
@@ -86,7 +86,7 @@ class ActionEncoder:
                     self.seen_key_values.add(self.key_encodings[key])
             
             for key_action in gamestate_actions.get('key_releases', []):
-                self.seen_action_types.add(self.action_types['key_press'])  # Same encoding
+                self.seen_action_types.add(self.action_types['key_release'])  # Separate encoding
                 key = key_action.get('key', '')
                 if key:
                     if key not in self.key_encodings:

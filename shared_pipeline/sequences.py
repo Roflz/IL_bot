@@ -10,26 +10,24 @@ from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 
 
-def create_temporal_sequences(features: np.ndarray, action_targets: List[List[float]], 
-                            sequence_length: int = 10) -> Tuple[np.ndarray, List[List[float]], List[List[List[float]]]]:
+def create_temporal_sequences(features: np.ndarray, normalized_action_data: List[Dict], 
+                            sequence_length: int = 10, max_actions_per_timestep: int = 100) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Create temporal sequences for training with both gamestate and action inputs.
+    Create temporal sequences using simple sliding window approach.
     
     Args:
         features: Array of shape (n_gamestates, n_features) where n_features=128
-        action_targets: List of action target sequences in training format
+        normalized_action_data: List of action data dictionaries from normalized data
         sequence_length: Number of timesteps for context (default: 10)
+        max_actions_per_timestep: Maximum actions per timestep for padding (default: 100)
         
     Returns:
         Tuple of:
         - input_sequences: Array of shape (n_sequences, sequence_length, n_features)
-        - target_sequences: List of action target sequences for next timestep
-        - action_input_sequences: List of action history sequences for context
-        
-    Raises:
-        ValueError: If not enough samples for sequence length
+        - action_input_sequences: Array of shape (n_sequences, sequence_length, max_actions_per_timestep, 8)
+        - target_sequences: Array of shape (n_sequences, max_actions_per_timestep, 8) - targets for next timestep
     """
-    print("Creating temporal sequences...")
+    print("Creating temporal sequences using simple sliding window...")
     
     n_samples = len(features)
     n_sequences = n_samples - sequence_length - 1  # -1 because we need next gamestate for target
@@ -41,36 +39,150 @@ def create_temporal_sequences(features: np.ndarray, action_targets: List[List[fl
     # Input sequences: [batch, sequence_length, features]
     input_sequences = np.zeros((n_sequences, sequence_length, features.shape[1]), dtype=np.float64)
     
-    # Action input sequences: [batch, sequence_length, variable_length_actions]
-    action_input_sequences = []
+    # Action input sequences: [batch, sequence_length, max_actions_per_timestep, 8]
+    action_input_sequences = np.zeros((n_sequences, sequence_length, max_actions_per_timestep, 8), dtype=np.float32)
     
-    # Target action sequences: variable length (no fixed size)
-    target_sequences = []
+    # Target sequences: [batch, max_actions_per_timestep, 8] - actions for next timestep
+    target_sequences = np.zeros((n_sequences, max_actions_per_timestep, 8), dtype=np.float32)
     
-    # Create sequences
+    # Create sequences using simple sliding window
     for i in range(n_sequences):
-        # Input: gamestates from i to i+sequence_length-1
+        # Input: gamestates from i to i+sequence_length-1 (0-9, 1-10, 2-11, etc.)
         input_sequences[i] = features[i:i+sequence_length]
         
         # Action inputs: action sequences from i to i+sequence_length-1
-        action_inputs = []
         for j in range(sequence_length):
             action_idx = i + j
-            if action_idx < len(action_targets):
-                action_inputs.append(action_targets[action_idx])
-            else:
-                action_inputs.append([])  # Empty action sequence if out of bounds
-        action_input_sequences.append(action_inputs)
+            if action_idx < len(normalized_action_data):
+                # Convert actions to numpy array and pad to max_actions_per_timestep
+                actions_array = _convert_actions_to_array(normalized_action_data[action_idx], max_actions_per_timestep)
+                action_input_sequences[i, j] = actions_array
         
-        # Target: action sequence for the NEXT gamestate after the sequence
-        target_sequences.append(action_targets[i+sequence_length])
+        # Target: action sequence for the NEXT gamestate after the sequence (10, 11, 12, etc.)
+        target_idx = i + sequence_length
+        if target_idx < len(normalized_action_data):
+            # Convert target actions to numpy array and pad to max_actions_per_timestep
+            target_actions_array = _convert_actions_to_array(normalized_action_data[target_idx], max_actions_per_timestep)
+            target_sequences[i] = target_actions_array
     
     print(f"Created {n_sequences} training sequences")
     print(f"Input shape: {input_sequences.shape}")
-    print(f"Action input sequences: {len(action_input_sequences)} (each with {sequence_length} timesteps)")
-    print(f"Target sequences: {len(target_sequences)} (variable lengths)")
+    print(f"Action input sequences shape: {action_input_sequences.shape}")
+    print(f"Target sequences shape: {target_sequences.shape}")
     
-    return input_sequences, target_sequences, action_input_sequences
+    return input_sequences, action_input_sequences, target_sequences
+
+
+def _convert_actions_to_array(action_data: Dict, max_actions: int = 100) -> np.ndarray:
+    """
+    Convert normalized action data to numpy array and pad to max_actions with zeros.
+    
+    Args:
+        action_data: Dictionary with 'mouse_movements', 'clicks', 'key_presses', 'key_releases', 'scrolls'
+        max_actions: Maximum number of actions to pad to (default: 100)
+        
+    Returns:
+        Numpy array of shape (max_actions, 8) with actions padded with zeros
+    """
+    # Initialize array with zeros
+    actions_array = np.zeros((max_actions, 8), dtype=np.float32)
+    
+    # Collect all actions from the gamestate
+    all_actions = []
+    
+    # Add mouse movements
+    for action in action_data.get('mouse_movements', []):
+        all_actions.append([
+            action.get('timestamp', 0.0),  # timestamp
+            0,                             # type (0 = mouse movement)
+            action.get('x', 0),            # x
+            action.get('y', 0),            # y
+            0,                             # button (0 = none)
+            0,                             # key (0 = none)
+            0,                             # scroll_dx (0 = none)
+            0                              # scroll_dy (0 = none)
+        ])
+    
+    # Add clicks
+    for action in action_data.get('clicks', []):
+        # Convert button to numeric code if it's a string
+        button_value = action.get('button', 0)
+        if isinstance(button_value, str):
+            # Simple mapping for button types
+            button_map = {'left': 1, 'right': 2, 'middle': 3, 'none': 0}
+            button_value = button_map.get(button_value.lower(), 0)
+        
+        all_actions.append([
+            action.get('timestamp', 0.0),  # timestamp
+            1,                             # type (1 = click)
+            action.get('x', 0),            # x
+            action.get('y', 0),            # y
+            button_value,                  # button (converted to numeric)
+            0,                             # key (0 = none)
+            0,                             # scroll_dx (0 = none)
+            0                              # scroll_dy (0 = none)
+        ])
+    
+    # Add key presses
+    for action in action_data.get('key_presses', []):
+        # Convert key to numeric code if it's a string
+        key_value = action.get('key', 0)
+        if isinstance(key_value, str):
+            # Simple mapping for common keys - you can expand this
+            key_map = {'w': 87, 'a': 65, 's': 83, 'd': 68, 'space': 32, 'enter': 13, 'escape': 27}
+            key_value = key_map.get(key_value.lower(), 0)
+        
+        all_actions.append([
+            action.get('timestamp', 0.0),  # timestamp
+            2,                             # type (2 = key_press)
+            0,                             # x (0 = none)
+            0,                             # y (0 = none)
+            0,                             # button (0 = none)
+            key_value,                     # key (converted to numeric)
+            0,                             # scroll_dx (0 = none)
+            0                              # scroll_dy (0 = none)
+        ])
+    
+    # Add key releases
+    for action in action_data.get('key_releases', []):
+        # Convert key to numeric code if it's a string
+        key_value = action.get('key', 0)
+        if isinstance(key_value, str):
+            # Simple mapping for common keys - you can expand this
+            key_map = {'w': 87, 'a': 65, 's': 83, 'd': 68, 'space': 32, 'enter': 13, 'escape': 27}
+            key_value = key_map.get(key_value.lower(), 0)
+        
+        all_actions.append([
+            action.get('timestamp', 0.0),  # timestamp
+            3,                             # type (3 = key_release)
+            0,                             # x (0 = none)
+            0,                             # y (0 = none)
+            0,                             # button (0 = none)
+            key_value,                     # key (converted to numeric)
+            0,                             # scroll_dx (0 = none)
+            0                              # scroll_dy (0 = none)
+        ])
+    
+    # Add scrolls
+    for action in action_data.get('scrolls', []):
+        all_actions.append([
+            action.get('timestamp', 0.0),  # timestamp
+            4,                             # type (4 = scroll)
+            0,                             # x (0 = none)
+            0,                             # y (0 = none)
+            0,                             # button (0 = none)
+            0,                             # key (0 = none)
+            action.get('dx', 0),           # scroll_dx
+            action.get('dy', 0)            # scroll_dy
+        ])
+    
+    # Fill the actions array (up to max_actions)
+    for i, action in enumerate(all_actions[:max_actions]):
+        actions_array[i] = action
+    
+    # Remaining slots are already zero-padded
+    
+    return actions_array
 
 
 def pad_sequence_window(sequence: List[Any], target_length: int, pad_value: Any = None) -> List[Any]:
@@ -236,19 +348,19 @@ def create_sequence_metadata(input_sequences: np.ndarray, target_sequences: List
     return metadata
 
 
-def trim_sequences(features: np.ndarray, action_targets: List[List[float]], 
-                  min_trim_start: int = 5, trim_end: int = 20) -> Tuple[np.ndarray, List[List[float]], int, int]:
+def trim_sequences(features: np.ndarray, action_data: List[Dict], 
+                  min_trim_start: int = 5, trim_end: int = 20) -> Tuple[np.ndarray, List[Dict], int, int]:
     """
     Smart data trimming to remove initialization artifacts and session boundaries.
     
     Args:
         features: Array of features
-        action_targets: List of action targets
+        action_data: List of action data dictionaries
         min_trim_start: Minimum timesteps to trim from start
         trim_end: Timesteps to trim from end
         
     Returns:
-        Tuple of (trimmed_features, trimmed_action_targets, actual_start_idx, trim_end)
+        Tuple of (trimmed_features, trimmed_action_data, actual_start_idx, trim_end)
     """
     print("Applying smart data trimming...")
     
@@ -280,7 +392,7 @@ def trim_sequences(features: np.ndarray, action_targets: List[List[float]],
     
     # Apply trimming
     trimmed_features = features[actual_start_idx:valid_end]
-    trimmed_action_targets = action_targets[actual_start_idx:valid_end]
+    trimmed_action_data = action_data[actual_start_idx:valid_end]
     
     print(f"Data trimmed:")
     print(f"  - Minimum trim: {min_trim_start} timesteps (safety buffer)")
@@ -294,7 +406,7 @@ def trim_sequences(features: np.ndarray, action_targets: List[List[float]],
     if trimmed_features.shape[0] < 11:  # Need at least 10 + 1 for target
         raise ValueError(f"Not enough data after trimming: {trimmed_features.shape[0]} < 11")
     
-    return trimmed_features, trimmed_action_targets, actual_start_idx, trim_end
+    return trimmed_features, trimmed_action_data, actual_start_idx, trim_end
 
 
 def create_screenshot_paths(gamestates: List[Dict], screenshots_dir: str = "data/runelite_screenshots") -> List[str]:

@@ -324,7 +324,7 @@ def convert_raw_actions_to_tensors(raw_action_data: List[Dict], encoder: ActionE
             key_value = encoder.encode_key(key)
             all_actions.append({
                 'timestamp': key_press.get('timestamp', 0),
-                'type': 2,  # 2 = key
+                'type': 2,  # 2 = key_press
                 'x': 0,     # No coordinates for keys
                 'y': 0,
                 'button': 0,  # No button for keys
@@ -339,7 +339,7 @@ def convert_raw_actions_to_tensors(raw_action_data: List[Dict], encoder: ActionE
             key_value = encoder.encode_key(key)
             all_actions.append({
                 'timestamp': key_release.get('timestamp', 0),
-                'type': 2,  # 2 = key
+                'type': 3,  # 3 = key_release
                 'x': 0,     # No coordinates for keys
                 'y': 0,
                 'button': 0,  # No button for keys
@@ -354,7 +354,7 @@ def convert_raw_actions_to_tensors(raw_action_data: List[Dict], encoder: ActionE
             dy = scroll.get('dy', 0)
             all_actions.append({
                 'timestamp': scroll.get('timestamp', 0),
-                'type': 3,  # 3 = scroll
+                'type': 4,  # 4 = scroll
                 'x': 0,     # No coordinates for scrolls
                 'y': 0,
                 'button': 0,  # No button for scrolls
@@ -574,7 +574,7 @@ def create_live_training_sequences(feature_window: np.ndarray,
         gamestate_timestamps: List of 10 timestamps corresponding to each action tensor
         
     Returns:
-        Tuple of (input_sequences, target_sequences, action_input_sequences) ready for training
+        Tuple of (input_sequences, action_input_sequences, target_sequences) ready for training
     """
     # Convert live data to pipeline format
     features = convert_live_features_to_sequence_format(feature_window)
@@ -594,8 +594,8 @@ def create_live_training_sequences(feature_window: np.ndarray,
         action_targets = [[] for _ in range(len(raw_actions))]
     
     # Create sequences using existing method
-    input_sequences, target_sequences, action_input_sequences = create_temporal_sequences(
+    input_sequences, action_input_sequences, target_sequences = create_temporal_sequences(
         features, action_targets, sequence_length=10
     )
     
-    return input_sequences, target_sequences, action_input_sequences
+    return input_sequences, action_input_sequences, target_sequences

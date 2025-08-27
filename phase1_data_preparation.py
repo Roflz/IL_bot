@@ -285,7 +285,7 @@ class MultiActionSequencePreparer:
                 dy = scroll.get('dy', 0)
                 all_actions.append({
                     'timestamp': scroll.get('timestamp', 0),
-                    'type': 3,  # 3 = scroll
+                    'type': 4,  # 4 = scroll
                     'x': 0,     # No coordinates for scrolls
                     'y': 0,
                     'button': 0,  # No button for scrolls
@@ -1160,15 +1160,15 @@ class MultiActionSequencePreparer:
             for scroll in gamestate_actions.get('scrolls', []):
                 dx = scroll.get('dx', 0)
                 dy = scroll.get('dy', 0)
-                all_actions.append({
-                    'timestamp': scroll.get('timestamp', 0),
-                    'type': 3,  # 3 = scroll
-                    'x': 0,     # No coordinates for scrolls
-                    'y': 0,
-                    'button': 0,  # No button for scrolls
-                    'key': 0,     # No key for scrolls
-                    'scroll': dx   # Keep original dx value
-                })
+                            all_actions.append({
+                'timestamp': scroll.get('timestamp', 0),
+                'type': 4,  # 4 = scroll
+                'x': 0,     # No coordinates for scrolls
+                'y': 0,
+                'button': 0,  # No button for scrolls
+                'key': 0,     # No key for scrolls
+                'scroll': dx   # Keep original dx value
+            })
             
             # Sort actions by timestamp
             all_actions.sort(key=lambda x: x['timestamp'])
@@ -1195,7 +1195,7 @@ class MultiActionSequencePreparer:
                 training_sequence.append(action['key'])
                 
                 # Scroll deltas (dx and dy)
-                if action['type'] == 3:  # Scroll
+                if action['type'] == 4:  # Scroll
                     # For scrolls, use the scroll value as dx, and 0 as dy
                     # (since we're only storing one scroll value in the current structure)
                     training_sequence.append(action['scroll'])  # dx
