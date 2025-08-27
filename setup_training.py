@@ -215,7 +215,7 @@ def setup_training(model: ImitationHybridModel,
                   train_loader: DataLoader,
                   val_loader: DataLoader,
                   device: torch.device,
-                  learning_rate: float = 0.001,
+                  learning_rate: float = 3e-4,
                   weight_decay: float = 1e-4) -> Tuple[ActionTensorLoss, optim.Optimizer]:
     """Setup loss function and optimizer"""
     

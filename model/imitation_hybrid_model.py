@@ -152,15 +152,10 @@ class GamestateEncoder(nn.Module):
         self.norm2 = nn.LayerNorm(hidden_dim)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        print("testing")
-        print(x)
-        print(x.shape)
         batch_size, seq_len, features = x.shape
         
-        # Preprocess features for better training stability
-        x = self.feature_preprocessor(x)
-        
-        # Reshape to process all features: (batch_size * seq_len, features)
+        # IMPORTANT: do NOT normalize before extracting categorical IDs.
+        # Keep normalization inside type-specific blocks/encoders.
         x_flat = x.view(-1, features)
         
         # Encode features by type
@@ -302,7 +297,7 @@ class CrossAttention(nn.Module):
         return cross_features
 
 class ActionDecoder(nn.Module):
-    """Decoder for OSRS action tensors with discrete categorical outputs"""
+    """Decoder that returns trainable heads (logits/reals) and can decode for inference."""
     
     def __init__(self, input_dim: int = 256, max_actions: int = 100, 
                  screen_width: int = 1920, screen_height: int = 1080):
@@ -321,83 +316,68 @@ class ActionDecoder(nn.Module):
         # Split into separate heads for different feature types
         # Features: [timestamp, type, x, y, button, key, scroll_dx, scroll_dy]
         
-        # Time head (continuous) - keep as linear
+        # Time head (continuous)
         self.time_head = nn.Linear(input_dim, max_actions)
-        
-        # Action type head (categorical: 0,1,2,3) - 4 categories
-        self.action_type_head = nn.Linear(input_dim, max_actions * 4)
-        
-        # Coordinate heads (discrete integers) - use sigmoid + rounding
+
+        # Action type head (categorical) — 5 classes: move, click, key_press, key_release, scroll
+        self.action_type_head = nn.Linear(input_dim, max_actions * 5)
+
+        # Coordinate heads (continuous); no rounding in forward
         self.x_coord_head = nn.Linear(input_dim, max_actions)
         self.y_coord_head = nn.Linear(input_dim, max_actions)
-        
-        # Button head (categorical: 0,1,2,3) - 4 categories  
+
+        # Button head (categorical: 4)
         self.button_head = nn.Linear(input_dim, max_actions * 4)
-        
-        # Key head (categorical) - use key categories + 0 for "no key"
-        # Based on key_mapper.py: ~150 key categories + 1 for "no key" = 151 total
+
+        # Key head (categorical: 151 incl. "no key")
         self.key_head = nn.Linear(input_dim, max_actions * 151)
+
+        # Scroll heads: predict 3-class logits for {-1,0,1}
+        self.scroll_x_head = nn.Linear(input_dim, max_actions * 3)
+        self.scroll_y_head = nn.Linear(input_dim, max_actions * 3)
         
-        # Scroll heads (categorical: -1,0,1) - use tanh + sign
-        self.scroll_x_head = nn.Linear(input_dim, max_actions)
-        self.scroll_y_head = nn.Linear(input_dim, max_actions)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         shared = self.shared_features(x)
-        batch_size = x.size(0)
+        B = x.size(0)
         
         # Decode each feature type separately
         
-        # 1. Time (continuous) - keep as is
-        time_output = self.time_head(shared)  # (batch_size, max_actions)
-        
-        # 2. Action type (categorical: 0,1,2,3)
-        action_type_logits = self.action_type_head(shared)  # (batch_size, max_actions * 4)
-        action_type_logits = action_type_logits.view(batch_size, self.max_actions, 4)
-        action_type_probs = F.softmax(action_type_logits, dim=-1)
-        action_type_output = torch.argmax(action_type_probs, dim=-1).float()  # (batch_size, max_actions)
-        
-        # 3. Coordinates (discrete integers) - use sigmoid + rounding
-        x_coord_raw = torch.sigmoid(self.x_coord_head(shared))  # (batch_size, max_actions)
-        y_coord_raw = torch.sigmoid(self.y_coord_head(shared))  # (batch_size, max_actions)
-        
-        # Scale to screen dimensions and round to integers
-        x_coord_output = torch.round(x_coord_raw * self.screen_width).float()  # (batch_size, max_actions)
-        y_coord_output = torch.round(y_coord_raw * self.screen_height).float()  # (batch_size, max_actions)
-        
-        # 4. Button (categorical: 0,1,2,3)
-        button_logits = self.button_head(shared)  # (batch_size, max_actions * 4)
-        button_logits = button_logits.view(batch_size, self.max_actions, 4)
-        button_probs = F.softmax(button_logits, dim=-1)
-        button_output = torch.argmax(button_probs, dim=-1).float()  # (batch_size, max_actions)
-        
-        # 5. Key (categorical) - use key categories + 0 for "no key"
-        key_logits = self.key_head(shared)  # (batch_size, max_actions * 151)
-        key_logits = key_logits.view(batch_size, self.max_actions, 151)
-        key_probs = F.softmax(key_logits, dim=-1)
-        key_output = torch.argmax(key_probs, dim=-1).float()  # (batch_size, max_actions)
-        
-        # 6. Scroll (categorical: -1,0,1) - use tanh + sign
-        scroll_x_raw = torch.tanh(self.scroll_x_head(shared))  # (batch_size, max_actions)
-        scroll_y_raw = torch.tanh(self.scroll_y_head(shared))  # (batch_size, max_actions)
-        
-        # Convert to -1, 0, 1
-        scroll_x_output = torch.sign(scroll_x_raw)  # (batch_size, max_actions)
-        scroll_y_output = torch.sign(scroll_y_raw)  # (batch_size, max_actions)
-        
-        # Stack all features: [time, type, x, y, button, key, scroll_x, scroll_y]
-        action_tensor = torch.stack([
-            time_output,        # (batch_size, max_actions)
-            action_type_output, # (batch_size, max_actions)
-            x_coord_output,     # (batch_size, max_actions)
-            y_coord_output,     # (batch_size, max_actions)
-            button_output,      # (batch_size, max_actions)
-            key_output,         # (batch_size, max_actions)
-            scroll_x_output,    # (batch_size, max_actions)
-            scroll_y_output     # (batch_size, max_actions)
-        ], dim=-1)  # (batch_size, max_actions, 8)
-        
-        return action_tensor
+        # 1) Time (continuous)
+        time = self.time_head(shared).view(B, self.max_actions)                           # (B,A)
+        # 2) Action type (categorical) — return LOGITS (5 classes)
+        action_type_logits = self.action_type_head(shared).view(B, self.max_actions, 5)   # (B,A,5)
+        # 3) Coords (continuous; pixel space; NO rounding here)
+        x_coord = torch.sigmoid(self.x_coord_head(shared)).view(B, self.max_actions) * self.screen_width
+        y_coord = torch.sigmoid(self.y_coord_head(shared)).view(B, self.max_actions) * self.screen_height
+        # 4) Button (categorical; LOGITS over 4)
+        button_logits = self.button_head(shared).view(B, self.max_actions, 4)             # (B,A,4)
+        # 5) Key (categorical; LOGITS over 151)
+        key_logits = self.key_head(shared).view(B, self.max_actions, 151)                 # (B,A,151)
+        # 6) Scroll (categorical; LOGITS over 3)
+        scroll_x_logits = self.scroll_x_head(shared).view(B, self.max_actions, 3)         # (B,A,3)
+        scroll_y_logits = self.scroll_y_head(shared).view(B, self.max_actions, 3)         # (B,A,3)
+        return {
+            "time": time,
+            "action_type_logits": action_type_logits,
+            "x": x_coord, "y": y_coord,
+            "button_logits": button_logits,
+            "key_logits": key_logits,
+            "scroll_x_logits": scroll_x_logits,
+            "scroll_y_logits": scroll_y_logits,
+        }
+
+    @torch.no_grad()
+    def decode(self, heads) -> torch.Tensor:
+        """Inference-only: discretize heads to the legacy (B,A,8) format."""
+        B, A = heads["time"].shape
+        at  = heads["action_type_logits"].argmax(-1).float()      # (B,A)
+        btn = heads["button_logits"].argmax(-1).float()           # (B,A)
+        key = heads["key_logits"].argmax(-1).float()              # (B,A)
+        x_i = heads["x"].round()                                  # (B,A)
+        y_i = heads["y"].round()                                  # (B,A)
+        sx  = heads["scroll_x_logits"].argmax(-1) - 1             # {0,1,2}->{-1,0,1}
+        sy  = heads["scroll_y_logits"].argmax(-1) - 1
+        return torch.stack([heads["time"], at, x_i, y_i, btn, key, sx.float(), sy.float()], dim=-1)
 
 class ImitationHybridModel(nn.Module):
     """Complete hybrid model combining Transformer + CNN + LSTM with action sequence input"""
@@ -454,7 +434,7 @@ class ImitationHybridModel(nn.Module):
             nn.Dropout(0.1)
         )
         
-        # Button encoder (categorical: 0,1,2,3) - 4 classes: none, left, right, middle
+        # Button encoder (categorical: 4)
         self.button_embedding = nn.Embedding(4, hidden_dim // 16)  # 4 categories -> 16 dims
         self.button_encoder = nn.Sequential(
             nn.LayerNorm(hidden_dim // 16),
@@ -557,16 +537,19 @@ class ImitationHybridModel(nn.Module):
     
     def forward(self, 
                 temporal_sequence: torch.Tensor,
-                action_sequence: torch.Tensor) -> Dict[str, torch.Tensor]:
+                action_sequence: torch.Tensor,
+                return_logits: bool = False) -> Dict[str, torch.Tensor]:
         """
         Forward pass through the hybrid model with action sequence input
         
         Args:
             temporal_sequence: (batch_size, 10, 128) - Sequence of 10 gamestates
             action_sequence: (batch_size, 10, 100, 8) - Sequence of 10 timesteps, each with up to 100 actions, 8 features per action
+            return_logits: If True, return raw logits/continuous values for training. If False, return discretized action tensor for inference.
             
         Returns:
-            Dictionary of action predictions
+            If return_logits=True: Dictionary of trainable heads (logits/reals)
+            If return_logits=False: Legacy (batch_size, max_actions, 8) action tensor
         """
         batch_size = temporal_sequence.size(0)
         
@@ -582,8 +565,7 @@ class ImitationHybridModel(nn.Module):
         # Reshape to process all actions: (batch_size * 10 * 100, 8)
         action_sequence_flat = action_sequence.view(-1, action_features)
         
-        # Preprocess features for better training stability
-        action_sequence_flat = self.feature_preprocessor(action_sequence_flat)
+        # IMPORTANT: do NOT normalize before extracting categorical IDs
         
         # Feature-type-specific encoding: (batch_size * 10 * 100, 8) -> (batch_size * 10 * 100, hidden_dim//2)
         # Features: [timestamp, type, x, y, button, key, scroll_dx, scroll_dy]
@@ -602,7 +584,7 @@ class ImitationHybridModel(nn.Module):
         timestamp_encoded = self.timestamp_encoder(timestamp_features)           # (batch*10*100, 16)
         
         # Categorical features: use embeddings
-        action_type_features_int = action_type_features.squeeze(-1).long().clamp(0, 3)  # 4 categories
+        action_type_features_int = action_type_features.squeeze(-1).long().clamp(0, 4)  # 5 categories
         action_type_embedded = self.action_type_embedding(action_type_features_int)  # (batch*10*100, 16)
         action_type_encoded = self.action_type_encoder(action_type_embedded)  # (batch*10*100, 16)
         
@@ -674,9 +656,11 @@ class ImitationHybridModel(nn.Module):
         fused_output = self.fusion_layer(fused_features)
         
         # 5. Decode actions
-        action_tensor = self.action_decoder(fused_output)
-        
-        return action_tensor  # (batch_size, max_actions, 8)
+        heads = self.action_decoder(fused_output)  # dict of heads for training
+        if return_logits:
+            return heads
+        else:
+            return self.action_decoder.decode(heads)  # legacy (B, A, 8) for inference
     
     def get_model_info(self) -> Dict[str, int]:
         """Get model information and parameter count"""
@@ -728,8 +712,15 @@ if __name__ == "__main__":
     action_sequence = torch.randn(batch_size, 10, 100, 8)
     
     with torch.no_grad():
+        # Test inference mode (default)
         output = model(temporal_sequence, action_sequence)
-    
-    print(f"\nForward pass successful!")
-    print(f"Input shapes: temporal={temporal_sequence.shape}, action={action_sequence.shape}")
-    print(f"Output shape: {output.shape}")
+        print(f"\nInference mode forward pass successful!")
+        print(f"Input shapes: temporal={temporal_sequence.shape}, action={action_sequence.shape}")
+        print(f"Output shape: {output.shape}")
+        
+        # Test training mode (logits)
+        logits_output = model(temporal_sequence, action_sequence, return_logits=True)
+        print(f"\nTraining mode forward pass successful!")
+        print(f"Logits output keys: {list(logits_output.keys())}")
+        for key, value in logits_output.items():
+            print(f"  {key}: {value.shape}")
