@@ -135,16 +135,19 @@ def optimize_batch_size_for_cuda(device: torch.device, base_batch_size: int = 8)
     
     return optimal_batch_size
 
-def create_data_loaders(dataset: OSRSDataset, 
-                       train_split: float = 0.8,
-                       batch_size: int = 8,
-                       shuffle: bool = True,
-                       device: torch.device = None) -> Tuple[DataLoader, DataLoader]:
+def create_data_loaders(
+    dataset=None,
+    train_split=0.8,
+    batch_size=32,
+    shuffle=True,
+    device=None,
+    disable_cuda_batch_opt: bool = False
+):
     """Create train and validation data loaders"""
     
-    # Optimize batch size for CUDA if available
-    if device and torch.cuda.is_available():
-        batch_size = optimize_batch_size_for_cuda(device, batch_size)
+    # Optional: auto-optimize batch size for available CUDA memory
+    if device and device.type == 'cuda' and not disable_cuda_batch_opt:
+        batch_size = optimize_batch_size_for_cuda(batch_size, device=device)
     
     # Split dataset
     n_train = int(len(dataset) * train_split)
@@ -169,10 +172,7 @@ def create_data_loaders(dataset: OSRSDataset,
         pin_memory=torch.cuda.is_available()  # Enable pin_memory for CUDA
     )
     
-    print(f"Data loaders created:")
-    print(f"  Train: {len(train_loader)} batches ({len(train_dataset)} samples)")
-    print(f"  Validation: {len(val_loader)} batches ({len(val_dataset)} samples)")
-    print(f"  Batch size: {batch_size}")
+    print(f"Data loaders created:\n  Train: {len(train_loader)} batches ({len(train_dataset)} samples)\n  Validation: {len(val_loader)} batches ({len(val_dataset)} samples)\n  Batch size: {batch_size}")
     
     return train_loader, val_loader
 

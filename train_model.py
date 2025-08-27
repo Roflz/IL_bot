@@ -72,7 +72,7 @@ def _compute_class_weights_from_loader(train_loader, device):
         "sy":   _to_weights(cnt_sy,   3).to(device),
     }
 
-def compute_il_loss(heads, target, class_w=None, loss_w=None) -> torch.Tensor:
+def compute_il_loss(heads, target, class_w=None, loss_w=None, time_div: float = 1.0) -> torch.Tensor:
     """
     heads: dict from model(return_logits=True)
       - time: (B,100), x: (B,100), y:(B,100)
@@ -111,7 +111,11 @@ def compute_il_loss(heads, target, class_w=None, loss_w=None) -> torch.Tensor:
         return F.cross_entropy(L, T, weight=w, reduction="mean")
 
     # Per-head losses (now actually defined)
-    loss_time = masked_l1(heads["time"], t_time)
+    # Normalize time inside the loss only (e.g., ms->s with time_div=1000)
+    if time_div != 1.0:
+        loss_time = masked_l1(heads["time"] / time_div, t_time / time_div)
+    else:
+        loss_time = masked_l1(heads["time"], t_time)
     loss_x    = masked_l1(heads["x"],    t_x)
     loss_y    = masked_l1(heads["y"],    t_y)
 
@@ -171,7 +175,8 @@ def _masked_metrics(heads: dict, target: torch.Tensor):
         }
 
 def train_model(model, train_loader, val_loader, criterion, optimizer,
-                num_epochs=10, device='cpu', scheduler=None):
+                num_epochs=10, device='cpu', scheduler=None,
+                use_class_weights=True, loss_w=None, time_div=1.0):
     """Train the model"""
     
     print(f"Starting training on {device}")
@@ -187,13 +192,16 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
     train_losses = []
     val_losses = []
     
-    # One-time: compute class weights on train set (under mask)
-    print("Estimating class weights on train set (masked)…")
-    class_w = _compute_class_weights_from_loader(train_loader, device)
-    print("  class_w[type]:", class_w["type"].tolist())
-    print("  class_w[btn ]:", class_w["btn"].tolist())
-    print("  class_w[key ]:", f"(151 dims; min={class_w['key'].min().item():.3g}, max={class_w['key'].max().item():.3g})")
-    print("  class_w[sx  ]:", class_w["sx"].tolist(), " class_w[sy]:", class_w["sy"].tolist())
+    if use_class_weights:
+        print("Estimating class weights on train set (masked)…")
+        class_w = _compute_class_weights_from_loader(train_loader, device)
+        print("  class_w[type]:", class_w["type"].tolist())
+        print("  class_w[btn ]:", class_w["btn"].tolist())
+        print("  class_w[key ]:", f"(151 dims; min={class_w['key'].min().item():.3g}, max={class_w['key'].max().item():.3g})")
+        print("  class_w[sx  ]:", class_w["sx"].tolist(), " class_w[sy]:", class_w["sy"].tolist())
+    else:
+        print("Class weights disabled via flag.")
+        class_w = None
 
     # Early stopping / checkpoint
     best_val = float("inf")
@@ -221,7 +229,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
             optimizer.zero_grad()
             outputs = model(temporal_sequence, action_sequence, return_logits=True)
             if isinstance(outputs, dict):
-                loss = compute_il_loss(outputs, action_target, class_w=class_w)
+                loss = compute_il_loss(outputs, action_target, class_w=class_w, loss_w=loss_w, time_div=time_div)
             else:
                 # Back-compat with legacy tensor output + custom criterion
                 loss = criterion(outputs, action_target)
@@ -257,7 +265,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
                 
                 outputs = model(temporal_sequence, action_sequence, return_logits=True)
                 if isinstance(outputs, dict):
-                    vloss = compute_il_loss(outputs, action_target, class_w=class_w)
+                    vloss = compute_il_loss(outputs, action_target, class_w=class_w, loss_w=loss_w, time_div=time_div)
                     mm = _masked_metrics(outputs, action_target)
                     for k in vm: vm[k] += mm[k]
                     vm_n += 1
@@ -372,7 +380,31 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Train OSRS Bot Imitation Learning Model')
     parser.add_argument('--data_dir', type=str, default="data/06_final_training_data",
-                       help='Path to training data directory (default: data/06_final_training_data)')
+                        help='Path to training data directory')
+    # Run params
+    parser.add_argument('--epochs', type=int, default=40)
+    parser.add_argument('--lr', type=float, default=3e-4)
+    parser.add_argument('--weight_decay', type=float, default=1e-4)
+    parser.add_argument('--batch_size', type=int, default=32, help='base batch size')
+    parser.add_argument('--disable_auto_batch', action='store_true',
+                        help='force batch_size; do not auto-optimize for CUDA')
+    # Scheduler
+    parser.add_argument('--step_size', type=int, default=8, help='StepLR step_size')
+    parser.add_argument('--gamma', type=float, default=0.5, help='StepLR gamma')
+    # Class weights toggle
+    parser.add_argument('--no_class_weights', action='store_true', help='disable class weighting')
+    # Loss head weights
+    parser.add_argument('--lw_time', type=float, default=0.1)
+    parser.add_argument('--lw_x',    type=float, default=1.0)
+    parser.add_argument('--lw_y',    type=float, default=1.0)
+    parser.add_argument('--lw_type', type=float, default=1.0)
+    parser.add_argument('--lw_btn',  type=float, default=1.0)
+    parser.add_argument('--lw_key',  type=float, default=1.0)
+    parser.add_argument('--lw_sx',   type=float, default=1.0)
+    parser.add_argument('--lw_sy',   type=float, default=1.0)
+    # Time scaling (normalize inside loss only)
+    parser.add_argument('--time_div', type=float, default=1.0,
+                        help='divide time by this value in loss (e.g., 1000 for ms->s)')
     args = parser.parse_args()
     
     # Create dataset and data loaders
@@ -393,7 +425,8 @@ def main():
     train_loader, val_loader = create_data_loaders(
         dataset=dataset,
         train_split=0.8,
-        batch_size=8,
+        batch_size=args.batch_size,
+        disable_cuda_batch_opt=args.disable_auto_batch,
         shuffle=True,
         device=device
     )
@@ -414,8 +447,8 @@ def main():
         train_loader=train_loader,
         val_loader=val_loader,
         device=device,
-        learning_rate=0.0003,   # recommended LR for your setup
-        weight_decay=1e-4
+        learning_rate=args.lr,
+        weight_decay=args.weight_decay
     )
     
     # Move model to device
@@ -423,17 +456,25 @@ def main():
     
     print(f"Model loaded with {sum(p.numel() for p in model.parameters()):,} parameters")
     
-    # Training configuration
     config = {
-        'num_epochs': 10,
-        'learning_rate': 0.001,
+        'num_epochs': args.epochs,
+        'learning_rate': args.lr,
+        'weight_decay': args.weight_decay,
         'batch_size': train_loader.batch_size,
-        'device': str(device)
+        'device': str(device),
+        'step_size': args.step_size,
+        'gamma': args.gamma,
+        'use_class_weights': not args.no_class_weights,
+        'loss_weights': {
+            'time': args.lw_time, 'x': args.lw_x, 'y': args.lw_y,
+            'type': args.lw_type, 'btn': args.lw_btn, 'key': args.lw_key,
+            'sx': args.lw_sx, 'sy': args.lw_sy
+        }
     }
     
     # Train the model
     print("\nStarting training...")
-    scheduler = StepLR(optimizer, step_size=5, gamma=0.5)
+    scheduler = StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
     train_losses, val_losses = train_model(
         model=model,
         train_loader=train_loader,
@@ -442,7 +483,10 @@ def main():
         optimizer=optimizer,
         num_epochs=config['num_epochs'],
         device=device,
-        scheduler=scheduler
+        scheduler=scheduler,
+        use_class_weights=(not args.no_class_weights),
+        loss_w=config['loss_weights'],
+        time_div=args.time_div
     )
     
     # Save results
