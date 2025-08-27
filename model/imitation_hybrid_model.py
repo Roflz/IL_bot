@@ -152,6 +152,9 @@ class GamestateEncoder(nn.Module):
         self.norm2 = nn.LayerNorm(hidden_dim)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        print("testing")
+        print(x)
+        print(x.shape)
         batch_size, seq_len, features = x.shape
         
         # Preprocess features for better training stability
@@ -319,25 +322,25 @@ class ActionDecoder(nn.Module):
         # Features: [timestamp, type, x, y, button, key, scroll_dx, scroll_dy]
         
         # Time head (continuous) - keep as linear
-        self.time_head = nn.Linear(input_dim, max_actions + 1)
+        self.time_head = nn.Linear(input_dim, max_actions)
         
         # Action type head (categorical: 0,1,2,3) - 4 categories
-        self.action_type_head = nn.Linear(input_dim, (max_actions + 1) * 4)
+        self.action_type_head = nn.Linear(input_dim, max_actions * 4)
         
         # Coordinate heads (discrete integers) - use sigmoid + rounding
-        self.x_coord_head = nn.Linear(input_dim, max_actions + 1)
-        self.y_coord_head = nn.Linear(input_dim, max_actions + 1)
+        self.x_coord_head = nn.Linear(input_dim, max_actions)
+        self.y_coord_head = nn.Linear(input_dim, max_actions)
         
         # Button head (categorical: 0,1,2,3) - 4 categories  
-        self.button_head = nn.Linear(input_dim, (max_actions + 1) * 4)
+        self.button_head = nn.Linear(input_dim, max_actions * 4)
         
         # Key head (categorical) - use key categories + 0 for "no key"
         # Based on key_mapper.py: ~150 key categories + 1 for "no key" = 151 total
-        self.key_head = nn.Linear(input_dim, (max_actions + 1) * 151)
+        self.key_head = nn.Linear(input_dim, max_actions * 151)
         
         # Scroll heads (categorical: -1,0,1) - use tanh + sign
-        self.scroll_x_head = nn.Linear(input_dim, max_actions + 1)
-        self.scroll_y_head = nn.Linear(input_dim, max_actions + 1)
+        self.scroll_x_head = nn.Linear(input_dim, max_actions)
+        self.scroll_y_head = nn.Linear(input_dim, max_actions)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         shared = self.shared_features(x)
@@ -346,53 +349,53 @@ class ActionDecoder(nn.Module):
         # Decode each feature type separately
         
         # 1. Time (continuous) - keep as is
-        time_output = self.time_head(shared)  # (batch_size, max_actions + 1)
+        time_output = self.time_head(shared)  # (batch_size, max_actions)
         
         # 2. Action type (categorical: 0,1,2,3)
-        action_type_logits = self.action_type_head(shared)  # (batch_size, (max_actions + 1) * 4)
-        action_type_logits = action_type_logits.view(batch_size, self.max_actions + 1, 4)
+        action_type_logits = self.action_type_head(shared)  # (batch_size, max_actions * 4)
+        action_type_logits = action_type_logits.view(batch_size, self.max_actions, 4)
         action_type_probs = F.softmax(action_type_logits, dim=-1)
-        action_type_output = torch.argmax(action_type_probs, dim=-1).float()  # (batch_size, max_actions + 1)
+        action_type_output = torch.argmax(action_type_probs, dim=-1).float()  # (batch_size, max_actions)
         
         # 3. Coordinates (discrete integers) - use sigmoid + rounding
-        x_coord_raw = torch.sigmoid(self.x_coord_head(shared))  # (batch_size, max_actions + 1)
-        y_coord_raw = torch.sigmoid(self.y_coord_head(shared))  # (batch_size, max_actions + 1)
+        x_coord_raw = torch.sigmoid(self.x_coord_head(shared))  # (batch_size, max_actions)
+        y_coord_raw = torch.sigmoid(self.y_coord_head(shared))  # (batch_size, max_actions)
         
         # Scale to screen dimensions and round to integers
-        x_coord_output = torch.round(x_coord_raw * self.screen_width).float()  # (batch_size, max_actions + 1)
-        y_coord_output = torch.round(y_coord_raw * self.screen_height).float()  # (batch_size, max_actions + 1)
+        x_coord_output = torch.round(x_coord_raw * self.screen_width).float()  # (batch_size, max_actions)
+        y_coord_output = torch.round(y_coord_raw * self.screen_height).float()  # (batch_size, max_actions)
         
         # 4. Button (categorical: 0,1,2,3)
-        button_logits = self.button_head(shared)  # (batch_size, (max_actions + 1) * 4)
-        button_logits = button_logits.view(batch_size, self.max_actions + 1, 4)
+        button_logits = self.button_head(shared)  # (batch_size, max_actions * 4)
+        button_logits = button_logits.view(batch_size, self.max_actions, 4)
         button_probs = F.softmax(button_logits, dim=-1)
-        button_output = torch.argmax(button_probs, dim=-1).float()  # (batch_size, max_actions + 1)
+        button_output = torch.argmax(button_probs, dim=-1).float()  # (batch_size, max_actions)
         
         # 5. Key (categorical) - use key categories + 0 for "no key"
-        key_logits = self.key_head(shared)  # (batch_size, (max_actions + 1) * 151)
-        key_logits = key_logits.view(batch_size, self.max_actions + 1, 151)
+        key_logits = self.key_head(shared)  # (batch_size, max_actions * 151)
+        key_logits = key_logits.view(batch_size, self.max_actions, 151)
         key_probs = F.softmax(key_logits, dim=-1)
-        key_output = torch.argmax(key_probs, dim=-1).float()  # (batch_size, max_actions + 1)
+        key_output = torch.argmax(key_probs, dim=-1).float()  # (batch_size, max_actions)
         
         # 6. Scroll (categorical: -1,0,1) - use tanh + sign
-        scroll_x_raw = torch.tanh(self.scroll_x_head(shared))  # (batch_size, max_actions + 1)
-        scroll_y_raw = torch.tanh(self.scroll_y_head(shared))  # (batch_size, max_actions + 1)
+        scroll_x_raw = torch.tanh(self.scroll_x_head(shared))  # (batch_size, max_actions)
+        scroll_y_raw = torch.tanh(self.scroll_y_head(shared))  # (batch_size, max_actions)
         
         # Convert to -1, 0, 1
-        scroll_x_output = torch.sign(scroll_x_raw)  # (batch_size, max_actions + 1)
-        scroll_y_output = torch.sign(scroll_y_raw)  # (batch_size, max_actions + 1)
+        scroll_x_output = torch.sign(scroll_x_raw)  # (batch_size, max_actions)
+        scroll_y_output = torch.sign(scroll_y_raw)  # (batch_size, max_actions)
         
         # Stack all features: [time, type, x, y, button, key, scroll_x, scroll_y]
         action_tensor = torch.stack([
-            time_output,        # (batch_size, max_actions + 1)
-            action_type_output, # (batch_size, max_actions + 1)
-            x_coord_output,     # (batch_size, max_actions + 1)
-            y_coord_output,     # (batch_size, max_actions + 1)
-            button_output,      # (batch_size, max_actions + 1)
-            key_output,         # (batch_size, max_actions + 1)
-            scroll_x_output,    # (batch_size, max_actions + 1)
-            scroll_y_output     # (batch_size, max_actions + 1)
-        ], dim=-1)  # (batch_size, max_actions + 1, 8)
+            time_output,        # (batch_size, max_actions)
+            action_type_output, # (batch_size, max_actions)
+            x_coord_output,     # (batch_size, max_actions)
+            y_coord_output,     # (batch_size, max_actions)
+            button_output,      # (batch_size, max_actions)
+            key_output,         # (batch_size, max_actions)
+            scroll_x_output,    # (batch_size, max_actions)
+            scroll_y_output     # (batch_size, max_actions)
+        ], dim=-1)  # (batch_size, max_actions, 8)
         
         return action_tensor
 
@@ -424,7 +427,7 @@ class ImitationHybridModel(nn.Module):
         )
         
         # 2. Action Sequence Encoder - Feature-type-specific encoding (8 -> 128)
-        # Input: (batch_size, 10, 101, 8) -> Output: (batch_size, 10, 101, hidden_dim // 2)
+        # Input: (batch_size, 10, 100, 8) -> Output: (batch_size, 10, 100, hidden_dim // 2)
         # Features: [timestamp, type, x, y, button, key, scroll_dx, scroll_dy]
         
         # Timestamp encoder (continuous) - raw output, no activation
@@ -560,7 +563,7 @@ class ImitationHybridModel(nn.Module):
         
         Args:
             temporal_sequence: (batch_size, 10, 128) - Sequence of 10 gamestates
-            action_sequence: (batch_size, 10, 101, 8) - Sequence of 10 timesteps, each with action count at index 0 + up to 100 actions, 8 features per action
+            action_sequence: (batch_size, 10, 100, 8) - Sequence of 10 timesteps, each with up to 100 actions, 8 features per action
             
         Returns:
             Dictionary of action predictions
@@ -572,73 +575,73 @@ class ImitationHybridModel(nn.Module):
         gamestate_encoded = self.gamestate_encoder(current_gamestate.unsqueeze(1))  # Add sequence dimension
         gamestate_encoded = gamestate_encoded.squeeze(1)  # Remove sequence dimension
         
-        # 2. Encode action sequence (10 timesteps, 101 actions, 8 features -> 10 timesteps, 101 actions, hidden_dim//2)
-        # action_sequence shape: (batch_size, 10, 101, 8)
+        # 2. Encode action sequence (10 timesteps, 100 actions, 8 features -> 10 timesteps, 100 actions, hidden_dim//2)
+        # action_sequence shape: (batch_size, 10, 100, 8)
         batch_size, seq_len, num_actions, action_features = action_sequence.shape
         
-        # Reshape to process all actions: (batch_size * 10 * 101, 8)
+        # Reshape to process all actions: (batch_size * 10 * 100, 8)
         action_sequence_flat = action_sequence.view(-1, action_features)
         
         # Preprocess features for better training stability
         action_sequence_flat = self.feature_preprocessor(action_sequence_flat)
         
-        # Feature-type-specific encoding: (batch_size * 10 * 101, 8) -> (batch_size * 10 * 101, hidden_dim//2)
+        # Feature-type-specific encoding: (batch_size * 10 * 100, 8) -> (batch_size * 10 * 100, hidden_dim//2)
         # Features: [timestamp, type, x, y, button, key, scroll_dx, scroll_dy]
         
         # Extract individual features
-        timestamp_features = action_sequence_flat[:, 0:1]      # (batch*10*101, 1)
-        action_type_features = action_sequence_flat[:, 1:2]    # (batch*10*101, 1)
-        x_coord_features = action_sequence_flat[:, 2:3]       # (batch*10*101, 1)
-        y_coord_features = action_sequence_flat[:, 3:4]       # (batch*10*101, 1)
-        button_features = action_sequence_flat[:, 4:5]         # (batch*10*101, 1)
-        key_features = action_sequence_flat[:, 5:6]            # (batch*10*101, 1)
-        scroll_dx_features = action_sequence_flat[:, 6:7]      # (batch*10*101, 1)
-        scroll_dy_features = action_sequence_flat[:, 7:8]      # (batch*10*101, 1)
+        timestamp_features = action_sequence_flat[:, 0:1]      # (batch*10*100, 1)
+        action_type_features = action_sequence_flat[:, 1:2]    # (batch*10*100, 1)
+        x_coord_features = action_sequence_flat[:, 2:3]       # (batch*10*100, 1)
+        y_coord_features = action_sequence_flat[:, 3:4]       # (batch*10*100, 1)
+        button_features = action_sequence_flat[:, 4:5]         # (batch*10*100, 1)
+        key_features = action_sequence_flat[:, 5:6]            # (batch*10*100, 1)
+        scroll_dx_features = action_sequence_flat[:, 6:7]      # (batch*10*100, 1)
+        scroll_dy_features = action_sequence_flat[:, 7:8]      # (batch*10*100, 1)
         
         # Encode each feature type
-        timestamp_encoded = self.timestamp_encoder(timestamp_features)           # (batch*10*101, 16)
+        timestamp_encoded = self.timestamp_encoder(timestamp_features)           # (batch*10*100, 16)
         
         # Categorical features: use embeddings
         action_type_features_int = action_type_features.squeeze(-1).long().clamp(0, 3)  # 4 categories
-        action_type_embedded = self.action_type_embedding(action_type_features_int)  # (batch*10*101, 16)
-        action_type_encoded = self.action_type_encoder(action_type_embedded)  # (batch*10*101, 16)
+        action_type_embedded = self.action_type_embedding(action_type_features_int)  # (batch*10*100, 16)
+        action_type_encoded = self.action_type_encoder(action_type_embedded)  # (batch*10*100, 16)
         
         # Encode coordinates separately to maintain consistent dimensions
-        x_coord_encoded = self.coordinate_encoder(x_coord_features)  # (batch*10*101, 16)
-        y_coord_encoded = self.coordinate_encoder(y_coord_features)  # (batch*10*101, 16)
+        x_coord_encoded = self.coordinate_encoder(x_coord_features)  # (batch*10*100, 16)
+        y_coord_encoded = self.coordinate_encoder(y_coord_features)  # (batch*10*100, 16)
         
         button_features_int = button_features.squeeze(-1).long().clamp(0, 3)  # 4 categories
-        button_embedded = self.button_embedding(button_features_int)  # (batch*10*101, 16)
-        button_encoded = self.button_encoder(button_embedded)  # (batch*10*101, 16)
+        button_embedded = self.button_embedding(button_features_int)  # (batch*10*100, 16)
+        button_encoded = self.button_encoder(button_embedded)  # (batch*10*100, 16)
         
         key_features_int = key_features.squeeze(-1).long().clamp(0, 150)  # 151 categories
-        key_embedded = self.key_embedding(key_features_int)  # (batch*10*101, 16)
-        key_encoded = self.key_encoder(key_embedded)  # (batch*10*101, 16)
+        key_embedded = self.key_embedding(key_features_int)  # (batch*10*100, 16)
+        key_encoded = self.key_encoder(key_embedded)  # (batch*10*100, 16)
         
         # Encode scroll features separately to maintain consistent dimensions
-        scroll_dx_encoded = self.scroll_encoder(scroll_dx_features)  # (batch*10*101, 16)
-        scroll_dy_encoded = self.scroll_encoder(scroll_dy_features)  # (batch*10*101, 16)
+        scroll_dx_encoded = self.scroll_encoder(scroll_dx_features)  # (batch*10*100, 16)
+        scroll_dy_encoded = self.scroll_encoder(scroll_dy_features)  # (batch*10*100, 16)
         
         # Combine all encoded features
         combined_features = torch.cat([
             timestamp_encoded, action_type_encoded, x_coord_encoded, y_coord_encoded,
             button_encoded, key_encoded, scroll_dx_encoded, scroll_dy_encoded
-        ], dim=1)  # (batch*10*101, 128) - 8 features * 16 dims each
+        ], dim=1)  # (batch*10*100, 128) - 8 features * 16 dims each
         
         # Final feature combination
-        action_encoded_flat = self.feature_combiner(combined_features)  # (batch*10*101, hidden_dim//2)
+        action_encoded_flat = self.feature_combiner(combined_features)  # (batch*10*100, hidden_dim//2)
         
-        # Reshape back: (batch_size, 10, 101, hidden_dim//2)
+        # Reshape back: (batch_size, 10, 100, hidden_dim//2)
         action_encoded = action_encoded_flat.view(batch_size, seq_len, num_actions, -1)
         
         # NEW: Process actions within each timestep using LSTM to preserve action detail
         # Process each timestep's actions through the action sequence LSTM
         action_encoded_timesteps = []
         for i in range(seq_len):
-            # Extract actions for this timestep: (batch_size, 101, hidden_dim//2)
+            # Extract actions for this timestep: (batch_size, 100, hidden_dim//2)
             timestep_actions = action_encoded[:, i, :, :]
             
-            # Process through LSTM: (batch_size, 101, hidden_dim) - bidirectional doubles the size
+            # Process through LSTM: (batch_size, 100, hidden_dim) - bidirectional doubles the size
             timestep_actions_encoded, _ = self.action_sequence_encoder(timestep_actions)
             
             # Take the last action's output as representation for this timestep: (batch_size, hidden_dim)
@@ -673,7 +676,7 @@ class ImitationHybridModel(nn.Module):
         # 5. Decode actions
         action_tensor = self.action_decoder(fused_output)
         
-        return action_tensor  # (batch_size, max_actions + 1, 8)
+        return action_tensor  # (batch_size, max_actions, 8)
     
     def get_model_info(self) -> Dict[str, int]:
         """Get model information and parameter count"""
@@ -722,7 +725,7 @@ if __name__ == "__main__":
     # Test forward pass
     batch_size = 4
     temporal_sequence = torch.randn(batch_size, 10, 128)
-    action_sequence = torch.randn(batch_size, 10, 8)
+    action_sequence = torch.randn(batch_size, 10, 100, 8)
     
     with torch.no_grad():
         output = model(temporal_sequence, action_sequence)

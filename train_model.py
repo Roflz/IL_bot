@@ -8,6 +8,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import json
 import time
+import argparse
 from pathlib import Path
 from setup_training import create_data_loaders, setup_model, setup_training
 
@@ -154,11 +155,17 @@ def main():
     # Load training setup
     print("Loading training setup...")
     
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Train OSRS Bot Imitation Learning Model')
+    parser.add_argument('--data_dir', type=str, default="data/06_final_training_data",
+                       help='Path to training data directory (default: data/06_final_training_data)')
+    args = parser.parse_args()
+    
     # Create dataset and data loaders
-    data_dir = Path("data/06_final_training_data")
+    data_dir = Path(args.data_dir)
     gamestate_file = data_dir / "gamestate_sequences.npy"
-    action_input_file = data_dir / "action_input_sequences.json"
-    action_targets_file = data_dir / "action_targets.json"
+    action_input_file = data_dir / "action_input_sequences.npy"
+    action_targets_file = data_dir / "action_targets.npy"
     
     from setup_training import OSRSDataset
     dataset = OSRSDataset(

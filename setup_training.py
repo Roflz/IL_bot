@@ -13,6 +13,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import json
+import argparse
 from pathlib import Path
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional
@@ -39,13 +40,13 @@ class OSRSDataset(Dataset):
                  max_actions: int = 100):
         
         # Load data files
-        self.gamestate_sequences = np.load(gamestate_file)  # (180, 10, 128)
+        self.gamestate_sequences = np.load(gamestate_file)  # (batch_size, 10, 128)
         
-        with open(action_input_file, 'r') as f:
-            self.action_input_sequences = json.load(f)  # 180 sequences
+        # Load action input sequences as numpy array
+        self.action_input_sequences = np.load(action_input_file)  # (batch_size, 10, 100, 8)
         
-        with open(action_targets_file, 'r') as f:
-            self.action_targets = json.load(f)  # 180 sequences
+        # Load action targets as numpy array  
+        self.action_targets = np.load(action_targets_file)  # (batch_size, 100, 8)
         
         self.sequence_length = sequence_length
         self.max_actions = max_actions
@@ -53,8 +54,8 @@ class OSRSDataset(Dataset):
         
         print(f"Dataset loaded successfully!")
         print(f"  Gamestate sequences: {self.gamestate_sequences.shape}")
-        print(f"  Action input sequences: {len(self.action_input_sequences)}")
-        print(f"  Action targets: {len(self.action_targets)}")
+        print(f"  Action input sequences: {self.action_input_sequences.shape}")
+        print(f"  Action targets: {self.action_targets.shape}")
         print(f"  Max actions per sequence: {max_actions}")
         
         # Validate data compatibility
@@ -66,6 +67,22 @@ class OSRSDataset(Dataset):
         
         assert self.gamestate_sequences.shape[2] == 128, \
             "Gamestate sequences must have 128 features"
+        
+        # Validate action sequence shapes
+        assert self.action_input_sequences.shape[1] == sequence_length, \
+            f"Action input sequences must have {sequence_length} timesteps"
+        
+        assert self.action_input_sequences.shape[2] == max_actions, \
+            f"Action input sequences must have {max_actions} actions per timestep"
+        
+        assert self.action_input_sequences.shape[3] == 8, \
+            "Action input sequences must have 8 features per action"
+        
+        assert self.action_targets.shape[1] == max_actions, \
+            f"Action targets must have {max_actions} actions"
+        
+        assert self.action_targets.shape[2] == 8, \
+            "Action targets must have 8 features per action"
     
     def __len__(self):
         return self.n_sequences
@@ -77,103 +94,19 @@ class OSRSDataset(Dataset):
         # Get temporal sequence (all 10 timesteps)
         temporal_sequence = gamestate_sequence  # (10, 128)
         
-        # Get action input sequence (10 timesteps, 8 features)
-        action_sequence = self._parse_action_input_sequence(self.action_input_sequences[idx])
+        # Get action input sequence (10 timesteps, 100 actions, 8 features)
+        action_sequence = self.action_input_sequences[idx]  # (10, 100, 8)
         
         # Get action target for this sequence
-        action_target = self._parse_action_target(self.action_targets[idx])
+        action_target = self.action_targets[idx]  # (100, 8)
         
         return {
             'temporal_sequence': torch.FloatTensor(temporal_sequence),
             'action_sequence': torch.FloatTensor(action_sequence),
-            'action_target': action_target
+            'action_target': torch.FloatTensor(action_target)
         }
     
-    def _parse_action_target(self, action_sequence: List) -> torch.Tensor:
-        """
-        Parse action target sequence into model-compatible format.
-        
-        Args:
-            action_sequence: List like [action_count, timing1, type1, x1, y1, button1, key1, scroll1, ...]
-            
-        Returns:
-            Action tensor with count at index 0: (max_actions + 1, 8)
-        """
-        if len(action_sequence) == 0:
-            # No actions
-            action_tensor = torch.zeros(self.max_actions + 1, 8)
-            action_tensor[0, 0] = 0  # Action count at index 0
-            return action_tensor
-        
-        # First element is action count
-        action_count = int(action_sequence[0])
-        
-        # Create action tensor (max_actions + 1, 8) - +1 for action count at index 0
-        action_tensor = torch.zeros(self.max_actions + 1, 8)
-        
-        # Set action count at index 0: [action_count, 0, 0, 0, 0, 0, 0, 0]
-        action_tensor[0, 0] = action_count
-        
-        # Parse the flat list into 8-feature actions
-        # Format: [action_count, timing1, type1, x1, y1, button1, key1, scroll1, timing2, type2, x2, y2, button2, key2, scroll2, ...]
-        features_per_action = 8
-        actions_start_idx = 1  # Skip action_count
-        
-        # Each action has 8 features: [timing, type, x, y, button, key, scroll_dx, scroll_dy]
-        max_actions_found = min((len(action_sequence) - actions_start_idx) // features_per_action, self.max_actions)
-        
-        for i in range(max_actions_found):
-            start_idx = actions_start_idx + i * features_per_action
-            end_idx = start_idx + features_per_action
-            
-            if end_idx <= len(action_sequence):
-                action_features = action_sequence[start_idx:end_idx]
-                action_tensor[i + 1] = torch.FloatTensor(action_features)  # +1 because index 0 is count
-        
-        return action_tensor  # Shape: (max_actions + 1, 8)
-    
-    def _parse_action_input_sequence(self, action_sequence: List) -> np.ndarray:
-        """
-        Parse action input sequence into proper tensor format.
-        
-        Args:
-            action_sequence: List of 10 timesteps, each with action data
-            
-        Returns:
-            Numpy array of shape (10, 100, 8) - 10 timesteps, each with up to 100 actions, 8 features per action
-        """
-        # action_sequence is a list of 10 timesteps
-        # Each timestep is: [action_count, action1_feats, action2_feats, ...]
-        
-        timesteps = 10
-        max_actions_per_timestep = 100
-        features_per_action = 8
-        
-        # Output: (10, 101, 8) - 10 timesteps, each with action count at index 0 + up to 100 actions
-        action_array = np.zeros((timesteps, max_actions_per_timestep + 1, features_per_action), dtype=np.float32)
-        
-        # Parse each of the 10 timesteps
-        for i in range(min(timesteps, len(action_sequence))):
-            timestep_data = action_sequence[i]  # One timestep's data
-            
-            if len(timestep_data) >= 1:
-                action_count = int(timestep_data[0])
-                actions_start_idx = 1
-                
-                # Store action count in the first action's first position (like targets do)
-                action_array[i, 0, 0] = action_count
-                
-                # Parse remaining actions (starting from index 1)
-                max_actions_found = min((len(timestep_data) - actions_start_idx) // features_per_action, max_actions_per_timestep)
-                
-                for j in range(max_actions_found):
-                    start_idx = actions_start_idx + j * features_per_action
-                    end_idx = start_idx + features_per_action
-                    if end_idx <= len(timestep_data):
-                        action_features = timestep_data[start_idx:end_idx]
-                        action_array[i, j + 1] = action_features  # +1 because index 0 is for count
-        
-        return action_array  # Shape: (10, 100, 8)
+    # Note: Old parsing methods removed since data is now loaded as numpy arrays
 
 def optimize_batch_size_for_cuda(device: torch.device, base_batch_size: int = 8) -> int:
     """Optimize batch size based on available CUDA memory"""
@@ -367,11 +300,17 @@ def main():
         print("CUDA not available, using CPU")
     print(f"Device: {device}")
     
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Test OSRS Training Setup')
+    parser.add_argument('--data_dir', type=str, default="data/06_final_training_data",
+                       help='Path to training data directory (default: data/06_final_training_data)')
+    args = parser.parse_args()
+    
     # Data file paths
-    data_dir = Path("data/06_final_training_data")
+    data_dir = Path(args.data_dir)
     gamestate_file = data_dir / "gamestate_sequences.npy"
-    action_input_file = data_dir / "action_input_sequences.json"
-    action_targets_file = data_dir / "action_targets.json"
+    action_input_file = data_dir / "action_input_sequences.npy"
+    action_targets_file = data_dir / "action_targets.npy"
     
     # Check if files exist
     for file_path in [gamestate_file, action_input_file, action_targets_file]:
