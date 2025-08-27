@@ -10,7 +10,7 @@ import json
 import time
 import argparse
 from pathlib import Path
-from setup_training import create_data_loaders, setup_model, setup_training
+from ilbot.training.setup import create_data_loaders, setup_model, setup_training
 from torch.optim.lr_scheduler import StepLR
 import torch.nn.functional as F
 import torch, os, numpy as np
@@ -413,7 +413,7 @@ def main():
     action_input_file = data_dir / "action_input_sequences.npy"
     action_targets_file = data_dir / "action_targets.npy"
     
-    from setup_training import OSRSDataset
+    from ilbot.training.setup import OSRSDataset
     dataset = OSRSDataset(
         gamestate_file=str(gamestate_file),
         action_input_file=str(action_input_file),

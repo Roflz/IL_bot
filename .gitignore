@@ -66,3 +66,27 @@ test_*.py
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.venv/
+.env
+
+# IDE/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Artifacts / data
+checkpoints/
+quickcheck_out/
+logs/
+training_results/
+data/**/*.npy
+!data/sample_data/**

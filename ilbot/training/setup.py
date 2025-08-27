@@ -20,8 +20,8 @@ from typing import Dict, List, Tuple, Optional
 import time
 import os
 
-from model.imitation_hybrid_model import ImitationHybridModel
-from model.action_tensor_loss import ActionTensorLoss
+from ilbot.models.imitation_hybrid_model import ImitationHybridModel
+from ilbot.models.losses import ActionTensorLoss
 
 class OSRSDataset(Dataset):
     """

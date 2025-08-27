@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 # Use your existing helpers
-from setup_training import OSRSDataset, create_data_loaders, setup_model
+from ilbot.training.setup import OSRSDataset, create_data_loaders, setup_model
 
 @torch.no_grad()
 def _masked_metrics_from_heads(heads, target, time_div: float = 1.0):
