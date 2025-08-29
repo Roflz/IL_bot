@@ -13,97 +13,80 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import json
-import argparse
 from pathlib import Path
-import matplotlib.pyplot as plt
-from typing import Dict, List, Tuple, Optional
-import time
+from typing import Dict, List, Tuple, Optional, Union, Any
 import os
 
-from ilbot.models.imitation_hybrid_model import ImitationHybridModel
-from ilbot.models.losses import ActionTensorLoss
+from ilbot.model.imitation_hybrid_model import ImitationHybridModel
+from ilbot.model.losses import ActionTensorLoss
 
 class OSRSDataset(Dataset):
     """
-    Dataset for OSRS training data compatible with the user's format.
-    
-    Data structure:
-    - Input: 10 timesteps of gamestate features (128 features each)
-    - Target: Variable-length action sequences (8 features per action)
+    Loads V1 or V2 targets automatically from a data_dir.
+    - V1: action_targets.npy  (B, A, 8)
+    - V2: actions_v2.npy      (B, A, 7)  + valid_mask.npy (B, A)
+    Shapes (T, G, A, Fin) are inferred from files – no constants.
     """
-    
-    def __init__(self, 
-                 gamestate_file: str,
-                 action_input_file: str,
-                 action_targets_file: str,
-                 sequence_length: int = 10,
-                 max_actions: int = 100):
+    def __init__(self, data_dir: Union[str, Path],
+                 targets_version: Optional[str] = None,
+                 use_log1p_time: bool = True,
+                 time_div_ms: int = 1000,
+                 time_clip_s: Optional[float] = None,
+                 enum_sizes: Optional[Dict[str, int]] = None,
+                 device: Optional[torch.device] = None):
+        self.data_dir = Path(data_dir)
+        self.manifest = self._load_manifest(self.data_dir)
+        # Prefer explicit arg, then manifest, then default to "v1"
+        self.targets_version = targets_version or self.manifest.get("targets_version", "v1")
+        # Enums (for v2 heads); prefer explicit arg, else manifest, else empty
+        self.enums = enum_sizes or self.manifest.get("enums", {})
         
-        # Load data files
-        self.gamestate_sequences = np.load(gamestate_file)  # (batch_size, 10, 128)
+        # Load data based on targets version
+        self.gamestate_sequences = np.load(self.data_dir/"gamestate_sequences.npy")      # (B, T, G)
+        self.action_input_sequences = np.load(self.data_dir/"action_input_sequences.npy")# (B, T, A, Fin)
         
-        # Load action input sequences as numpy array
-        self.action_input_sequences = np.load(action_input_file)  # (batch_size, 10, 100, 8)
-        
-        # Load action targets as numpy array  
-        self.action_targets = np.load(action_targets_file)  # (batch_size, 100, 8)
-        
-        self.sequence_length = sequence_length
-        self.max_actions = max_actions
-        self.n_sequences = len(self.gamestate_sequences)
-        
-        print(f"Dataset loaded successfully!")
+        # V2 tensors (present only when targets_version == "v2")
+        self.actions_v2 = None
+        if self.targets_version == "v2":
+            self.actions_v2 = np.load(self.data_dir/"actions_v2.npy")
+            self.valid_mask = np.load(self.data_dir/"valid_mask.npy").astype(bool)
+            self.action_targets = self.actions_v2
+        else:
+            # V1 fallback: keep current loading path
+            self.action_targets = np.load(self.data_dir/"action_targets.npy")
+            # infer mask from all-zero rows (padding)
+            self.valid_mask = (np.abs(self.action_targets).sum(axis=-1) > 0)
+
+        self.B, self.T, self.G = self.gamestate_sequences.shape
+        _, _, self.A, self.Fin = self.action_input_sequences.shape
+        self.n_sequences = self.B
+        print("Dataset loaded successfully!")
         print(f"  Gamestate sequences: {self.gamestate_sequences.shape}")
         print(f"  Action input sequences: {self.action_input_sequences.shape}")
-        print(f"  Action targets: {self.action_targets.shape}")
-        print(f"  Max actions per sequence: {max_actions}")
-        
-        # Validate data compatibility
-        assert len(self.gamestate_sequences) == len(self.action_input_sequences) == len(self.action_targets), \
-            "All data files must have the same number of sequences"
-        
-        assert self.gamestate_sequences.shape[1] == sequence_length, \
-            f"Gamestate sequences must have {sequence_length} timesteps"
-        
-        assert self.gamestate_sequences.shape[2] == 128, \
-            "Gamestate sequences must have 128 features"
-        
-        # Validate action sequence shapes
-        assert self.action_input_sequences.shape[1] == sequence_length, \
-            f"Action input sequences must have {sequence_length} timesteps"
-        
-        assert self.action_input_sequences.shape[2] == max_actions, \
-            f"Action input sequences must have {max_actions} actions per timestep"
-        
-        assert self.action_input_sequences.shape[3] == 8, \
-            "Action input sequences must have 8 features per action"
-        
-        assert self.action_targets.shape[1] == max_actions, \
-            f"Action targets must have {max_actions} actions"
-        
-        assert self.action_targets.shape[2] == 8, \
-            "Action targets must have 8 features per action"
-    
-    def __len__(self):
-        return self.n_sequences
-    
+        print(f"  Action targets: {self.action_targets.shape} ({self.targets_version})")
+        print(f"  Max actions per sequence: {self.A}")
+
+    def _load_manifest(self, root: Path) -> Dict[str, Any]:
+        manifest_path = root / "dataset_manifest.json"
+        if manifest_path.exists():
+            with open(manifest_path, "r") as f:
+                return json.load(f)
+        return {}
+
+    def get_enums(self) -> Dict[str, int]:
+        """Return enum sizes for v2 (button, key_action, key_id, scroll_y)."""
+        return self.enums
+
+    def __len__(self): return self.n_sequences
+
     def __getitem__(self, idx):
-        # Get gamestate sequence (10 timesteps, 128 features)
-        gamestate_sequence = self.gamestate_sequences[idx]  # (10, 128)
-        
-        # Get temporal sequence (all 10 timesteps)
-        temporal_sequence = gamestate_sequence  # (10, 128)
-        
-        # Get action input sequence (10 timesteps, 100 actions, 8 features)
-        action_sequence = self.action_input_sequences[idx]  # (10, 100, 8)
-        
-        # Get action target for this sequence
-        action_target = self.action_targets[idx]  # (100, 8)
-        
         return {
-            'temporal_sequence': torch.FloatTensor(temporal_sequence),
-            'action_sequence': torch.FloatTensor(action_sequence),
-            'action_target': torch.FloatTensor(action_target)
+            "temporal_sequence": torch.from_numpy(self.gamestate_sequences[idx]).float(),   # (T,G)
+            "action_sequence":   torch.from_numpy(self.action_input_sequences[idx]).float(),# (T,A,Fin)
+            "action_target":     torch.from_numpy(self.action_targets[idx]).float(),        # (A,7|8)
+            "valid_mask":        torch.from_numpy(self.valid_mask[idx]).bool(),             # (A,)
+            "targets_version":   self.targets_version,
+            "manifest":          self.manifest or {}
         }
     
     # Note: Old parsing methods removed since data is now loaded as numpy arrays
@@ -135,8 +118,15 @@ def optimize_batch_size_for_cuda(device: torch.device, base_batch_size: int = 8)
     
     return optimal_batch_size
 
+def print_cuda_info():
+    print("CUDA optimizations enabled")
+    if torch.cuda.is_available():
+        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        print(f"CUDA compute capability: {torch.cuda.get_device_capability(0)}")
+
 def create_data_loaders(
-    dataset=None,
+    dataset: OSRSDataset,
     train_split=0.8,
     batch_size=32,
     shuffle=True,
@@ -147,7 +137,7 @@ def create_data_loaders(
     
     # Optional: auto-optimize batch size for available CUDA memory
     if device and device.type == 'cuda' and not disable_cuda_batch_opt:
-        batch_size = optimize_batch_size_for_cuda(batch_size, device=device)
+        batch_size = optimize_batch_size_for_cuda(device, batch_size)
     
     # Split dataset
     n_train = int(len(dataset) * train_split)
@@ -176,12 +166,15 @@ def create_data_loaders(
     
     return train_loader, val_loader
 
-def setup_model(device: torch.device, 
-                gamestate_dim: int = 128,
-                action_dim: int = 8,
-                sequence_length: int = 10,
+def setup_model(device: torch.device,
+                *,
+                gamestate_dim: int,
+                action_dim: int,
+                sequence_length: int,
                 hidden_dim: int = 256,
-                num_attention_heads: int = 8) -> ImitationHybridModel:
+                num_attention_heads: int = 8,
+                head_version: str = "v1",
+                enum_sizes: Optional[Dict[str, Dict[str,int]]] = None) -> ImitationHybridModel:
     """Create and setup the imitation learning model"""
     
     print(f"Setting up model...")
@@ -197,7 +190,9 @@ def setup_model(device: torch.device,
         action_dim=action_dim,
         sequence_length=sequence_length,
         hidden_dim=hidden_dim,
-        num_attention_heads=num_attention_heads
+        num_attention_heads=num_attention_heads,
+        head_version=head_version,
+        enum_sizes=enum_sizes
     )
     
     # Move to device
@@ -282,129 +277,4 @@ def optimize_cuda_settings():
         torch.backends.cudnn.deterministic = False
         print("CUDA optimizations enabled")
 
-def main():
-    """Main setup function"""
-    print("OSRS Imitation Learning Training Setup")
-    print("=" * 60)
-    
-    # Optimize CUDA settings
-    optimize_cuda_settings()
-    
-    # Check CUDA availability
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    if torch.cuda.is_available():
-        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
-        print(f"CUDA memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
-        print(f"CUDA compute capability: {torch.cuda.get_device_capability(0)}")
-    else:
-        print("CUDA not available, using CPU")
-    print(f"Device: {device}")
-    
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Test OSRS Training Setup')
-    parser.add_argument('--data_dir', type=str, default="data/06_final_training_data",
-                       help='Path to training data directory (default: data/06_final_training_data)')
-    args = parser.parse_args()
-    
-    # Data file paths
-    data_dir = Path(args.data_dir)
-    gamestate_file = data_dir / "gamestate_sequences.npy"
-    action_input_file = data_dir / "action_input_sequences.npy"
-    action_targets_file = data_dir / "action_targets.npy"
-    
-    # Check if files exist
-    for file_path in [gamestate_file, action_input_file, action_targets_file]:
-        if not file_path.exists():
-            print(f"ERROR: Required file not found: {file_path}")
-            return
-    
-    print(f"Data files found successfully!")
-    
-    # Create dataset
-    print(f"\nCreating dataset...")
-    dataset = OSRSDataset(
-        gamestate_file=str(gamestate_file),
-        action_input_file=str(action_input_file),
-        action_targets_file=str(action_targets_file),
-        sequence_length=10,
-        max_actions=100
-    )
-    
-    # Create data loaders
-    print(f"\nCreating data loaders...")
-    train_loader, val_loader = create_data_loaders(
-        dataset=dataset,
-        train_split=0.8,
-        batch_size=8,
-        shuffle=True,
-        device=device
-    )
-    
-    # Setup model
-    print(f"\nSetting up model...")
-    model = setup_model(
-        device=device,
-        gamestate_dim=128,
-        action_dim=8,
-        sequence_length=10,
-        hidden_dim=256,
-        num_attention_heads=8
-    )
-    
-    # Setup training components
-    print(f"\nSetting up training components...")
-    criterion, optimizer = setup_training(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        device=device,
-        learning_rate=0.001,
-        weight_decay=1e-4
-    )
-    
-    # Test model compatibility
-    print(f"\nTesting model compatibility...")
-    compatibility_ok = test_model_compatibility(model, train_loader, device)
-    
-    if compatibility_ok:
-        print(f"\n{'='*60}")
-        print("SETUP COMPLETED SUCCESSFULLY!")
-        print(f"{'='*60}")
-        print("Your model is ready for training!")
-        print(f"\nNext steps:")
-        print(f"1. Run the training script")
-        print(f"2. Monitor training progress")
-        print(f"3. Evaluate model performance")
-        print(f"\nTraining configuration:")
-        print(f"  Model: ImitationHybridModel")
-        print(f"  Dataset: {len(dataset)} sequences")
-        print(f"  Batch size: {train_loader.batch_size}")
-        print(f"  Learning rate: 0.001")
-        print(f"  Device: {device}")
-        
-        # Save setup info
-        setup_info = {
-            'model_type': 'ImitationHybridModel',
-            'dataset_size': len(dataset),
-            'train_size': len(train_loader.dataset),
-            'val_size': len(val_loader.dataset),
-            'batch_size': train_loader.batch_size,
-            'learning_rate': 0.001,
-            'weight_decay': 1e-4,
-            'device': str(device),
-            'model_parameters': model.get_model_info()
-        }
-        
-        with open('training_setup_info.json', 'w') as f:
-            json.dump(setup_info, f, indent=2)
-        
-        print(f"\nSetup info saved to: training_setup_info.json")
-        
-    else:
-        print(f"\n{'='*60}")
-        print("SETUP FAILED!")
-        print(f"{'='*60}")
-        print("Please check the error messages above and fix any issues.")
 
-if __name__ == "__main__":
-    main()
