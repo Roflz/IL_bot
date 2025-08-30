@@ -322,8 +322,7 @@ class FeatureExtractor:
                 quantity = item.get('quantity', 1)
                 
                 # Track the item ID mapping
-                if item_id >= 0:
-                    self.track_id_mapping('Inventory', 'item_ids', item_id, item_name)
+                self.track_id_mapping('Inventory', 'item_ids', item_id, item_name)
                 
                 features.append(self.safe_float(item_id))  # Use OSRS item ID directly
                 
@@ -333,14 +332,15 @@ class FeatureExtractor:
                                           None, None, None, "item_id", "Inventory")
                 )
                 self.current_feature_index += 1
+
             else:
-                features.append(-1.0)  # No item
-                # Track empty slot mapping separately
-                # 3) Inventory empty slot sentinel (-1 -> "empty_slot")
-                self.track_id_mapping('Inventory', 'empty_slot_ids', -1, 'empty_slot')
+                # Always emit a feature and a mapping for empty slots, too
+                features.append(-1.0)
+                # Ensure -1 is in vocab as EMPTY
+                self.track_id_mapping('Inventory', 'item_ids', -1, 'EMPTY')
                 feature_mappings.append(
-                    create_feature_mapping(self.current_feature_index, f"inventory_slot_{i}", 
-                                          None, None, None, "item_id", "Inventory")
+                    create_feature_mapping(self.current_feature_index, f"inventory_slot_{i}",
+                                            None, None, None, "item_id", "Inventory")
                 )
                 self.current_feature_index += 1
         
@@ -379,14 +379,14 @@ class FeatureExtractor:
                 # Feature 1: Existence (1.0 if item exists, 0.0 if not)
                 features.append(1.0)
                 
-
-                
                 # Feature 2: Quantity
                 quantity = item.get('quantity', 0)
                 features.append(self.safe_float(quantity))
                 
                 # Feature 3: Slot
                 slot = item.get('slot', -1)
+                # Track the item ID mapping
+                self.track_id_mapping('Bank', 'slot_ids', slot, "EMPTY" if slot < 0 else f"slot_{slot}")
                 features.append(self.safe_float(slot))
                 
                 # Feature 4: Canvas X coordinate

@@ -209,6 +209,114 @@ class SimpleDataExplorer:
         except Exception:
             pass
     
+    # ---------- Column sorting methods ----------
+    def _on_column_click(self, event):
+        """Handle column header clicks for sorting"""
+        tree = event.widget
+        region = tree.identify("region", event.x, event.y)
+        if region == "heading":
+            column = tree.identify_column(event.x)
+            if column == "#0":
+                return  # Don't sort by the first column (usually just labels)
+
+            # Get the column name (without sort indicators)
+            col_name = tree.heading(column, "text")
+            # Remove any existing sort indicators
+            if col_name.endswith(" ↑") or col_name.endswith(" ↓"):
+                col_name = col_name[:-2]
+
+            # Toggle sort direction if clicking the same column
+            if self.sort_column == col_name:
+                self.sort_reverse = not self.sort_reverse
+            else:
+                self.sort_column = col_name
+                self.sort_reverse = False
+
+            # Sort the data using the clean column name
+            self._sort_tree_by_column(tree, col_name, self.sort_reverse)
+
+            # Update column header to show sort direction
+            self._update_sort_indicators(tree)
+
+    def _sort_tree_by_column(self, tree, column_name, reverse=False):
+        """Sort the tree data by the specified column"""
+        try:
+            # Get all items
+            items = [(tree.set(item, column_name), item) for item in tree.get_children()]
+
+            # Determine if this column is numeric by checking the first few values
+            numeric_column = True
+            for value, _ in items[:min(5, len(items))]:  # Check first 5 items
+                try:
+                    float(value)
+                except (ValueError, TypeError):
+                    numeric_column = False
+                    break
+
+            # Sort items with consistent type handling
+            if numeric_column:
+                # For numeric columns, convert all to float for consistent comparison
+                items.sort(key=lambda x: float(x[0]) if x[0] else 0.0, reverse=reverse)
+            else:
+                # For string columns, use string comparison
+                items.sort(key=lambda x: str(x[0]).lower() if x[0] else "", reverse=reverse)
+
+            # Reorder items in the tree
+            for index, (value, item) in enumerate(items):
+                tree.move(item, "", index)
+
+        except Exception as e:
+            self._log(f"Sorting failed for column {column_name}: {e}", level="error")
+
+    def _update_sort_indicators(self, tree):
+        """Update column headers to show sort direction"""
+        for col in tree["columns"]:
+            current_text = tree.heading(col, "text")
+            # Remove existing sort indicators
+            if current_text.endswith(" ↑") or current_text.endswith(" ↓"):
+                current_text = current_text[:-2]
+
+            # Add sort indicator
+            if current_text == self.sort_column:  # Compare clean text, not column ID
+                if self.sort_reverse:
+                    tree.heading(col, text=f"{current_text} ↓")
+                else:
+                    tree.heading(col, text=f"{current_text} ↑")
+            else:
+                tree.heading(col, text=current_text)
+
+    def _configure_sortable_columns(self, tree):
+        """Configure columns to be sortable by binding click events to headers."""
+        # Initialize sort state if not already present
+        if not hasattr(self, 'sort_column'):
+            self.sort_column = None
+            self.sort_reverse = False
+
+        # Bind click event for all columns
+        for col in tree["columns"]:
+            tree.heading(col, command=lambda c=col: self._on_column_click_wrapper(tree, c))
+        # Also bind for the #0 column (first column, usually for row labels)
+        tree.heading("#0", command=lambda c="#0": self._on_column_click_wrapper(tree, c))
+
+    def _on_column_click_wrapper(self, tree, column_id):
+        """Wrapper to simulate event object for _on_column_click."""
+        # Create a mock event object with the necessary attributes
+        class MockEvent:
+            def __init__(self, widget, column_id):
+                self.widget = widget
+                self.x = 0 # Dummy x, y as identify("region") is not used in _on_column_click anymore
+                self.y = 0
+                self._column_id = column_id
+
+            def identify_column(self, x):
+                return self._column_id
+
+            def identify(self, region_type, x, y):
+                return "heading" # Always return "heading" for this wrapper
+
+        mock_event = MockEvent(tree, column_id)
+        self._on_column_click(mock_event)
+    
     def setup_ui(self):
         # Simple controls (top)
         control_frame = ttk.Frame(self.root)
@@ -539,6 +647,19 @@ class SimpleDataExplorer:
         filename = lb.get(sel[0])
         file_path = os.path.join(self.data_dir, folder, filename)
         self._log("on_tab_file_select", folder=folder, filename=filename, path=file_path)
+        
+        # Save current position before switching files
+        if hasattr(self, 'current_gamestate') and self.current_gamestate is not None:
+            if hasattr(self, 'current_file_type') and self.current_file_type:
+                if not hasattr(self, 'saved_gamestate_positions'):
+                    self.saved_gamestate_positions = {}
+                
+                # Create a key for the current file
+                if hasattr(self, 'current_file_path') and self.current_file_path:
+                    current_key = f"{self.current_file_type}_{self.current_file_path}"
+                    self.saved_gamestate_positions[current_key] = self.current_gamestate
+                    self._log(f"Saved position before switch: {self.current_gamestate} for {current_key}")
+        
         self.current_folder = folder
         self.current_file_path = file_path
         try:
@@ -696,13 +817,20 @@ class SimpleDataExplorer:
             self._log("load_file: start", path=file_path)
             
             # Save current gamestate position before switching files
-            if hasattr(self, 'current_numpy_data') and self.current_numpy_data is not None:
-                # Save the current position for this data type
-                if hasattr(self, 'saved_gamestate_positions'):
-                    data_key = f"{self.current_file_type}_{id(self.current_numpy_data)}"
+            if hasattr(self, 'current_gamestate') and self.current_gamestate is not None:
+                if hasattr(self, 'current_file_type') and self.current_file_type:
+                    # Save the current position for this file type
+                    if not hasattr(self, 'saved_gamestate_positions'):
+                        self.saved_gamestate_positions = {}
+                    
+                    # Create a more reliable key for saving positions
+                    if hasattr(self, 'current_numpy_data') and self.current_numpy_data is not None:
+                        data_key = f"{self.current_file_type}_{id(self.current_numpy_data)}"
+                    else:
+                        data_key = f"{self.current_file_type}_{file_path}"
+                    
                     self.saved_gamestate_positions[data_key] = self.current_gamestate
-                else:
-                    self.saved_gamestate_positions = {}
+                    self._log(f"Saved gamestate position: {self.current_gamestate} for {data_key}")
             
             # Reset current gamestate index when switching files to prevent out-of-range errors
             self.current_gamestate = 0
@@ -775,8 +903,20 @@ class SimpleDataExplorer:
                             return
                         else:
                             # Position is out of range, remove it
+                            self._log(f"Removing out-of-range position: {saved_pos} (max: {self.total_gamestates-1})")
                             del self.saved_gamestate_positions[key]
                             break
+            
+            # If no exact match found, try to find any position for this file type
+            # This handles cases where the file path might be different but type is same
+            for key, saved_pos in list(self.saved_gamestate_positions.items()):
+                if key.startswith(self.current_file_type):
+                    if hasattr(self, 'total_gamestates') and self.total_gamestates > 0:
+                        if 0 <= saved_pos < self.total_gamestates:
+                            self.current_gamestate = saved_pos
+                            self.gamestate_var.set(str(saved_pos))
+                            self._log(f"Restored gamestate position (fallback): {saved_pos} for {self.current_file_type}")
+                            return
     
     def display_numpy(self, data):
         self._log("display_numpy: enter",
@@ -789,8 +929,35 @@ class SimpleDataExplorer:
         self.tree.delete(*self.tree.get_children())
         # Avoid setting empty () columns which can cause Tk errors on some builds
         
+        # Check if this is a valid_mask file (2D array with boolean/integer mask values)
+        if len(data.shape) == 2 and self._is_valid_mask_file():
+            self._log("display_numpy: 2D valid_mask view")
+            # This is a valid_mask file - show with meaningful column names and formatting
+            n_features = data.shape[1]
+            cols = tuple([f"F{i}" for i in range(n_features)])
+            self.tree.configure(columns=cols, displaycolumns=cols)
+            self.tree.column("#0", width=120, stretch=tk.NO)
+            self.tree.heading("#0", text="Gamestate")
+            
+            for i, name in enumerate(cols):
+                self.tree.column(name, anchor=tk.CENTER, width=80, minwidth=60)
+                self.tree.heading(name, text=f"F{i}")
+            
+            # Store the mask data for gamestate navigation
+            self.state_features_data = data
+            self.current_file_type = "state_features"
+            self.total_gamestates = data.shape[0]
+            
+            # Update gamestate counter
+            self.gamestate_var.set(str(self.current_gamestate))
+            self.total_gamestates_label.config(text=f"of {self.total_gamestates}")
+            
+            # Show mask for current gamestate
+            self.display_current_gamestate_features()
+            return
+        
         # Check if this is a features file (2D array with 128 features)
-        if len(data.shape) == 2 and data.shape[1] == 128:
+        elif len(data.shape) == 2 and data.shape[1] == 128:
             # Save current position before changing file type
             if hasattr(self, 'current_file_type') and self.current_file_type and hasattr(self, 'total_gamestates') and self.total_gamestates > 0:
                 old_key = f"{self.current_file_type}_{id(getattr(self, 'current_numpy_data', None))}"
@@ -1524,8 +1691,11 @@ class SimpleDataExplorer:
         # Get the features for the current gamestate
         features = self.state_features_data[self.current_gamestate]
         
-        # Load feature mappings if not already loaded
-        if not hasattr(self, 'feature_mappings'):
+        # Check if this is a valid_mask file
+        is_valid_mask = self._is_valid_mask_file()
+        
+        # Load feature mappings if not already loaded (only for regular features, not masks)
+        if not is_valid_mask and not hasattr(self, 'feature_mappings'):
             try:
                 # Get the session root directory first
                 session_root = self._get_session_root_dir()
@@ -1555,44 +1725,144 @@ class SimpleDataExplorer:
                 self._log(f"Warning: Could not load feature mappings: {e}", level="warning")
                 self.feature_mappings = None
         
-        # Clear the table and set up columns for state features
+        # Clear the table and set up columns
         self.tree.delete(*self.tree.get_children())
-        self.tree.configure(columns=("feature_index", "feature_value"),
-                            displaycolumns=("feature_index", "feature_value"))
-        self.tree.column("#0", width=100, stretch=tk.NO)
-        self.tree.column("feature_index", anchor=tk.CENTER, width=100)
-        self.tree.column("feature_value", anchor=tk.CENTER, width=200)
-        self.tree.heading("#0", text="Row")
-        self.tree.heading("feature_index", text="Index")
-        self.tree.heading("feature_value", text="Value")
         
-        # Display each feature as a row
-        for i, feature_value in enumerate(features):
-            try:
-                if isinstance(feature_value, (int, float, np.number)):
-                    # Use mapping if enabled, otherwise format as float
-                    if self.show_mapped_values:
-                        self._log(f"Mapping feature {i}: {feature_value} (show_mapped_values={self.show_mapped_values})")
-                        formatted_value = self._map_feature_value(feature_value, i)
-                    else:
-                        formatted_value = f"{feature_value:.6f}"
+        if is_valid_mask:
+            # For valid_mask files, show each gamestate as a row with all features as columns
+            n_features = len(features)
+            cols = tuple([f"F{i}" for i in range(n_features)])
+            self.tree.configure(columns=cols, displaycolumns=cols)
+            self.tree.column("#0", width=120, stretch=tk.NO)
+            self.tree.heading("#0", text="Gamestate")
+            
+            # Set reasonable column widths for mask files
+            col_width = min(80, max(60, 800 // n_features))  # Adaptive width
+            for i, name in enumerate(cols):
+                self.tree.column(name, anchor=tk.CENTER, width=col_width, minwidth=50)
+                # Use more descriptive column headers for mask files
+                if n_features <= 100:  # Only show feature numbers for reasonable counts
+                    self.tree.heading(name, text=f"F{i}")
                 else:
+                    # For very large feature counts, show abbreviated headers
+                    if i % 10 == 0:
+                        self.tree.heading(name, text=f"F{i}")
+                    else:
+                        self.tree.heading(name, text="")
+            
+            # Configure sortable columns for valid_mask files
+            self._configure_sortable_columns(self.tree)
+            
+            # Display the current gamestate's features as columns
+            values = []
+            for i, feature_value in enumerate(features):
+                try:
+                    if isinstance(feature_value, (int, float, np.number)):
+                        # For mask files, show integers as integers, floats as floats
+                        if feature_value == int(feature_value):
+                            formatted_value = str(int(feature_value))
+                        else:
+                            formatted_value = f"{feature_value:.3f}"
+                    else:
+                        formatted_value = str(feature_value)
+                except:
                     formatted_value = str(feature_value)
-            except:
-                formatted_value = str(feature_value)
+                values.append(formatted_value)
             
-            # Use actual feature name if available, otherwise fall back to "Feature {i}"
-            if self.feature_mappings and i < len(self.feature_mappings):
-                feature_name = self.feature_mappings[i].get('feature_name', f'Feature {i}')
-            else:
-                feature_name = f'Feature {i}'
+            # Insert the current gamestate as a single row
+            item = self.tree.insert("", tk.END, text=f"Gamestate {self.current_gamestate}", values=values)
             
-            self.tree.insert("", tk.END, text=feature_name, values=(i, formatted_value))
-        
-
+            # Add color coding for mask values to make them more readable
+            try:
+                for i, val in enumerate(values):
+                    if val == "0" or val == "0.0":
+                        # Zero values (invalid/disabled) - light red background
+                        self.tree.tag_configure("mask_zero", background="#ffebee")
+                        self.tree.set(item, f"F{i}", val)
+                        self.tree.item(item, tags=("mask_zero",))
+                    elif val == "1" or val == "1.0":
+                        # One values (valid/enabled) - light green background
+                        self.tree.tag_configure("mask_one", background="#e8f5e8")
+                        self.tree.set(item, f"F{i}", val)
+                        self.tree.item(item, tags=("mask_one",))
+                    elif val == "-1" or val == "-1.0":
+                        # Negative values - light orange background
+                        self.tree.tag_configure("mask_negative", background="#fff3e0")
+                        self.tree.set(item, f"F{i}", val)
+                        self.tree.item(item, tags=("mask_negative",))
+            except Exception as e:
+                self._log(f"Error applying mask colors: {e}", level="warning")
+            
+            # Add a summary row showing mask statistics
+            try:
+                # Count different mask values
+                zero_count = sum(1 for v in values if v == "0" or v == "0.0")
+                one_count = sum(1 for v in values if v == "1" or v == "1.0")
+                neg_count = sum(1 for v in values if v == "-1" or v == "-1.0")
+                other_count = len(values) - zero_count - one_count - neg_count
+                
+                # Create summary text
+                summary_parts = []
+                if zero_count > 0:
+                    summary_parts.append(f"0: {zero_count}")
+                if one_count > 0:
+                    summary_parts.append(f"1: {one_count}")
+                if neg_count > 0:
+                    summary_parts.append(f"-1: {neg_count}")
+                if other_count > 0:
+                    summary_parts.append(f"other: {other_count}")
+                
+                summary_text = f"Mask Summary: {', '.join(summary_parts)}"
+                
+                # Insert summary row with different styling
+                summary_item = self.tree.insert("", tk.END, text="Summary", values=[""] * n_features)
+                self.tree.tag_configure("mask_summary", background="#f0f0f0", font=("Arial", 9, "bold"))
+                self.tree.item(summary_item, tags=("mask_summary",))
+                
+                # Update status with mask statistics
+                self.status_var.set(f"Gamestate {self.current_gamestate}: {summary_text}")
+                
+            except Exception as e:
+                self._log(f"Error creating mask summary: {e}", level="warning")
+        else:
+            # Regular features display (existing logic)
+            self.tree.configure(columns=("feature_index", "feature_value"),
+                                displaycolumns=("feature_index", "feature_value"))
+            self.tree.column("#0", width=100, stretch=tk.NO)
+            self.tree.column("feature_index", anchor=tk.CENTER, width=100)
+            self.tree.column("feature_value", anchor=tk.CENTER, width=200)
+            self.tree.heading("#0", text="Row")
+            self.tree.heading("feature_index", text="Index")
+            self.tree.heading("feature_value", text="Value")
+            
+            # Display each feature as a row
+            for i, feature_value in enumerate(features):
+                try:
+                    if isinstance(feature_value, (int, float, np.number)):
+                        # Use mapping if enabled, otherwise format as float
+                        if self.show_mapped_values:
+                            self._log(f"Mapping feature {i}: {feature_value} (show_mapped_values={self.show_mapped_values})")
+                            formatted_value = self._map_feature_value(feature_value, i)
+                        else:
+                            formatted_value = f"{feature_value:.6f}"
+                    else:
+                        formatted_value = str(feature_value)
+                except:
+                    formatted_value = str(feature_value)
+                
+                # Use actual feature name if available, otherwise fall back to "Feature {i}"
+                if self.feature_mappings and i < len(self.feature_mappings):
+                    feature_name = self.feature_mappings[i].get('feature_name', f'Feature {i}')
+                else:
+                    feature_name = f'Feature {i}'
+                
+                self.tree.insert("", tk.END, text=feature_name, values=(i, formatted_value))
         
         # Update status to show current gamestate
-        self.status_var.set(f"Showing gamestate {self.current_gamestate} of {self.total_gamestates} - {len(features)} features")
+        if is_valid_mask:
+            self.status_var.set(f"Showing gamestate {self.current_gamestate} of {self.total_gamestates} - {len(features)} mask features")
+        else:
+            self.status_var.set(f"Showing gamestate {self.current_gamestate} of {self.total_gamestates} - {len(features)} features")
         
         # Restore scroll position if we have a saved one
         if hasattr(self, 'state_features_scroll_position'):
@@ -1964,6 +2234,14 @@ class SimpleDataExplorer:
         try:
             name = os.path.basename(self.current_file_path or "")
             return name.endswith("_action_tensors.json") or name == "raw_action_tensors.json"
+        except Exception:
+            return False
+    
+    def _is_valid_mask_file(self) -> bool:
+        """True if the selected file is valid_mask.npy."""
+        try:
+            name = os.path.basename(self.current_file_path or "")
+            return name == "valid_mask.npy"
         except Exception:
             return False
 

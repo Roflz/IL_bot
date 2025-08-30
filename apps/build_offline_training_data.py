@@ -38,7 +38,7 @@ Examples:
   python tools/build_offline_training_data.py --use-existing-features
   
   # Extract features from gamestates (slower)
-  python tools/build_offline_training_data.py --extract-features
+  python tools.build_offline_training_data.py --extract-features
   
   # Custom data directory
   python tools/build_offline_training_data.py --data-dir /path/to/data --use-existing-features
@@ -227,7 +227,7 @@ def process_fresh(session_root, gamestates_dir, actions_csv,
     # ---- 1) Extract features fresh -------------------------------------------------
     print("🔍 Extracting features from session gamestates (fresh)…")
     # IMPORTANT: do NOT write global mappings; we will save under the session mappings dir.
-    features, feature_mappings, feature_timestamps = extract_features_from_gamestates(
+    features, feature_mappings, id_mappings = extract_features_from_gamestates(
         gamestates, save_mappings=False
     )
 
@@ -256,7 +256,7 @@ def process_fresh(session_root, gamestates_dir, actions_csv,
     normalized_features = normalize_features(trimmed_features, str(mappings_dir / "feature_mappings.json"))
     # Save raw features + ids
     np.save(raw_dir / "state_features.npy", features)
-    (mappings_dir / "id_mappings.json").write_text(_json.dumps(feature_timestamps, indent=2))
+    (mappings_dir / "id_mappings.json").write_text(_json.dumps(id_mappings, indent=2, ensure_ascii=False))
     
     # ---- 7) Build sequences --------------------------------------------------------
     print("Creating temporal sequences from raw features…")
@@ -458,13 +458,40 @@ def _v1_to_v2(at_v1, time_div, time_clip, time_transform, v1_time_scale):
     sy_v1  = at_v1[..., 7].astype(np.float32)   # V1 scroll dy in {-1,0,+1}
 
     # ----- build Δt per row along action axis -----
-    # Convert to ms, diff along the 100-slot axis, keep last Δt = previous Δt, clamp non-negative
-    ts_ms = t_raw * float(v1_time_scale)                     # (N,100) in ms
-    dt_ms = np.diff(ts_ms, axis=1, append=ts_ms[..., -1:])
-    if dt_ms.shape[-1] >= 2:
-        dt_ms[..., -1] = dt_ms[..., -2]
-    dt_ms = np.clip(dt_ms, 0.0, None)
-    # scale to seconds and apply optional clip/log1p
+    # Convert to ms, then compute time deltas: time until next interaction
+    ts_ms = (t_raw * float(v1_time_scale)).astype(np.float64)  # (N,100) ms
+    N, L = ts_ms.shape
+    dt_ms = np.zeros_like(ts_ms, dtype=np.float64)
+
+    # Precompute the first valid timestamp in each sequence (for look-ahead).
+    first_valid_ts = np.full(N, np.nan, dtype=np.float64)
+    for i in range(N):
+        vmask = ts_ms[i] > 0
+        if vmask.any():
+            first_valid_ts[i] = ts_ms[i, np.argmax(vmask)]
+
+    # Compute deltas only on valid positions; last valid in a window looks into future windows.
+    for i in range(N):
+        vmask = ts_ms[i] > 0
+        if not vmask.any():
+            continue
+        vidx = np.flatnonzero(vmask)      # indices of valid events in this window
+        t_i  = ts_ms[i, vidx]
+        # Intra-window Δt between consecutive valid events
+        if len(vidx) > 1:
+            dt_ms[i, vidx[:-1]] = np.maximum(t_i[1:] - t_i[:-1], 0.0)
+        # Last valid event in this window → find next valid event in future windows
+        j_last = vidx[-1]
+        next_ts = np.nan
+        for k in range(i + 1, N):
+            if not np.isnan(first_valid_ts[k]):
+                next_ts = first_valid_ts[k]
+                break
+        if not np.isnan(next_ts):
+            dt_ms[i, j_last] = max(next_ts - ts_ms[i, j_last], 0.0)
+        # Else leave 0.0 if truly no future event (end-of-session).
+    
+    # Scale to seconds and apply optional clip/log1p
     dt_sec = dt_ms / float(time_div)
     if time_clip is not None:
         dt_sec = np.clip(dt_sec, 0.0, float(time_clip))
@@ -487,8 +514,8 @@ def _v1_to_v2(at_v1, time_div, time_clip, time_transform, v1_time_scale):
                      key_id.astype(np.float32),
                      scroll_y.astype(np.float32)], axis=-1).astype(np.float32)
     # Valid iff any event signal present (don't use absolute t for validity)
-    valid_mask = ((ty > 0) | (b1 > 0) | (kid_v1 > 0) | (sy_v1 != 0))
-    return a_v2, valid_mask
+    pad_mask = ~np.all(a_v2 == 0.0, axis=-1)
+    return a_v2, pad_mask
 
 
 

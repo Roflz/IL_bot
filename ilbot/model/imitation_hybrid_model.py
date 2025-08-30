@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Dict, Tuple, Optional, Literal
+from .. import config as CFG
 
 class MultiHeadAttention(nn.Module):
     """Multi-head self-attention mechanism for gamestate features"""
@@ -54,86 +55,92 @@ class MultiHeadAttention(nn.Module):
 class GamestateEncoder(nn.Module):
     """Encoder for gamestate features with feature-type-specific encoding and self-attention"""
     
-    def __init__(self, input_dim: int = 128, hidden_dim: int = 256, num_heads: int = 8):
+    def __init__(self, input_dim: int = 128, hidden_dim: int = 256, num_heads: int = 8, feature_spec: dict | None = None):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
+        self.feature_spec = feature_spec or {}
+        groups = (self.feature_spec.get("group_indices") or {})
+        self.idx_cat   = list(feature_spec["group_indices"].get("categorical", []))
+        self.idx_cont  = list(feature_spec["group_indices"].get("continuous", []))
+        self.idx_bool  = list(feature_spec["group_indices"].get("boolean", []))
+        self.idx_count = list(feature_spec["group_indices"].get("counts", []))
+        self.idx_angle = list(feature_spec["group_indices"].get("angles", []))
+        self.idx_time  = list(feature_spec["group_indices"].get("time", []))
+
+        n_cont  = len(self.idx_cont)
+        n_bool  = len(self.idx_bool)
+        n_count = len(self.idx_count)
+        n_angle = len(self.idx_angle)
+        n_time  = len(self.idx_time)
+
+
+        # Categorical embedding: one shared table with per-column offsets
+        total_vocab = int(self.feature_spec.get("total_cat_vocab", 0))
+        emb_dim_cat = max(hidden_dim // 16, 8)
+        self.has_cat = bool(self.idx_cat) and total_vocab > 0
+        if self.has_cat:
+            self.cat_offsets = torch.tensor(self.feature_spec["cat_offsets"], dtype=torch.long)  # len = n_cat_cols
+            self.cat_unknowns = torch.tensor(self.feature_spec["unknown_index_per_field"], dtype=torch.long)
+            self.categorical_emb = nn.Embedding(total_vocab, emb_dim_cat)
+
+        # small MLPs per group (reuse your existing heads if you already had them)
+        emb_dim_cont = max(hidden_dim // 8, 16)
+        emb_dim_bool = max(hidden_dim // 16, 8)
+        emb_dim_count = max(hidden_dim // 16, 8)
+        emb_dim_angle = max(hidden_dim // 16, 8)
+        emb_dim_time = max(hidden_dim // 16, 8)
         
-        # Feature-type-specific encoders based on feature_mappings.json
-        # Group features by data type for optimal encoding
-        
-        # Continuous/Coordinate features (world_coord, camera_coord, screen_coord, angles, time)
-        self.continuous_encoder = nn.Sequential(
-            nn.Linear(1, hidden_dim // 16),  # 1 -> 16
-            nn.LayerNorm(hidden_dim // 16),
+        # Continuous/Coordinate features
+        self._cont_mlp = nn.Sequential(
+            nn.Linear(max(1, n_cont), emb_dim_cont),
+            nn.LayerNorm(emb_dim_cont),
             nn.ReLU(),
             nn.Dropout(0.1)
         )
-        
-        # Categorical features (item_ids, animation_ids, slot_ids, object_ids, hashed_strings)
-        # Use embeddings for proper categorical encoding
-        # Assume vocabulary size of 10000 for categorical features (can be tuned)
-        self.categorical_embedding = nn.Embedding(10000, hidden_dim // 16)
-        self.categorical_encoder = nn.Sequential(
-            nn.LayerNorm(hidden_dim // 16),
-            nn.ReLU(),
-            nn.Dropout(0.1)
-        )
-        
+
         # Boolean features
-        self.boolean_encoder = nn.Sequential(
-            nn.Linear(1, hidden_dim // 16),  # 1 -> 16
-            nn.LayerNorm(hidden_dim // 16),
+        self._bool_mlp = nn.Sequential(
+            nn.Linear(max(1, n_bool), emb_dim_bool),
+            nn.LayerNorm(emb_dim_bool),
             nn.ReLU(),
             nn.Dropout(0.1)
         )
-        
+
         # Count features
-        self.count_encoder = nn.Sequential(
-            nn.Linear(1, hidden_dim // 16),  # 1 -> 16
-            nn.LayerNorm(hidden_dim // 16),
+        self._count_mlp = nn.Sequential(
+            nn.Linear(max(1, n_count), emb_dim_count),
+            nn.LayerNorm(emb_dim_count),
             nn.ReLU(),
             nn.Dropout(0.1)
         )
-        
+
         # Time features (timestamps, durations)
-        self.time_encoder = nn.Sequential(
-            nn.Linear(1, hidden_dim // 16),  # 1 -> 16
-            nn.LayerNorm(hidden_dim // 16),
+        self._time_mlp = nn.Sequential(
+            nn.Linear(max(1, n_time), emb_dim_time),
+            nn.LayerNorm(emb_dim_time),
             nn.ReLU(),
             nn.Dropout(0.1)
         )
-        
+
         # Angle features (camera pitch/yaw)
-        self.angle_encoder = nn.Sequential(
-            nn.Linear(1, hidden_dim // 16),  # 1 -> 16
-            nn.LayerNorm(hidden_dim // 16),
+        self._angle_mlp = nn.Sequential(
+            nn.Linear(max(1, n_angle), emb_dim_angle),
+            nn.LayerNorm(emb_dim_angle),
             nn.ReLU(),
             nn.Dropout(0.1)
         )
-        
-        # Feature grouping based on feature_mappings.json - CORRECTED INDICES
-        # These indices are based on the actual feature structure analysis
-        self.continuous_indices = [0, 1, 9, 10, 11, 46, 47, 51, 52, 56, 57, 61, 62, 68, 69, 71, 72, 74, 75, 77, 78, 80, 81, 83, 84, 86, 87, 89, 90, 92, 93, 95, 96, 98, 99, 101, 102, 104, 105, 107, 108, 110, 111, 113, 114, 116, 117, 119, 120, 122, 123]  # world_coord, camera_coord, screen_coord
-        self.categorical_indices = [2, 4, 5, 6, 7, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 45, 50, 55, 60, 67, 70, 73, 76, 79, 82, 85, 88, 91, 94, 97, 100, 103, 106, 109, 112, 115, 118, 121, 124, 125, 126, 63]  # item_ids, animation_ids, object_ids, npc_ids, slot_ids, hashed_strings, etc.
-        self.boolean_indices = [3, 42, 43, 48, 53, 58]  # boolean flags
-        self.count_indices = [44, 49, 54, 59, 66]  # counts
-        self.time_indices = [8, 64, 65, 127]  # timestamps, durations
-        self.angle_indices = [12, 13]  # camera pitch/yaw
         
         # Feature combiner
-        self.feature_combiner = nn.Sequential(
-            nn.Linear(2048, hidden_dim),  # 51*16 + 60*16 + 6*16 + 5*16 + 4*16 + 2*16 = 2048 -> 256
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1)
-        )
-        
-        # Feature preprocessing for proper scaling
-        self.feature_preprocessor = nn.Sequential(
-            nn.LayerNorm(input_dim),  # Normalize across the 128 features
-            nn.Dropout(0.05)  # Light dropout for regularization
-        )
+        in_dims = []
+        if self.has_cat:    in_dims.append(emb_dim_cat * len(self.idx_cat))
+        if self.idx_cont:   in_dims.append(emb_dim_cont)
+        if self.idx_bool:   in_dims.append(emb_dim_bool)
+        if self.idx_count:  in_dims.append(emb_dim_count)
+        if self.idx_angle:  in_dims.append(emb_dim_angle)
+        if self.idx_time:   in_dims.append(emb_dim_time)
+        fused = sum(in_dims) if in_dims else hidden_dim
+        self.fuse = nn.Linear(fused, hidden_dim)
         
         # Self-attention layers
         self.attention1 = MultiHeadAttention(hidden_dim, num_heads, dropout=0.1)
@@ -151,52 +158,60 @@ class GamestateEncoder(nn.Module):
         self.norm1 = nn.LayerNorm(hidden_dim)
         self.norm2 = nn.LayerNorm(hidden_dim)
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        batch_size, seq_len, features = x.shape
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # x: (B, T, D)
+        B, T, D = x.shape
+        chunks = []
         
-        # IMPORTANT: do NOT normalize before extracting categorical IDs.
-        # Keep normalization inside type-specific blocks/encoders.
-        x_flat = x.view(-1, features)
+        if self.has_cat and self.idx_cat:
+            # Gather categorical columns
+            cats = x[..., self.idx_cat].long()                        # (B,T,n_cat)
+            # Map raw ids → field-local ids if you pre-remap offline; otherwise, cap negatives to UNKNOWN
+            cats = torch.where(cats < 0, torch.zeros_like(cats), cats)
+            # Apply per-column offsets into shared table
+            device = cats.device
+            offsets = self.cat_offsets.to(device)                     # (n_cat,)
+            cats_off = cats + offsets.view(1,1,-1)                    # (B,T,n_cat)
+            # Unknown handling: any id >= field vocab becomes UNKNOWN (last bin in that field)
+            # Build per-column upper bounds: offset + (vocab_size-1) -- unknown index
+            unknowns = self.cat_unknowns.to(device) + offsets.to(device)
+            # mask out-of-range (>= unknown index) to UNKNOWN (exact index)
+            cats_off = torch.minimum(cats_off, unknowns.view(1,1,-1))
+            cat_emb = self.categorical_emb(cats_off)                   # (B,T,n_cat,emb)
+            chunks.append(cat_emb.reshape(B, T, -1))
+
+        # Continuous
+        if self.idx_cont:
+            cont = x[..., self.idx_cont].float()
+            # normalize if you already had stats; else passthrough
+            cont = self._cont_mlp(cont)  # define this mlp as you already had
+            chunks.append(cont)
         
-        # Encode features by type
-        continuous_features = x_flat[:, self.continuous_indices]
-        categorical_features = x_flat[:, self.categorical_indices]
-        boolean_features = x_flat[:, self.boolean_indices]
-        count_features = x_flat[:, self.count_indices]
-        time_features = x_flat[:, self.time_indices]
-        angle_features = x_flat[:, self.angle_indices]
+        # Bool
+        if self.idx_bool:
+            boo = x[..., self.idx_bool].float()
+            boo = self._bool_mlp(boo)
+            chunks.append(boo)
         
-        # Encode each feature type
-        continuous_encoded = self.continuous_encoder(continuous_features.unsqueeze(-1))  # (batch*seq, n_continuous, 16)
+        # Counts
+        if self.idx_count:
+            cnt = x[..., self.idx_count].float()
+            cnt = self._count_mlp(cnt)
+            chunks.append(cnt)
         
-        # Categorical features: convert to embeddings then encode
-        categorical_features_int = categorical_features.long().clamp(0, 9999)  # Ensure valid indices
-        categorical_embedded = self.categorical_embedding(categorical_features_int)  # (batch*seq, n_categorical, 16)
-        categorical_encoded = self.categorical_encoder(categorical_embedded)  # (batch*seq, n_categorical, 16)
+        # Angles
+        if self.idx_angle:
+            ang = x[..., self.idx_angle].float()
+            ang = self._angle_mlp(ang)
+            chunks.append(ang)
         
-        boolean_encoded = self.boolean_encoder(boolean_features.unsqueeze(-1))  # (batch*seq, n_boolean, 16)
-        count_encoded = self.count_encoder(count_features.unsqueeze(-1))  # (batch*seq, n_count, 16)
-        time_encoded = self.time_encoder(time_features.unsqueeze(-1))  # (batch*seq, n_time, 16)
-        angle_encoded = self.angle_encoder(angle_features.unsqueeze(-1))  # (batch*seq, n_angle, 16)
-        
-        # Flatten the encoded features: (batch*seq, n_features, 16) -> (batch*seq, n_features * 16)
-        continuous_flat = continuous_encoded.view(continuous_encoded.size(0), -1)  # (batch*seq, n_continuous * 16)
-        categorical_flat = categorical_encoded.view(categorical_encoded.size(0), -1)  # (batch*seq, n_categorical * 16)
-        boolean_flat = boolean_encoded.view(boolean_encoded.size(0), -1)  # (batch*seq, n_boolean * 16)
-        count_flat = count_encoded.view(count_encoded.size(0), -1)  # (batch*seq, n_count * 16)
-        time_flat = time_encoded.view(time_encoded.size(0), -1)  # (batch*seq, n_time * 16)
-        angle_flat = angle_encoded.view(angle_encoded.size(0), -1)  # (batch*seq, n_angle * 16)
-        
-        # Combine all encoded features
-        combined_features = torch.cat([
-            continuous_flat, categorical_flat, boolean_flat, count_flat, time_flat, angle_flat
-        ], dim=1)  # (batch*seq, total_encoded_features)
-        
-        # Final feature combination
-        x_encoded = self.feature_combiner(combined_features)  # (batch*seq, hidden_dim)
-        
-        # Reshape back: (batch_size, seq_len, hidden_dim)
-        x_encoded = x_encoded.view(batch_size, seq_len, -1)
+        # Time
+        if self.idx_time:
+            tim = x[..., self.idx_time].float()
+            tim = self._time_mlp(tim)
+            chunks.append(tim)
+
+        h = torch.cat(chunks, dim=-1) if len(chunks) > 1 else chunks[0]
+        x_encoded = torch.relu(self.fuse(h))
         
         # Self-attention with residual connection
         attn_out = self.attention1(x_encoded, x_encoded, x_encoded)
@@ -303,13 +318,15 @@ class ActionDecoder(nn.Module):
                  head_version: str,
                  enum_sizes: dict,
                  use_log1p_time: bool = True,
-                 time_div_ms: int = 1000):
+                 time_div_ms: int = 1000,
+                 time_positive: bool = False):
         super().__init__()
         self.max_actions = max_actions
         self.head_version = head_version
         self.enum_sizes = enum_sizes  # dict of sizes & indices
         self.use_log1p_time = use_log1p_time
         self.time_div_ms = time_div_ms
+        self.time_positive = time_positive
 
         self.shared = nn.Sequential(
             nn.Linear(input_dim, input_dim),
@@ -331,10 +348,19 @@ class ActionDecoder(nn.Module):
             self.scroll_y_head    = nn.Linear(input_dim, max_actions * n_sy)
             self.scroll_x_head    = nn.Linear(input_dim, max_actions * 3)  # ignored in loss; legacy buffer
         else:
-            n_btn = int(enum_sizes["button"]["size"])
-            n_ka  = int(enum_sizes["key_action"]["size"])
-            n_kid = int(enum_sizes["key_id"]["size"])
-            n_sy  = int(enum_sizes["scroll_y"]["size"])
+            def _get_size(d, k, default):
+                v = d.get(k, default)
+                return int(v.get("size", v)) if isinstance(v, dict) else int(v)
+            def _get_none(d, k, default):
+                v = d.get(k, {})
+                return int(v.get("none_index", default)) if isinstance(v, dict) else int(default)
+            
+            n_btn = _get_size(enum_sizes, "button", 4)
+            n_ka  = _get_size(enum_sizes, "key_action", 3)
+            n_kid = _get_size(enum_sizes, "key_id", 151)
+            n_sy  = _get_size(enum_sizes, "scroll_y", 3)
+            self.sy_none_index = _get_none(enum_sizes, "scroll_y", 1)  # store for inference mapping
+            
             self.button_head      = nn.Linear(input_dim, max_actions * n_btn)
             self.key_action_head  = nn.Linear(input_dim, max_actions * n_ka)
             self.key_id_head      = nn.Linear(input_dim, max_actions * n_kid)
@@ -347,8 +373,10 @@ class ActionDecoder(nn.Module):
             n_btn  = int(self.enum_sizes.get("button", {"size": 4})["size"])
             n_key  = int(self.enum_sizes.get("key_id", {"size": 151})["size"])
             n_sy   = int(self.enum_sizes.get("scroll_y", {"size": 3})["size"])
+            time_raw = self.time_head(s).view(B, self.max_actions)
+            time_output = F.softplus(time_raw) if CFG.time_positive else time_raw
             return {
-                "time": self.time_head(s).view(B, self.max_actions),
+                "time": time_output,
                 "x": self.x_coord_head(s).view(B, self.max_actions),
                 "y": self.y_coord_head(s).view(B, self.max_actions),
                 "action_type_logits": self.action_type_head(s).view(B, self.max_actions, n_type),
@@ -361,8 +389,10 @@ class ActionDecoder(nn.Module):
             n_ka  = int(self.enum_sizes["key_action"]["size"])
             n_kid = int(self.enum_sizes["key_id"]["size"])
             n_sy  = int(self.enum_sizes["scroll_y"]["size"])
-            return {
-                "time": self.time_head(s).view(B, self.max_actions),
+            time_raw = self.time_head(s).view(B, self.max_actions)
+            time_output = F.softplus(time_raw) if CFG.time_positive else time_raw
+            out = {
+                "time": time_output,
                 "x": self.x_coord_head(s).view(B, self.max_actions),
                 "y": self.y_coord_head(s).view(B, self.max_actions),
                 "button_logits": self.button_head(s).view(B, self.max_actions, n_btn),
@@ -370,6 +400,15 @@ class ActionDecoder(nn.Module):
                 "key_id_logits": self.key_id_head(s).view(B, self.max_actions, n_kid),
                 "scroll_y_logits": self.scroll_y_head(s).view(B, self.max_actions, n_sy),
             }
+            
+            # Apply exclusive event gating if enabled
+            if CFG.exclusive_event:
+                # For now, we'll create a dummy event prediction since we don't have event_logits
+                # In a real implementation, you would have an event head
+                # This is a placeholder for the exclusive gating logic
+                pass
+            
+            return out
 
     @torch.no_grad()
     def _invert_time(self, t: torch.Tensor) -> torch.Tensor:
@@ -392,7 +431,7 @@ class ActionDecoder(nn.Module):
             btn = heads["button_logits"].argmax(-1)            # 0=None,1=L,2=R,3=M
             ka  = heads["key_action_logits"].argmax(-1)        # 0=None,1=Press,2=Release
             kid = heads["key_id_logits"].argmax(-1)            # 0=None,1..K
-            sy  = heads["scroll_y_logits"].argmax(-1) - 1      # {0,1,2}->{-1,0,1}
+            sy  = heads["scroll_y_logits"].argmax(-1) - self.sy_none_index      # {0,1,2}->{-1,0,1}
             # synthesize legacy type: 1=click, 2=press, 3=release, 4=scroll, else 0
             type_ = torch.zeros_like(btn)
             type_ = torch.where(btn > 0, torch.ones_like(type_), type_)
@@ -419,6 +458,7 @@ class ImitationHybridModel(nn.Module):
                  enum_sizes: dict | None = None,
                  use_log1p_time: bool = True,
                  time_div_ms: float = 1000.0,
+                 feature_spec: dict | None = None,
                  **kwargs):
         # --- Backward-compat for older callers --------------------------------
         # Some older code passed `num_attention_heads`; if present, prefer it.
@@ -441,7 +481,8 @@ class ImitationHybridModel(nn.Module):
         self.gamestate_encoder = GamestateEncoder(
             input_dim=gamestate_dim,
             hidden_dim=hidden_dim,
-            num_heads=self.num_heads
+            num_heads=self.num_heads,
+            feature_spec=feature_spec
         )
         
         # 2. Action Sequence Encoder - Feature-type-specific encoding (8 -> 128)
@@ -710,7 +751,7 @@ class ImitationHybridModel(nn.Module):
             btn = heads["button_logits"].argmax(-1)            # 0=None,1=L,2=R,3=M
             ka  = heads["key_action_logits"].argmax(-1)        # 0=None,1=Press,2=Release
             kid = heads["key_id_logits"].argmax(-1)            # 0=None,1=None,1..K
-            sy  = heads["scroll_y_logits"].argmax(-1) - 1      # {0,1,2}->{-1,0,1}
+            sy  = heads["scroll_y_logits"].argmax(-1) - self.action_decoder.sy_none_index      # {0,1,2}->{-1,0,1}
             # synthesize legacy type: 1=click, 2=press, 3=release, 4=scroll, else 0
             type_ = torch.zeros_like(btn)
             type_ = torch.where(btn > 0, torch.ones_like(type_), type_)

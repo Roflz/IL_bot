@@ -145,16 +145,11 @@ class BotController:
     def bind_views(self, live_view, logs_view, features_view, predictions_view):
         """Bind view references for direct access"""
         try:
-            print("🔍 DEBUG [controller.py:145] bind_views called")
-            print(f"🔍 DEBUG [controller.py:150] Binding views - live_view: {type(live_view)}, features_view: {type(features_view)}")
-            
             self.live_view = live_view
             self.logs_view = logs_view
             self.features_view = features_view
             self.live_features_view = features_view  # Add reference for _pump_ui
             self.predictions_view = predictions_view
-            
-            print("🔍 DEBUG [controller.py:155] View references set successfully")
             
             # Also keep the views dictionary for backward compatibility
             self.views = {
@@ -164,13 +159,10 @@ class BotController:
                 'predictions': predictions_view
             }
             
-            print("🔍 DEBUG [controller.py:165] Views dictionary created successfully")
             LOG.info("Views bound to controller")
             
             # Now load initial gamestates since views are available
-            print("🔍 DEBUG [controller.py:170] About to load initial gamestates...")
             self._load_initial_gamestates()
-            print("🔍 DEBUG [controller.py:175] Initial gamestates loaded successfully")
             
         except Exception as e:
             print(f"❌ ERROR [controller.py:180] in bind_views: {e}")
@@ -418,7 +410,6 @@ class BotController:
     def start_live_mode(self):
         """Start live mode by starting watcher and feature threads, then UI pump"""
         try:
-            print("🔍 DEBUG [controller.py:390] Controller start_live_mode called")
             LOG.info("Starting live mode...")
             
             # Check if live source is available
@@ -469,10 +460,8 @@ class BotController:
             LOG.debug("controller: feature thread started")
             
             # Start UI pump scheduling
-            print("🔍 DEBUG [controller.py:450] About to start UI pump scheduling...")
             try:
                 self._schedule_ui_pump()
-                print("🔍 DEBUG [controller.py:455] UI pump scheduling started")
             except Exception as pump_error:
                 print(f"❌ ERROR [controller.py:458] Failed to start UI pump scheduling: {pump_error}")
                 import traceback
@@ -484,7 +473,6 @@ class BotController:
             time.sleep(0.1)
             
             LOG.info("Live mode started successfully")
-            print("🔍 DEBUG [controller.py:465] Live mode completed successfully")
             
         except Exception as e:
             LOG.exception("Failed to start live mode")
@@ -539,8 +527,6 @@ class BotController:
     def _pump_ui(self):
         """UI pump that processes UI queue messages"""
         try:
-            print("🔍 DEBUG [controller.py:505] _pump_ui called")
-            
             # Validate root window is available
             if not hasattr(self, 'root') or not self.root:
                 error_msg = "Root window not available in _pump_ui"
@@ -550,10 +536,8 @@ class BotController:
             # Check if we have a message
             try:
                 message = self.ui_queue.get_nowait()
-                print(f"🔍 DEBUG [controller.py:515] UI pump processing message: {type(message)}")
             except queue.Empty:
                 # No message, don't schedule next pump
-                print("🔍 DEBUG [controller.py:520] No message in queue, stopping pump")
                 self._ui_pump_scheduled = False
                 return
             else:
@@ -563,7 +547,6 @@ class BotController:
                         raise ValueError(f"UI message must be a 2-tuple; got {type(message).__name__} len={len(message) if isinstance(message, tuple) else 'n/a'}")
 
                     kind, payload = message  # <— no slicing
-                    print(f"🔍 DEBUG [controller.py:530] Message kind: {kind}, payload type: {type(payload)}")
 
                     if kind != "table_update":
                         raise ValueError(f"Unknown UI message kind: {kind}")
@@ -572,7 +555,6 @@ class BotController:
                         raise ValueError("table_update payload must be a 4-tuple (window, changed_mask, feature_names, feature_groups)")
 
                     window, changed_mask, feature_names, feature_groups = payload
-                    print(f"🔍 DEBUG [controller.py:540] Payload unpacked - window shape: {window.shape}, changed_mask shape: {changed_mask.shape}")
                     
                     # Validate shapes
                     if window.shape != (10, 128):
@@ -582,7 +564,6 @@ class BotController:
                     
                     # First update: set schema *before* any cell writes
                     if not self._feature_schema_set:
-                        print("🔍 DEBUG [controller.py:550] Setting feature schema...")
                         if len(feature_names) != 128 or len(feature_groups) != 128:
                             raise ValueError(
                                 f"schema size mismatch: names={len(feature_names)}, groups={len(feature_groups)}, expected 128"
@@ -590,10 +571,8 @@ class BotController:
                         self.live_features_view.set_schema(feature_names, feature_groups)
                         self._feature_schema_set = True
                         LOG.info("UI: schema set (128 names / 128 groups)")
-                        print("🔍 DEBUG [controller.py:560] Feature schema set successfully")
                     
                     # Push the window into the view
-                    print("🔍 DEBUG [controller.py:565] About to update view from window...")
                     
                     # Check if live_features_view is available
                     if not hasattr(self, 'live_features_view') or not self.live_features_view:
@@ -605,7 +584,6 @@ class BotController:
                     self.live_features_view._handle_feature_update(
                         window, changed_mask, feature_names, feature_groups
                     )
-                    print("🔍 DEBUG [controller.py:575] View update + save handled successfully")
                     
                     # Check if there are more messages before scheduling next pump
                     try:
@@ -614,11 +592,9 @@ class BotController:
                         # Put it back since we just peeked
                         self.ui_queue.put(("table_update", (window, changed_mask, feature_names, feature_groups)))
                         # There are more messages, schedule next pump
-                        print("🔍 DEBUG [controller.py:580] More messages in queue, scheduling next UI pump in 30ms")
                         self.root.after(30, self._pump_ui)
                     except queue.Empty:
                         # No more messages, stop the pump
-                        print("🔍 DEBUG [controller.py:585] No more messages, stopping UI pump")
                         self._ui_pump_scheduled = False
                     
                 except Exception as e:
@@ -652,7 +628,7 @@ class BotController:
                 self.root.after(1, self._pump_ui)
                 print("🔍 DEBUG [controller.py:615] UI pump scheduled successfully")
             else:
-                print("🔍 DEBUG [controller.py:620] UI pump already scheduled")
+                pass
                 
         except Exception as e:
             print(f"❌ ERROR [controller.py:625] in _schedule_ui_pump: {e}")
@@ -670,31 +646,25 @@ class BotController:
             raise RuntimeError("gs_queue not initialized")
         
         last = None
-        print("🔍 DEBUG: Watcher worker main loop starting...")
         while not self._stop.is_set():
             try:
                 # Check if there are any existing files first
                 if last is None:
-                    print("🔍 DEBUG: First run - checking for existing files...")
                     # On first run, check if there are any existing files
                     existing_files = self.live_source.get_recent_gamestates(count=1)
                     if existing_files:
-                        print(f"🔍 DEBUG: Found {len(existing_files)} existing files")
                         # Process existing files first
                         for gs in existing_files:
                             if gs.get("_source_path") != last:
-                                print(f"🔍 DEBUG: Processing existing gamestate: {gs.get('_source_path')}")
                                 self.gs_queue.put(gs)
                                 last = gs.get("_source_path")
                                 LOG.info(f"Processed existing gamestate: {last}")
                         # Continue to next iteration to process the file we just found
                         continue
                     else:
-                        print("🔍 DEBUG: No existing files found, transitioning to normal watching mode...")
                         # No existing files, set last to a special value that will never match any real path
                         # This ensures we don't loop back to check existing files again
                         last = "NO_EXISTING_FILES_CHECKED"
-                        print("🔍 DEBUG: Transitioned to normal watching mode - waiting for new files...")
                         # Small delay before starting normal watching
                         time.sleep(0.1)
                         continue

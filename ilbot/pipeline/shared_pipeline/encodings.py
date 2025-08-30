@@ -222,7 +222,7 @@ class ActionEncoder:
         """
         # Import here to avoid circular imports
         try:
-            from ilbot.utils.key_mapper import KeyboardKeyMapper
+            from utils.key_mapper import KeyboardKeyMapper
             return int(KeyboardKeyMapper.map_key_to_number(key))
         except ImportError:
             # Fallback encoding if key_mapper not available

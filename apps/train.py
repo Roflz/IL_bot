@@ -47,7 +47,21 @@ def main():
             manifest = {}
 
     targets_version = args.targets_version or manifest.get("targets_version", "v1")
-    enum_sizes = manifest.get("enums", {}) if targets_version == "v2" else {}
+    
+    # Normalize enum_sizes to ensure consistent dict format
+    raw_enums = manifest.get("enums") or manifest.get("enum_sizes") or {}
+    enum_sizes = {}
+    for k, v in raw_enums.items():
+        if isinstance(v, dict):
+            size = int(v.get("size", v))
+            none_idx = int(v.get("none_index", 1 if k == "scroll_y" else 0))
+        else:
+            size = int(v)
+            none_idx = 1 if k == "scroll_y" else 0
+        enum_sizes[k] = {"size": size, "none_index": none_idx}
+    
+    if targets_version != "v2":
+        enum_sizes = {}
 
     config = {
         "data_dir": args.data_dir,

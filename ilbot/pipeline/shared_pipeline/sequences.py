@@ -128,9 +128,13 @@ def _convert_actions_to_array(action_data: Dict, max_actions: int = 100) -> np.n
         # Convert key to numeric code if it's a string
         key_value = action.get('key', 0)
         if isinstance(key_value, str):
-            # Simple mapping for common keys - you can expand this
-            key_map = {'w': 87, 'a': 65, 's': 83, 'd': 68, 'space': 32, 'enter': 13, 'escape': 27}
-            key_value = key_map.get(key_value.lower(), 0)
+            try:
+                from utils.key_mapper import KeyboardKeyMapper
+                key_value = int(KeyboardKeyMapper.map_key_to_number(key_value))
+            except ImportError:
+                # Fallback to simple mapping if key_mapper not available
+                key_map = {'w': 87, 'a': 65, 's': 83, 'd': 68, 'space': 32, 'enter': 13, 'escape': 27}
+                key_value = key_map.get(key_value.lower(), 0)
         
         all_actions.append([
             action.get('timestamp', 0.0),  # timestamp
@@ -148,9 +152,13 @@ def _convert_actions_to_array(action_data: Dict, max_actions: int = 100) -> np.n
         # Convert key to numeric code if it's a string
         key_value = action.get('key', 0)
         if isinstance(key_value, str):
-            # Simple mapping for common keys - you can expand this
-            key_map = {'w': 87, 'a': 65, 's': 83, 'd': 68, 'space': 32, 'enter': 13, 'escape': 27}
-            key_value = key_map.get(key_value.lower(), 0)
+            try:
+                from utils.key_mapper import KeyboardKeyMapper
+                key_value = int(KeyboardKeyMapper.map_key_to_number(key_value))
+            except ImportError:
+                # Fallback to simple mapping if key_mapper not available
+                key_map = {'w': 87, 'a': 65, 's': 83, 'd': 68, 'space': 32, 'enter': 13, 'escape': 27}
+                key_value = key_map.get(key_value.lower(), 0)
         
         all_actions.append([
             action.get('timestamp', 0.0),  # timestamp
@@ -177,11 +185,15 @@ def _convert_actions_to_array(action_data: Dict, max_actions: int = 100) -> np.n
         ])
     
     # Fill the actions array (up to max_actions)
+    # Ensure chronological order across all action types (stable sort by timestamp)
+    # This preserves within-timestamp relative order.
+    all_actions.sort(key=lambda a: a[0])
+
+    # Fill the actions array (up to max_actions)
     for i, action in enumerate(all_actions[:max_actions]):
         actions_array[i] = action
-    
     # Remaining slots are already zero-padded
-    
+
     return actions_array
 
 

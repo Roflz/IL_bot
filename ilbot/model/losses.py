@@ -7,14 +7,15 @@ Handles 8-feature action tensors: [timestamp, type, x, y, button, key, scroll_dx
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
+from .. import config as CFG
 
 class ActionTensorLoss(nn.Module):
     """
     Loss function for action tensor imitation learning
     """
     
-    def __init__(self, weights: Dict[str, float] = None):
+    def __init__(self, weights: Dict[str, float] = None, event_cls_weights: List[float] = None):
         super().__init__()
         
         # Default loss weights
@@ -22,6 +23,9 @@ class ActionTensorLoss(nn.Module):
             'action_count': 1.0,           # How many actions to expect
             'action_tensor': 2.0,           # Action tensor features (most important)
         }
+        
+        # Event classification weights for mutually exclusive events
+        self.event_cls_weights = event_cls_weights
     
     def forward(
         self, 
@@ -75,3 +79,35 @@ class ActionTensorLoss(nn.Module):
             total_loss += self.weights['action_tensor'] * action_tensor_loss
         
         return total_loss
+
+
+def _make_event_criterion(num_classes=4):
+    """Create event classification criterion with optional class weights"""
+    if CFG.event_cls_weights is None:
+        return F.CrossEntropyLoss()
+    w = torch.tensor(CFG.event_cls_weights, dtype=torch.float32)
+    return F.CrossEntropyLoss(weight=w)
+
+
+def compute_tempered_event_weights(counts, power=None, use_log=True):
+    """
+    counts: list/np array of class counts in order [MOVE, CLICK, KEY, SCROLL]
+    Returns weights normalized to weight[MOVE] == 1.0
+    - use_log:  weights ∝ log(1 + inv_freq)
+    - power:    alternatively weights ∝ inv_freq**power (e.g., 0.35–0.5)
+    """
+    import numpy as np
+    c = np.asarray(counts, dtype=np.float64)
+    freq = c / c.sum()
+    inv = 1.0 / np.maximum(freq, 1e-12)
+    if use_log:
+        w = np.log1p(inv)
+    else:
+        assert power is not None
+        w = inv ** float(power)
+    w = w / w[0]  # normalize to MOVE=1.0
+    return w.tolist()
+
+
+# Create the event criterion instance
+crit_event = _make_event_criterion()
