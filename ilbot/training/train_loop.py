@@ -20,6 +20,7 @@ import os, numpy as np
 from collections import Counter, defaultdict
 from datetime import datetime
 from ilbot.utils.feature_spec import load_feature_spec
+from .behavioral_metrics import BehavioralMetrics
 
 # Add new imports for the updated run_training function
 from ilbot.training.setup import OSRSDataset, create_data_loaders
@@ -185,31 +186,10 @@ def clamp_time(t, time_div, time_clip, already_scaled=False):
         return torch.clamp(t, 0.0, float(time_clip))
     return torch.clamp(t / float(time_div), 0.0, float(time_clip))
 
-# ---------------------------
-# Validation metrics helpers
-# ---------------------------
-def _init_val_agg(enum_sizes: Dict[str, int]) -> Dict:
-    def z(n): return torch.zeros(int(n), dtype=torch.long)
-    return {
-        "btn_pred": z(enum_sizes["button"]),
-        "btn_tgt":  z(enum_sizes["button"]),
-        "ka_pred":  z(enum_sizes["key_action"]),
-        "ka_tgt":   z(enum_sizes["key_action"]),
-        "kid_pred": z(enum_sizes["key_id"]),
-        "kid_tgt":  z(enum_sizes["key_id"]),
-        "sy_pred":  z(enum_sizes["scroll"]),
-        "sy_tgt":   z(enum_sizes["scroll"]),
-        "time_pred_sum": 0.0,
-        "time_tgt_sum":  0.0,
-        "time_count":    0,
-        "time_pred_neg": 0,
-        # event-type summaries
-        "evt_pred": {"MOVE":0, "CLICK":0, "KEY":0, "SCROLL":0, "MULTI":0},
-        "evt_tgt":  {"MOVE":0, "CLICK":0, "KEY":0, "SCROLL":0},
-    }
 
-def _update_val_agg(agg: Dict, heads: Dict[str, torch.Tensor], target: torch.Tensor,
-                    valid_mask: torch.Tensor, enum_sizes: Dict, time_div: float, time_clip: float):
+
+
+
     """
     Accumulate per-head histograms & event-type summaries on masked rows.
     Does NOT modify loss or training behavior.
@@ -272,44 +252,45 @@ def _update_val_agg(agg: Dict, heads: Dict[str, torch.Tensor], target: torch.Ten
     agg["time_count"]    += int(t_pred_m.numel())
     agg["time_pred_neg"] += int((t_pred_m < 0).sum().item())
 
-    # --- event-type summaries & contradictions (pred vs tgt) ---
-    # Predicted non-NONE flags
-    p_btn = (btn_pred != btn_none)
-    p_ka  = (ka_pred  != ka_none)
-    p_sy  = (sy_pred  != sy_none)
-    p_btn = p_btn[m]; p_ka = p_ka[m]; p_sy = p_sy[m]
-    # Target non-NONE flags
-    t_btn = (btn_tgt != btn_none)[m]
-    t_ka  = (ka_tgt  != ka_none)[m]
-    t_sy  = (sy_tgt  != sy_none)[m]
-    # Pred event type (MOVE if none fire; MULTI if more than one fire)
-    nxt = p_btn.to(torch.int) + p_ka.to(torch.int) + p_sy.to(torch.int)
+    # --- event-type summaries using actual event classification head ---
+    # Get event predictions from the event classification head
+    event_pred = heads["event_logits"].argmax(-1)  # [B, A] -> 0=CLICK, 1=KEY, 2=SCROLL, 3=MOVE
+    event_pred_flat = fl(event_pred)
+    
+    # Derive event targets from auxiliary heads (same logic as in _masked_metrics)
+    button_gt = target[...,3].long()
+    key_action_gt = target[...,4].long()
+    scroll_y_gt = target[...,6].long()
+    
+    # Create event targets: 0=CLICK, 1=KEY, 2=SCROLL, 3=MOVE
+    event_target = torch.zeros_like(button_gt)
+    event_target = torch.where(button_gt != 0, 0, event_target)      # CLICK
+    event_target = torch.where(key_action_gt != 0, 1, event_target)  # KEY  
+    event_target = torch.where(scroll_y_gt != 0, 2, event_target)    # SCROLL
+    # MOVE is default (3) when no other events occur
+    event_target_flat = fl(event_target)
+    
     if m.any():
-        # counts
-        agg["evt_pred"]["MULTI"] += int((nxt > 1).sum().item())
-        # single-type
-        only_btn = (nxt == 1) & p_btn
-        only_ka  = (nxt == 1) & p_ka
-        only_sy  = (nxt == 1) & p_sy
-        only_mv  = (nxt == 0)
-        agg["evt_pred"]["CLICK"]  += int(only_btn.sum().item())
-        agg["evt_pred"]["KEY"]    += int(only_ka.sum().item())
-        agg["evt_pred"]["SCROLL"] += int(only_sy.sum().item())
-        agg["evt_pred"]["MOVE"]   += int(only_mv.sum().item())
-        # target event type
-        t_is = t_btn.to(torch.int) + t_ka.to(torch.int) + t_sy.to(torch.int)
-        agg["evt_tgt"]["SCROLL"] += int((t_sy & m[m]).sum().item())  # m[m] is all True; kept for clarity
-        agg["evt_tgt"]["CLICK"]  += int(((~t_sy) & t_btn).sum().item())
-        agg["evt_tgt"]["KEY"]    += int(((~t_sy) & (~t_btn) & t_ka).sum().item())
-        agg["evt_tgt"]["MOVE"]   += int((t_is == 0).sum().item())
+        # Count predicted events
+        event_pred_masked = event_pred_flat[m]
+        event_target_masked = event_target_flat[m]
+        
+        # Count each event type
+        agg["evt_pred"]["CLICK"]  += int((event_pred_masked == 0).sum().item())
+        agg["evt_pred"]["KEY"]    += int((event_pred_masked == 1).sum().item())
+        agg["evt_pred"]["SCROLL"] += int((event_pred_masked == 2).sum().item())
+        agg["evt_pred"]["MOVE"]   += int((event_pred_masked == 3).sum().item())
+        agg["evt_pred"]["MULTI"]  = 0  # No more MULTI in unified event system
+        
+        # Count target events
+        agg["evt_tgt"]["CLICK"]  += int((event_target_masked == 0).sum().item())
+        agg["evt_tgt"]["KEY"]    += int((event_target_masked == 1).sum().item())
+        agg["evt_tgt"]["SCROLL"] += int((event_target_masked == 2).sum().item())
 
-def _topk_from_counts(counts: torch.Tensor, k: int = 10):
-    arr = counts.tolist()
-    order = sorted(range(len(arr)), key=lambda i: arr[i], reverse=True)
-    out = [(i, arr[i]) for i in order[:k] if arr[i] > 0]
-    return out
 
-def _print_val_agg(agg: Dict, enum_sizes: Dict, time_div: float):
+
+
+
     def pct(cnt, total): return (100.0*cnt/total) if total > 0 else 0.0
     print("=== Detailed validation report ===")
     total_masked = int(agg["time_count"])
@@ -339,13 +320,12 @@ def _print_val_agg(agg: Dict, enum_sizes: Dict, time_div: float):
     print(f"[event(pred)] MOVE={ep['MOVE']} ({pct(ep['MOVE'],pred_sum):.1f}%), "
           f"CLICK={ep['CLICK']} ({pct(ep['CLICK'],pred_sum):.1f}%), "
           f"KEY={ep['KEY']} ({pct(ep['KEY'],pred_sum):.1f}%), "
-          f"SCROLL={ep['SCROLL']} ({pct(ep['SCROLL'],pred_sum):.1f}%), "
-          f"MULTI={ep['MULTI']} ({pct(ep['MULTI'],pred_sum):.1f}%)")
+          f"SCROLL={ep['SCROLL']} ({pct(ep['SCROLL'],pred_sum):.1f}%)")
     print(f"[event(tgt)]  MOVE={et['MOVE']} ({pct(et['MOVE'],tgt_sum):.1f}%), "
           f"CLICK={et['CLICK']} ({pct(et['CLICK'],tgt_sum):.1f}%), "
           f"KEY={et['KEY']} ({pct(et['KEY'],tgt_sum):.1f}%), "
           f"SCROLL={et['SCROLL']} ({pct(et['SCROLL'],tgt_sum):.1f}%)")
-    print("=== End detailed report ===")
+
 
 # (removed: legacy V1 IL loss)
 
@@ -378,39 +358,8 @@ def compute_unified_event_loss(predictions, targets, valid_mask, loss_fn, enum_s
     
     return total_loss, loss_components
 
-def _masked_metrics(heads: dict, target: torch.Tensor, targets_version="v2"):
-    """Simple masked metrics to track IL progress."""
-    with torch.no_grad():
-        # V2 format: target is (B,A,7) with [time_s, x, y, button, key_action, key_id, scroll_y]
-        mask = (torch.abs(target).sum(dim=-1) > 0)
-        mflat = mask.reshape(-1)
-        # preds
-        bt = heads["button_logits"].argmax(-1)
-        ka = heads["key_action_logits"].argmax(-1)
-        kid = heads["key_id_logits"].argmax(-1)
-        sy = heads["scroll_y_logits"].argmax(-1)
-        # tgts
-        tb = target[...,3].long()
-        tka = target[...,4].long()
-        tkid = target[...,5].long()
-        tsy = target[...,6].long()
-        def m_acc(pred, tgt):
-            p = pred.reshape(-1)[mflat]; t = tgt.reshape(-1)[mflat]
-            return (p == t).float().mean().item() if p.numel() else 0.0
-        def m_mae(pred, tgt):
-            p = pred.reshape(-1)[mflat].float(); t = tgt.reshape(-1)[mflat].float()
-            return (p - t).abs().mean().item() if p.numel() else 0.0
-        valid_frac = mflat.float().mean().item() if mflat.numel() else 0.0
-        return {
-            "acc_button": m_acc(bt, tb),
-            "acc_key_action": m_acc(ka, tka),
-            "acc_key_id": m_acc(kid, tkid),
-            "acc_scroll_y": m_acc(sy, tsy),
-            "mae_time": m_mae(heads["time_q"][...,1], target[...,0]),  # Use median (q50) from quantiles
-            "mae_x":    m_mae(heads["x_mu"],    target[...,1]),
-            "mae_y":    m_mae(heads["y_mu"],    target[...,2]),
-            "valid_frac": valid_frac,
-        }
+
+
 
 def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                 num_epochs=10, device='cpu', scheduler=None,
@@ -450,6 +399,9 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
     patience_left = patience
     ckpt_dir = os.path.join("checkpoints", datetime.now().strftime("%Y%m%d_%H%M%S"))
     os.makedirs(ckpt_dir, exist_ok=True)
+    
+    # Initialize behavioral intelligence metrics
+    behavioral_metrics = BehavioralMetrics(save_dir=os.path.join(ckpt_dir, "behavioral_analysis"))
     
 
     for epoch in range(num_epochs):
@@ -554,12 +506,8 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
         model.eval()
         val_loss_sum = 0.0
         val_batches = 0
-        # aggregate detailed metrics across VAL
-        val_agg = _init_val_agg(enum_sizes) if enum_sizes is not None else None
-        # V2 only
-        vm = {"acc_button":0.0,"acc_key_action":0.0,"acc_key_id":0.0,"acc_scroll_y":0.0,
-              "mae_time":0.0,"mae_x":0.0,"mae_y":0.0,"valid_frac":0.0}
-        vm_n = 0
+
+
         with torch.no_grad():
             for val_idx, batch in enumerate(val_loader):
                 temporal_sequence = batch['temporal_sequence'].to(device)
@@ -624,13 +572,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                     # V2 only - use unified event loss
                     valid_mask = batch['valid_mask'].to(device)
                     vloss, loss_components = compute_unified_event_loss(outputs, action_target, valid_mask, loss_fn, enum_sizes)
-                    # TODO: Update metrics computation for unified event system
-                    mm = _masked_metrics(outputs, action_target, "v2")
-                    for k in vm: vm[k] += mm[k]
-                    vm_n += 1
-                    # accumulate detailed distributions
-                    if val_agg is not None:
-                        _update_val_agg(val_agg, outputs, action_target, vm_mask, enum_sizes, time_div, time_clip)
+
                 else:
                     vloss = criterion(outputs, action_target)
                 val_loss_sum += float(vloss.item())
@@ -639,22 +581,43 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
         avg_val_loss = val_loss_sum / max(val_batches, 1)
         val_losses.append(avg_val_loss)
         
-        if vm_n > 0:
-            for k in vm: vm[k] /= vm_n
-            print(f"Epoch {epoch+1} Summary:")
-            print(f"  Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
-            # V2 only
-            print(f"  Val metrics (masked avg over {vm_n} batches): "
-                  f"acc_btn={vm['acc_button']:.3f} acc_ka={vm['acc_key_action']:.3f} acc_kid={vm['acc_key_id']:.3f} "
-                  f"acc_sy={vm['acc_scroll_y']:.3f} "
-                  f"mae_time={vm['mae_time']:.1f} mae_x={vm['mae_x']:.1f} mae_y={vm['mae_y']:.1f} "
-                  f"| valid_frac={vm['valid_frac']:.3f}")
-            # print detailed per-head distributions and time stats
-            if val_agg is not None:
-                _print_val_agg(val_agg, enum_sizes, time_div)
-        else:
-            print(f"Epoch {epoch+1} Summary:")
-            print(f"  Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+        # Behavioral Intelligence Analysis (every 5 epochs)
+        if val_batches > 0:
+            # Get a sample batch for analysis
+            sample_batch = next(iter(val_loader))
+            sample_temporal = sample_batch['temporal_sequence'].to(device)
+            sample_action = sample_batch['action_sequence'].to(device)
+            sample_target = sample_batch['action_target'].to(device)
+            sample_valid = sample_batch['valid_mask'].to(device)
+            
+            # Debug: Print tensor shapes and mask statistics
+            print(f"\n🔍 Debug Info (Epoch {epoch}):")
+            print(f"  Sample batch shapes:")
+            print(f"    temporal_sequence: {sample_temporal.shape}")
+            print(f"    action_sequence: {sample_action.shape}")
+            print(f"    action_target: {sample_target.shape}")
+            print(f"    valid_mask: {sample_valid.shape}")
+            print(f"  Mask statistics:")
+            print(f"    Total actions: {sample_valid.numel()}")
+            print(f"    Valid actions: {sample_valid.sum().item()}")
+            print(f"    Valid ratio: {sample_valid.float().mean().item():.3f}")
+            print(f"    Valid per sequence: {sample_valid.sum(dim=1).tolist()[:5]}...")  # First 5 sequences
+            
+            # Get model predictions on sample
+            with torch.no_grad():
+                sample_outputs = model(sample_temporal, sample_action)
+            
+            # Analyze behavioral intelligence
+            behavioral_metrics.analyze_epoch_predictions(
+                model_outputs=sample_outputs,
+                gamestates=sample_temporal,  # [B, 10, 128]
+                action_targets=sample_target,  # [B, 100, 7]
+                valid_mask=sample_valid,      # [B, 100]
+                epoch=epoch
+            )
+        
+        print(f"Epoch {epoch+1} Summary:")
+        print(f"  Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
 
         # Scheduler step (if any)
         if scheduler is not None:
@@ -683,6 +646,10 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
             torch.cuda.empty_cache()
         
         print("-" * 40)
+    
+    # Generate final behavioral intelligence summary
+    print("\n🎯 Training Complete! Generating Behavioral Intelligence Summary...")
+    behavioral_metrics.generate_training_summary()
     
     return train_losses, val_losses
 
