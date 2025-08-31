@@ -603,6 +603,14 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
             print(f"    Valid ratio: {sample_valid.float().mean().item():.3f}")
             print(f"    Valid per sequence: {sample_valid.sum(dim=1).tolist()[:5]}...")  # First 5 sequences
             
+            # Debug: Look at actual action targets
+            valid_targets = sample_target[sample_valid]
+            print(f"\n🔍 Action Target Debug:")
+            print(f"  Button actions: {valid_targets[:, 3].unique().tolist()}")
+            print(f"  Key actions: {valid_targets[:, 4].unique().tolist()}")
+            print(f"  Scroll actions: {valid_targets[:, 6].unique().tolist()}")
+            print(f"  Sample targets (first 3): {valid_targets[:3].tolist()}")
+            
             # Get model predictions on sample
             with torch.no_grad():
                 sample_outputs = model(sample_temporal, sample_action)
@@ -615,6 +623,12 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                 valid_mask=sample_valid,      # [B, 100]
                 epoch=epoch
             )
+            
+            # Debug: Check what the loss function sees
+            print(f"\n🔍 Loss Function Debug:")
+            print(f"  Event logits shape: {sample_outputs['event_logits'].shape}")
+            print(f"  Event logits sample: {sample_outputs['event_logits'][0, 0].tolist()}")
+            print(f"  Event probs sample: {torch.softmax(sample_outputs['event_logits'][0, 0], dim=-1).tolist()}")
         
         print(f"Epoch {epoch+1} Summary:")
         print(f"  Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")

@@ -236,25 +236,27 @@ class UnifiedEventLoss(nn.Module):
     def _derive_event_target(self, button_target: torch.Tensor, key_action_target: torch.Tensor, 
                            scroll_y_target: torch.Tensor) -> torch.Tensor:
         """
-        Derive event type from action targets.
-            
+        Derive event type from action targets with proper priority.
+        
+        Priority order: CLICK > KEY > SCROLL > MOVE
+        
         Returns:
             [B, A] tensor with event types: 0=CLICK, 1=KEY, 2=SCROLL, 3=MOVE
         """
         B, A = button_target.shape
         event_target = torch.full((B, A), 3, dtype=torch.long, device=button_target.device)  # Default to MOVE
         
-        # CLICK: button != 0
-        click_mask = button_target != 0
-        event_target[click_mask] = 0
+        # SCROLL: scroll_y != 0 (lowest priority)
+        scroll_mask = scroll_y_target != 0
+        event_target[scroll_mask] = 2
         
-        # KEY: key_action != 0 (assuming 0 is "none")
+        # KEY: key_action != 0 (medium priority - overwrites SCROLL)
         key_mask = key_action_target != 0
         event_target[key_mask] = 1
         
-        # SCROLL: scroll_y != 0 (assuming 0 is "none")
-        scroll_mask = scroll_y_target != 0
-        event_target[scroll_mask] = 2
+        # CLICK: button != 0 (highest priority - overwrites KEY and SCROLL)
+        click_mask = button_target != 0
+        event_target[click_mask] = 0
         
         # Note: MOVE (3) is the default when no specific action is detected
         
@@ -363,7 +365,7 @@ class UnifiedEventLoss(nn.Module):
         
         if mask_flat.any():
             loss = F.cross_entropy(logits_flat[mask_flat], targets_flat[mask_flat], weight=weights)
-        else:
+    else:
             loss = torch.tensor(0.0, device=logits.device)
         
         return loss
