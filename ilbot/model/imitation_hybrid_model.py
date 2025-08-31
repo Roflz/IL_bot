@@ -538,9 +538,10 @@ class ImitationHybridModel(nn.Module):
             nn.Dropout(0.1)
         )
         
-        # Combine all encoded features (7 features * 16 dims each = 112)
+        # Combine all encoded features (7 features * (hidden_dim//16) dims each)
+        feature_combiner_input_dim = 7 * (hidden_dim // 16)  # 7 * 8 = 56 for hidden_dim=128
         self.feature_combiner = nn.Sequential(
-            nn.Linear(112, hidden_dim // 2),  # 7 * 16 = 112 -> 128
+            nn.Linear(feature_combiner_input_dim, hidden_dim // 2),  # 56 -> 64 for hidden_dim=128
             nn.LayerNorm(hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(0.1)
