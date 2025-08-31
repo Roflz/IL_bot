@@ -136,7 +136,7 @@ class DataInspector:
         key_action_unique = np.unique(key_action_values)
         categorical_sizes['key_action'] = len(key_action_unique)
         
-        # Key ID: column 5 (index 5)
+        # Key ID: column 5 (index 5) - use actual unique count, not max value
         key_id_values = action_targets_data[:, :, 5].flatten()
         key_id_unique = np.unique(key_id_values)
         categorical_sizes['key_id'] = len(key_id_unique)

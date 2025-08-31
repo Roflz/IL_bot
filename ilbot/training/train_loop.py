@@ -8,10 +8,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from typing import Dict, Tuple
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
 import math
 import json
 import time
@@ -20,7 +16,7 @@ from pathlib import Path
 from ilbot.training.setup import create_data_loaders, setup_model, setup_training, OSRSDataset
 from ilbot.model.imitation_hybrid_model import ImitationHybridModel
 from torch.optim.lr_scheduler import StepLR
-import torch, os, numpy as np
+import os, numpy as np
 from collections import Counter, defaultdict
 from datetime import datetime
 from ilbot.utils.feature_spec import load_feature_spec
@@ -145,13 +141,27 @@ def estimate_class_weights(train_loader, targets_version="v2", enum_sizes=None):
     """
     Build inverse-frequency class weights with dynamic lengths.
     """
-    # V2 only
-    n_btn  = int(enum_sizes["button"]["size"])
-    n_ka   = int(enum_sizes["key_action"]["size"])
-    n_kid  = int(enum_sizes["key_id"]["size"])
-    n_sy   = int(enum_sizes["scroll_y"]["size"])
+    # V2 only - handle both old and new enum formats
+    if isinstance(enum_sizes["button"], dict):
+        # Old format: {"size": X, "none_index": Y}
+        n_btn  = int(enum_sizes["button"]["size"])
+        n_ka   = int(enum_sizes["key_action"]["size"])
+        n_kid  = int(enum_sizes["key_id"]["size"])
+        n_sy   = int(enum_sizes["scroll_y"]["size"])
+        none_idx_ka = int(enum_sizes["key_action"]["none_index"])
+        none_idx_sy = int(enum_sizes["scroll_y"]["none_index"])
+    else:
+        # New format: just the integer sizes
+        n_btn  = int(enum_sizes["button"])
+        n_ka   = int(enum_sizes["key_action"])
+        n_kid  = int(enum_sizes["key_id"])
+        n_sy   = int(enum_sizes["scroll"])
+        none_idx_ka = 0  # Default none index for key_action
+        none_idx_sy = 1  # Default none index for scroll_y
+    
     btn_counts = torch.ones(n_btn); ka_counts = torch.ones(n_ka)
     kid_counts = torch.ones(n_kid); sy_counts = torch.ones(n_sy)
+    
     for b in train_loader:
         tgt = b["action_target"]; m = b["valid_mask"]
         one = lambda t: torch.ones_like(t, dtype=torch.float, device=t.device)
@@ -163,7 +173,6 @@ def estimate_class_weights(train_loader, targets_version="v2", enum_sizes=None):
         ka_counts.index_add_(0,  ka_idx[m].view(-1),  one(ka_idx[m].view(-1)))
 
         # key_id: gate by key_action != NONE and clamp into vocab
-        none_idx_ka = int(enum_sizes["key_action"]["none_index"])
         ka_flat = tgt[...,4].long().view(-1)
         kid_idx = tgt[...,5].long().clamp(0, n_kid-1).view(-1)
         m_flat = m.view(-1)
@@ -172,9 +181,9 @@ def estimate_class_weights(train_loader, targets_version="v2", enum_sizes=None):
             kid_counts.index_add_(0, kid_idx[kid_mask], one(kid_idx[kid_mask]))
 
         # scroll_y: map {-1,0,+1} → {0,1,2}
-        none_idx_sy = int(enum_sizes["scroll_y"]["none_index"])  # usually 1
         sy_idx = (tgt[...,6].long() + none_idx_sy).clamp(0, n_sy-1).view(-1)
         sy_counts.index_add_(0, sy_idx[m_flat], one(sy_idx[m_flat]))
+    
     inv = lambda c: (1.0/(c+1e-9)); norm = lambda w: (w/w.mean())
     return {"btn": norm(inv(btn_counts)), "ka": norm(inv(ka_counts)),
             "kid": norm(inv(kid_counts)), "sy": norm(inv(sy_counts))}
@@ -351,102 +360,31 @@ def _print_val_agg(agg: Dict, enum_sizes: Dict, time_div: float):
 import torch
 import torch.nn.functional as F
 
-def compute_il_loss_v2(heads, target, valid_mask, class_w, loss_w, time_div, time_clip, enum_sizes):
+def compute_unified_event_loss(predictions, targets, valid_mask, loss_fn, enum_sizes):
     """
-    heads: dict with keys:
-        'time','x','y' -> [B,A] or [B,A,1]
-        'button_logits' -> [B,A,C_btn]
-        'key_action_logits' -> [B,A,C_ka]
-        'key_id_logits' -> [B,A,C_kid]
-        'scroll_y_logits' -> [B,A,C_sy]
-    target: [B,A,7] (v2: [time,x,y,click,key_action,key_id,scroll_y_raw])
-    valid_mask: [B,A] or flat [B*A]
-    class_w: dict of optional class weight tensors/lists for 'btn','ka','kid','sy'
-    loss_w: dict of scalars for 'time','x','y','btn','ka','kid','sy'
-    enum_sizes: dict with e.g. {'key_action': {'none_index': 0}, 'scroll_y': {'size': 3, 'none_index': 1}}
+    Compute unified event system loss using the new UnifiedEventLoss.
+    
+    Args:
+        predictions: Model outputs from unified event system
+        targets: [B, A, 7] V2 action targets [time, x, y, button, key_action, key_id, scroll_y]
+        valid_mask: [B, A] Boolean mask for valid actions
+        loss_fn: UnifiedEventLoss instance
+        enum_sizes: Dictionary with categorical sizes for auxiliary losses
+    
+    Returns:
+        total_loss: Combined weighted loss
+        loss_components: Dictionary of individual loss components
     """
 
-    B, A, _ = target.shape
-
-    # ---- mask prep ----
-    m2d = valid_mask
-    if m2d.dtype != torch.bool:
-        m2d = m2d > 0
-    if m2d.dim() == 1:
-        m2d = m2d.view(B, A)
-    elif m2d.shape[:2] != (B, A):
-        m2d = m2d.view(B, A)
-    m_flat = m2d.view(-1)
-
-    # ---- sizes ----
-    n_btn = heads["button_logits"].shape[-1]
-    n_ka  = heads["key_action_logits"].shape[-1]
-    n_kid = heads["key_id_logits"].shape[-1]
-    n_sy  = int(enum_sizes["scroll_y"]["size"])
-    none_idx_ka = int(enum_sizes["key_action"]["none_index"])
-    none_idx_sy = int(enum_sizes["scroll_y"]["none_index"])  # usually 1 for {-1,0,+1} → {0,1,2}
-
-    # ---- helpers ----
-    def _squeeze(x):
-        return x.squeeze(-1) if x.dim() == 3 and x.size(-1) == 1 else x
-
-    def _to_weight(key, logits):
-        w = class_w.get(key, None)
-        if isinstance(w, torch.Tensor):
-            return w.to(logits.device, dtype=logits.dtype)
-        elif w is not None:
-            # list/np -> tensor
-            return torch.tensor(w, device=logits.device, dtype=logits.dtype)
-        return None
-
-    mask_f = m2d.float()
-    denom  = mask_f.sum().clamp_min(1.0)
-
-    # ---- TIME (masked 2D) ----
-    t_pred = _squeeze(heads["time"])  # [B,A]
-    t_tgt  = clamp_time(target[..., 0], time_div, time_clip, already_scaled=True)  # [B,A]
-    l_time = (F.smooth_l1_loss(t_pred, t_tgt, reduction="none") * mask_f).sum() / denom
-
-    # ---- X/Y (masked 2D) ----
-    x_pred = _squeeze(heads["x"])  # [B,A]
-    y_pred = _squeeze(heads["y"])  # [B,A]
-    l_x = (F.smooth_l1_loss(x_pred, target[..., 1], reduction="none") * mask_f).sum() / denom
-    l_y = (F.smooth_l1_loss(y_pred, target[..., 2], reduction="none") * mask_f).sum() / denom
-
-    # ---- BUTTON (masked flat) ----
-    btn_logits = heads["button_logits"].view(-1, n_btn)
-    btn_tgt    = target[..., 3].long().view(-1).clamp(0, n_btn - 1)
-    l_btn      = F.cross_entropy(btn_logits[m_flat], btn_tgt[m_flat], weight=_to_weight("btn", btn_logits))
-
-    # ---- KEY ACTION (masked flat) ----
-    ka_logits = heads["key_action_logits"].view(-1, n_ka)
-    ka_tgt    = target[..., 4].long().view(-1).clamp(0, n_ka - 1)
-    l_ka      = F.cross_entropy(ka_logits[m_flat], ka_tgt[m_flat], weight=_to_weight("ka", ka_logits))
-
-    # ---- KEY ID (gated by KA != NONE, masked flat) ----
-    kid_logits = heads["key_id_logits"].view(-1, n_kid)
-    kid_tgt    = target[..., 5].long().view(-1).clamp(0, n_kid - 1)
-    ka_flat    = target[..., 4].long().view(-1)
-    kid_mask   = m_flat & (ka_flat != none_idx_ka)
-    if kid_mask.any():
-        l_kid = F.cross_entropy(kid_logits[kid_mask], kid_tgt[kid_mask], weight=_to_weight("kid", kid_logits))
-    else:
-        l_kid = torch.tensor(0.0, device=target.device)
-
-    # ---- SCROLL Y (remap {-1,0,+1} -> indices, masked flat) ----
-    sy_raw  = target[..., 6].long()                # [-1,0,+1]
-    sy_idx  = (sy_raw + none_idx_sy).clamp(0, n_sy - 1).view(-1)  # {0,1,2}
-    sy_logits = heads["scroll_y_logits"].view(-1, n_sy)
-    l_sy = F.cross_entropy(sy_logits[m_flat], sy_idx[m_flat], weight=_to_weight("sy", sy_logits))
-
-    # ---- weighted sum ----
-    return (loss_w["time"] * l_time +
-            loss_w["x"]    * l_x +
-            loss_w["y"]    * l_y +
-            loss_w["btn"]  * l_btn +
-            loss_w["ka"]   * l_ka + 
-            loss_w["kid"]  * l_kid + 
-            loss_w["sy"]   * l_sy)
+    # Ensure valid_mask is 2D boolean
+    if valid_mask.dim() == 1:
+        valid_mask = valid_mask.view(targets.shape[0], targets.shape[1])
+    valid_mask = valid_mask.bool()
+    
+    # Compute loss using UnifiedEventLoss
+    total_loss, loss_components = loss_fn(predictions, targets, valid_mask, enum_sizes)
+    
+    return total_loss, loss_components
 
 def _masked_metrics(heads: dict, target: torch.Tensor, targets_version="v2"):
     """Simple masked metrics to track IL progress."""
@@ -482,7 +420,7 @@ def _masked_metrics(heads: dict, target: torch.Tensor, targets_version="v2"):
             "valid_frac": valid_frac,
         }
 
-def train_model(model, train_loader, val_loader, criterion, optimizer,
+def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                 num_epochs=10, device='cpu', scheduler=None,
                 use_class_weights=True, loss_w=None, time_div=1.0,
                 targets_version="v2", time_clip=3.0, enum_sizes=None):
@@ -596,9 +534,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
 
             
             if isinstance(outputs, dict):
-                # V2 only
+                # V2 only - use unified event loss
                 valid_mask = batch['valid_mask'].to(device)
-                loss = compute_il_loss_v2(outputs, action_target, valid_mask, class_w, loss_w, time_div, time_clip, enum_sizes)
+                loss, loss_components = compute_unified_event_loss(outputs, action_target, valid_mask, loss_fn, enum_sizes)
             else:
                 # Back-compat with legacy tensor output + custom criterion
                 loss = criterion(outputs, action_target)
@@ -691,9 +629,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
 
 
                 if isinstance(outputs, dict):
-                    # V2 only
+                    # V2 only - use unified event loss
                     valid_mask = batch['valid_mask'].to(device)
-                    vloss = compute_il_loss_v2(outputs, action_target, valid_mask, class_w, loss_w, time_div, time_clip, enum_sizes)
+                    vloss, loss_components = compute_unified_event_loss(outputs, action_target, valid_mask, loss_fn, enum_sizes)
+                    # TODO: Update metrics computation for unified event system
                     mm = _masked_metrics(outputs, action_target, "v2")
                     for k in vm: vm[k] += mm[k]
                     vm_n += 1
@@ -938,16 +877,52 @@ def run_training(config: dict):
     """
     _seed_everything(config.get("seed", 1337))
 
-    # 1) dataset & loaders
-    ds = OSRSDataset(
-        config["data_dir"],
-        targets_version=config.get("targets_version"),   # may be None → auto from manifest
-        use_log1p_time=config.get("use_log1p_time", True),
-        time_div_ms=config.get("time_div_ms", 1000),
-        time_clip_s=config.get("time_clip_s"),
-        enum_sizes=config.get("enum_sizes"),             # optional
-        device=config.get("device"),
+    # 1) Use DataInspector to auto-detect configuration first
+    from ilbot.model.data_inspector import DataInspector
+    
+    data_inspector = DataInspector(
+        action_input_path=Path(config["data_dir"]) / "action_input_sequences.npy",
+        gamestate_path=Path(config["data_dir"]) / "gamestate_sequences.npy",
+        action_targets_path=Path(config["data_dir"]) / "action_targets.npy"
     )
+    
+    data_config = data_inspector.get_model_config()
+    print(f"Auto-detected data config: {data_config}")
+    
+    # Create data loaders using the auto-detected configuration
+    from ilbot.training.setup import create_data_loaders
+    
+    # Create a proper dataset that loads the actual data
+    class UnifiedEventDataset:
+        def __init__(self, data_dir, data_config):
+            self.data_dir = Path(data_dir)
+            self.data_config = data_config
+            
+            # Load the actual data files
+            self.gamestate_sequences = np.load(self.data_dir / "gamestate_sequences.npy")
+            self.action_input_sequences = np.load(self.data_dir / "action_input_sequences.npy")
+            self.action_targets = np.load(self.data_dir / "action_targets.npy")
+            
+            # Create valid mask (non-zero rows are valid)
+            self.valid_mask = (np.abs(self.action_targets).sum(axis=-1) > 0)
+            
+            # Set dataset properties
+            self.B, self.T, self.G = self.gamestate_sequences.shape
+            _, _, self.A, self.Fin = self.action_input_sequences.shape
+            self.n_sequences = self.B
+        
+        def __len__(self):
+            return self.n_sequences
+        
+        def __getitem__(self, idx):
+            return {
+                "temporal_sequence": torch.from_numpy(self.gamestate_sequences[idx]).float(),
+                "action_sequence": torch.from_numpy(self.action_input_sequences[idx]).float(),
+                "action_target": torch.from_numpy(self.action_targets[idx]).float(),
+                "valid_mask": torch.from_numpy(self.valid_mask[idx]).bool()
+            }
+    
+    ds = UnifiedEventDataset(config["data_dir"], data_config)
     train_loader, val_loader = create_data_loaders(
         dataset=ds,
         batch_size=config.get("batch_size", 32),
@@ -955,25 +930,18 @@ def run_training(config: dict):
     )
 
     # 2) model
-    # Build model using manifest/enums when v2. Avoid free var use.
-    enum_sizes = (
-        config.get("enum_sizes")
-        or (ds.get_enums() if ds.targets_version == "v2" else {})
+    # Build model using auto-detected configuration
+    model = create_model(
+        data_config=data_config,
+        model_config={
+            'hidden_dim': 256,
+            'num_heads': 8,
+            'num_layers': 6
+        }
     )
-    model = create_model({
-        'gamestate_dim': ds.G,
-        'action_dim': ds.Fin,
-        'sequence_length': ds.T,
-        'hidden_dim': 256,
-        'num_heads': 8,
-        'max_actions': ds.A,
-        # trust what the dataset loaded (auto-detected from manifest/files)
-        'head_version': ds.targets_version,
-        'enum_sizes': enum_sizes,
-        'feature_spec': load_feature_spec(Path(config["data_dir"])),
-        'use_log1p_time': config.get("use_log1p_time", True),
-        'time_div_ms': config.get("time_div_ms", 1000.0)
-    })
+    
+    # Extract enum_sizes for compatibility
+    enum_sizes = data_config['enum_sizes']
 
     # 3) optimizer/scheduler
     lr = config.get("lr", 2.5e-4)
@@ -987,13 +955,22 @@ def run_training(config: dict):
     device = torch.device(config.get("device", "cuda"))
     model = model.to(device)
 
-    # 4) train loop
-    # V2-only training
+    # 4) Create unified event loss function
+    from ilbot.model.losses import UnifiedEventLoss
+    
+    # Use the same data_config for the loss function
+    # data_config is already created above from DataInspector
+    
+    loss_fn = UnifiedEventLoss(data_config=data_config)
+    print(f"Created UnifiedEventLoss with data config: {data_config}")
+    
+    # 5) train loop
+    # V2-only training with unified event system
     losses_train, losses_val = train_model(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
-        criterion=None,  # not used in V2 path
+        loss_fn=loss_fn,  # Pass the unified event loss function
         optimizer=optimizer,
         num_epochs=config.get("epochs", 40),
         device=config.get("device", "cuda"),
