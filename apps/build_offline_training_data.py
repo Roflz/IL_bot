@@ -10,6 +10,10 @@ import argparse, sys, os, json, pathlib, shutil, numpy as np
 # Compat: code below uses `_json.*`; make it an alias of `json`.
 _json = json
 
+# Utilities for densifying sparse IDs
+def _make_id_map(unique_values):
+    return {int(v): i for i, v in enumerate(sorted(int(x) for x in unique_values))}
+
 # Add parent directory to path for imports
 sys.path.append(str(pathlib.Path(__file__).parent.parent))
 
@@ -343,35 +347,86 @@ def process_fresh(session_root, gamestates_dir, actions_csv,
             v1_time_scale=v1_time_scale
         )
 
-        np.save(final_dir / "actions_v2.npy", actions_v2.astype(np.float32))
-        np.save(final_dir / "valid_mask.npy", valid_mask.astype(np.bool_))
-        print(f"  ✓ actions_v2.npy: {actions_v2.shape}")
-        print(f"  ✓ valid_mask.npy: {valid_mask.shape}")
+        # --- Densify key_id vocab to only the values that actually appear (on valid KEY rows) ---
+        # actions_v2 layout (v2): [time_s, x, y, button, key_action, key_id, scroll_y_raw]
+        # We remap key_id to a compact 0..K-1 space based on valid rows where key_action != NONE (0).
+        m  = (valid_mask > 0)
+        ka = actions_v2[..., 4].astype(np.int64)
+        kid_raw = actions_v2[..., 5].astype(np.int64)
+        seen = np.unique(kid_raw[m & (ka != 0)])
+        # Build dense mapping {orig_id -> dense_idx}
+        kid_map = {int(v): i for i, v in enumerate(sorted(seen.tolist()))} if seen.size else {0: 0}
+        # Apply mapping (fast LUT where possible; safe fallback otherwise)
+        if seen.size:
+            lut_size = int(kid_raw.max()) + 1
+            lut = np.zeros(lut_size, dtype=np.int64)
+            for orig, new in kid_map.items():
+                if 0 <= orig < lut_size:
+                    lut[orig] = new
+            if kid_raw.max() < lut_size:
+                actions_v2[..., 5] = lut[kid_raw].astype(np.float32)
+            else:
+                vmap = np.vectorize(lambda x: kid_map.get(int(x), 0), otypes=[np.int64])
+                actions_v2[..., 5] = vmap(kid_raw).astype(np.float32)
+        else:
+            actions_v2[..., 5] = np.zeros_like(actions_v2[..., 5], dtype=np.float32)
+        # Compute the new compact vocab size from remapped data (on valid KEY rows)
+        kid_after = actions_v2[..., 5].astype(np.int64)
+        kid_mask = m & (ka != 0)
+        kid_size = int(kid_after[kid_mask].max()) + 1 if kid_mask.any() else 1
+        # Keep a reverse map for nice printing in eval (dense_idx -> original code)
+        kid_to_orig = {v: k for k, v in kid_map.items()}
 
         # Build a minimal manifest (no hard-coded shapes)
         gs = np.load(final_dir / "gamestate_sequences.npy")
         ai = np.load(final_dir / "action_input_sequences.npy")
         manifest = {
             "targets_version": "v2",
-            "enum_sizes": {"button": 4, "key_action": 3, "key_id": 151, "scroll_y": 3},
+            # Modern enums dict used by training:
+            "enums": {
+                "button":     {"size": 4, "none_index": 0},
+                "key_action": {"size": 3, "none_index": 0},
+                "key_id":     {"size": int(kid_size)},   # ← data-driven K
+                "scroll_y":   {"size": 3, "none_index": 1}  # {-1,0,+1}→{0,1,2}, NONE at 1
+            },
+            # Legacy flat ints for any older readers:
+            "enum_sizes": {"button": 4, "key_action": 3, "key_id": int(kid_size), "scroll_y": 3},
             "shapes": {
                 "gamestate_sequences": list(gs.shape),
                 "action_input_sequences": list(ai.shape),
                 "actions_v2": list(actions_v2.shape),
                 "valid_mask": list(valid_mask.shape),
+                "sequence_length": int(ai.shape[1]),
+                "max_actions": int(actions_v2.shape[1]),
+                "feature_spec": {
+                    "gamestate_dim": int(ai.shape[3]),
+                    "action_input_dim": int(ai.shape[2])
+                },
+                "screenshot_sequence": {
+                    "shape": [int(gs.shape[0]), int(gs.shape[1]), int(ai.shape[2]), int(ai.shape[3])],
+                    "timestamp_semantics": "absolute_or_session_relative_ms"
+                }
             },
-            "time": {"div": float(time_div), "clip": float(time_clip), "transform": str(time_transform)},
-            "targets_alignment": "within_window_deltas",
-            "action_input": {
-                "shape": [int(gs.shape[0]), int(gs.shape[1]), int(ai.shape[2]), int(ai.shape[3])],
-                "timestamp_semantics": "absolute_or_session_relative_ms",  # padding=0
+            # (Optional) store mapping to recover original key codes in eval tooling
+            "vocab_maps": {
+                "key_id": {
+                    "to_index": {str(k): int(v) for k, v in kid_map.items()},
+                    "to_orig":  {str(k): int(v) for k, v in kid_to_orig.items()}
+                }
             },
-            # keep both keys for downstream compatibility; 'click' is the canonical name
-            "enums": {"click": 4, "button": 4, "key_action": 3, "key_id": 151, "scroll_y": 3},
             "time": {"transform": time_transform, "div": time_div, "clip": time_clip}
         }
-        with open(final_dir / "dataset_manifest.json", "w", encoding="utf-8") as f:
+
+        # Save arrays AFTER densifying key_id
+        np.save(final_dir / "gamestate_sequences.npy", input_sequences)
+        np.save(final_dir / "action_input_sequences.npy", action_input_sequences)
+        np.save(final_dir / "actions_v2.npy", actions_v2)
+        np.save(final_dir / "valid_mask.npy", valid_mask)
+
+        # Write manifest json next to the arrays
+        with open(final_dir / "dataset_manifest.json", "w") as f:
             _json.dump(manifest, f, indent=2)
+
         print("  ✓ dataset_manifest.json (no hard-coded shapes)")
 
         # Update metadata with V2 time info
