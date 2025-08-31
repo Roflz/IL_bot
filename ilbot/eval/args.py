@@ -18,9 +18,12 @@ def create_eval_parser():
     parser.add_argument("--device", type=str, default="cpu", help="Device to run evaluation on")
     
     # Reporting arguments
-    parser.add_argument("--report_examples", type=int, default=10, help="How many raw example rows to print during validation")
-    parser.add_argument("--time_clamp_nonneg", action="store_true", default=True, help="Clamp time predictions to non-negative values")
+    parser.add_argument("--report_examples", type=int, default=6, help="How many raw example rows to print during validation")
+    parser.add_argument("--time_clamp_nonneg", action="store_true", help="Clamp time predictions to non-negative values")
     parser.add_argument("--force_exclusive_event_pred", action="store_true", default=True, help="Force exclusive event prediction (no MULTI)")
+    parser.add_argument("--topk_print", type=int, default=5, help="k for top-k histograms in the validation report.")
+    parser.add_argument("--time_clamp_nonneg", action="store_true",
+                       help="Clamp time to >=0 when printing mean_pred; negatives still reported separately.")
     
     # Output arguments
     parser.add_argument("--output_dir", type=str, default="eval_results", help="Directory to save evaluation results")
@@ -44,8 +47,13 @@ def create_training_parser():
     parser.add_argument("--disable_auto_batch", action="store_true", help="Disable automatic batch size optimization")
     
     # Model arguments
-    parser.add_argument("--time_positive", action="store_true", help="Make time head output positive values only")
+    parser.add_argument("--time_positive", action="store_true", 
+                       help="Force non-negative time by applying softplus on the log1p domain.")
+    parser.add_argument("--time_head_bias", type=float, default=None,
+                       help="Init bias for time head (log1p domain); if unset, uses config default.")
     parser.add_argument("--event_cls_weights", nargs=4, type=float, help="Class weights for event classification [MOVE, CLICK, KEY, SCROLL]")
+    parser.add_argument("--exclusive_event", action="store_true",
+                       help="Use event argmax to gate sub-heads in reporting / inference; eliminates MULTI.")
     
     # Time arguments
     parser.add_argument("--use_log1p_time", type=lambda s: s.lower()!="false", default=True, help="Use log1p transformation for time")

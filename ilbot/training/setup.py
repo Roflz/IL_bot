@@ -220,13 +220,20 @@ def setup_training(model: ImitationHybridModel,
     criterion = ActionTensorLoss()
     print(f"  Loss function: {criterion.__class__.__name__}")
     
-    # Optimizer
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=learning_rate,
-        weight_decay=weight_decay
+    # Optimizer: exclude weight decay for the time head so its bias isn't pushed more negative.
+    time_params, main_params = [], []
+    for name, p in model.named_parameters():
+        if name.startswith("time_head."):
+            time_params.append(p)
+        else:
+            main_params.append(p)
+    optimizer = optim.AdamW(
+        [
+            {"params": main_params, "lr": learning_rate, "weight_decay": weight_decay},
+            {"params": time_params,  "lr": learning_rate, "weight_decay": 0.0},
+        ]
     )
-    print(f"  Optimizer: Adam (lr={learning_rate}, weight_decay={weight_decay})")
+    print(f"  Optimizer: AdamW (lr={learning_rate}, wd_main={weight_decay}, wd_time=0.0)")
     
     return criterion, optimizer
 

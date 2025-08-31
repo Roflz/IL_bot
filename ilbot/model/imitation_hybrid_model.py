@@ -11,6 +11,12 @@ import math
 from typing import Dict, Tuple, Optional, Literal
 from .. import config as CFG
 
+# Add debugging imports
+import logging
+import torch
+import torch.nn.functional as F
+LOG = logging.getLogger(__name__)
+
 class MultiHeadAttention(nn.Module):
     """Multi-head self-attention mechanism for gamestate features"""
     
@@ -319,24 +325,40 @@ class ActionDecoder(nn.Module):
                  enum_sizes: dict,
                  use_log1p_time: bool = True,
                  time_div_ms: int = 1000,
-                 time_positive: bool = False):
+                 time_positive: bool = False,
+                 args=None):
         super().__init__()
         self.max_actions = max_actions
         self.head_version = head_version
         self.enum_sizes = enum_sizes  # dict of sizes & indices
         self.use_log1p_time = use_log1p_time
         self.time_div_ms = time_div_ms
-        self.time_positive = time_positive
+        # remember flags
+        self.time_positive = bool(getattr(args, 'time_positive', False)) if args else time_positive
+
 
         self.shared = nn.Sequential(
-            nn.Linear(input_dim, input_dim),
+            nn.Linear(input_dim, input_dim * 2),  # Expand to learn richer features
             nn.GELU(),
-            nn.Linear(input_dim, input_dim),
+            nn.Dropout(0.1),  # Prevent overfitting
+            nn.Linear(input_dim * 2, input_dim * 2),  # Deeper representation
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(input_dim * 2, input_dim),  # Project back to original dimension
         )
         # Common regressors (no hardcoding on A)
-        self.time_head = nn.Linear(input_dim, max_actions)
-        self.x_coord_head = nn.Linear(input_dim, max_actions)
-        self.y_coord_head = nn.Linear(input_dim, max_actions)
+
+        
+        # --- new heads ---
+        # 4-way event: [CLICK, KEY, SCROLL, MOVE] (canonical order)
+        self.event_head = nn.Linear(input_dim, max_actions * 4)
+        # Time quantiles: K outputs
+        self.time_q_head = nn.Linear(input_dim, max_actions * len(CFG.time_quantiles))
+        # Heteroscedastic XY: predict μ and log σ for each
+        self.xy_mu_head   = nn.Linear(input_dim, max_actions * 2)   # [μx, μy]
+        self.xy_lsig_head = nn.Linear(input_dim, max_actions * 2)   # [log σx, log σy]
+        
+
         if head_version == "v1":
             n_type = int(enum_sizes.get("action_type", {"size": 5})["size"])
             n_btn  = int(enum_sizes.get("button", {"size": 4})["size"])
@@ -365,48 +387,117 @@ class ActionDecoder(nn.Module):
             self.key_action_head  = nn.Linear(input_dim, max_actions * n_ka)
             self.key_id_head      = nn.Linear(input_dim, max_actions * n_kid)
             self.scroll_y_head    = nn.Linear(input_dim, max_actions * n_sy)
+        
+        # Initialize weights properly to prevent collapse
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize weights to prevent collapse and improve training stability"""
+        # Event head: small random weights to break symmetry
+        nn.init.xavier_uniform_(self.event_head.weight)
+        nn.init.zeros_(self.event_head.bias)
+        
+        # Time head: small positive bias to prevent all-zeros
+        nn.init.xavier_uniform_(self.time_q_head.weight)
+        nn.init.constant_(self.time_q_head.bias, 0.1)
+        
+        # XY heads: small weights to prevent extreme outputs
+        nn.init.xavier_uniform_(self.xy_mu_head.weight)
+        nn.init.zeros_(self.xy_mu_head.bias)
+        nn.init.xavier_uniform_(self.xy_lsig_head.weight)
+        nn.init.constant_(self.xy_lsig_head.bias, -2.0)  # Start with small sigma
+        
+        # Legacy classification heads - handle both v1 and v2
+        if self.head_version == "v1":
+            legacy_heads = [self.button_head, self.key_head, self.scroll_y_head]
+            if hasattr(self, 'action_type_head'):
+                legacy_heads.append(self.action_type_head)
+        else:
+            legacy_heads = [self.button_head, self.key_action_head, self.key_id_head, self.scroll_y_head]
+        
+        for head in legacy_heads:
+            if hasattr(head, 'weight'):
+                nn.init.xavier_uniform_(head.weight)
+                nn.init.zeros_(head.bias)
     
     def forward(self, x):
-        s = self.shared(x); B = x.size(0)
+        # Add residual connection for better gradient flow
+        s = self.shared(x) + x  # Residual connection
+        B = x.size(0)
         if self.head_version == "v1":
             n_type = int(self.enum_sizes.get("action_type", {"size": 5})["size"])
             n_btn  = int(self.enum_sizes.get("button", {"size": 4})["size"])
             n_key  = int(self.enum_sizes.get("key_id", {"size": 151})["size"])
             n_sy   = int(self.enum_sizes.get("scroll_y", {"size": 3})["size"])
-            time_raw = self.time_head(s).view(B, self.max_actions)
-            time_output = F.softplus(time_raw) if CFG.time_positive else time_raw
-            return {
-                "time": time_output,
-                "x": self.x_coord_head(s).view(B, self.max_actions),
-                "y": self.y_coord_head(s).view(B, self.max_actions),
+            # Event logits
+            event_logits = self.event_head(s).view(B, self.max_actions, 4)
+            
+            # Time quantiles
+            tq_pre = self.time_q_head(s).view(B, self.max_actions, len(CFG.time_quantiles))
+            time_q = F.softplus(tq_pre + CFG.time_head_bias_default)
+            # Use the median quantile for scalar time metrics/plots
+            k_med = CFG.time_quantiles.index(0.5)
+            time_output = time_q[..., k_med]
+            
+            # XY heteroscedastic
+            xy_mu    = self.xy_mu_head(s).view(B, self.max_actions, 2)
+            xy_lsig  = self.xy_lsig_head(s).view(B, self.max_actions, 2)
+            x_mu, y_mu = xy_mu[..., 0], xy_mu[..., 1]
+            x_ls, y_ls = xy_lsig[..., 0], xy_lsig[..., 1]
+            
+            out = {
+                "time_q_pre": tq_pre,
+                "time_q": time_q,
+                "x_mu": x_mu,
+                "y_mu": y_mu,
+                "x_logsig": x_ls,
+                "y_logsig": y_ls,
                 "action_type_logits": self.action_type_head(s).view(B, self.max_actions, n_type),
                 "button_logits": self.button_head(s).view(B, self.max_actions, n_btn),
                 "key_logits": self.key_head(s).view(B, self.max_actions, n_key),
                 "scroll_y_logits": self.scroll_y_head(s).view(B, self.max_actions, n_sy),
             }
+            
+            # Add event logits
+            out["event_logits"] = event_logits
+            
+            return out
         else:
             n_btn = int(self.enum_sizes["button"]["size"])
             n_ka  = int(self.enum_sizes["key_action"]["size"])
             n_kid = int(self.enum_sizes["key_id"]["size"])
             n_sy  = int(self.enum_sizes["scroll_y"]["size"])
-            time_raw = self.time_head(s).view(B, self.max_actions)
-            time_output = F.softplus(time_raw) if CFG.time_positive else time_raw
+            # Event logits
+            event_logits = self.event_head(s).view(B, self.max_actions, 4)
+            
+            # Time quantiles
+            tq_pre = self.time_q_head(s).view(B, self.max_actions, len(CFG.time_quantiles))
+            time_q = F.softplus(tq_pre + CFG.time_head_bias_default)
+            # Use the median quantile for scalar time metrics/plots
+            k_med = CFG.time_quantiles.index(0.5)
+            time_output = time_q[..., k_med]
+            
+            # XY heteroscedastic
+            xy_mu    = self.xy_mu_head(s).view(B, self.max_actions, 2)
+            xy_lsig  = self.xy_lsig_head(s).view(B, self.max_actions, 2)
+            x_mu, y_mu = xy_mu[..., 0], xy_mu[..., 1]
+            x_ls, y_ls = xy_lsig[..., 0], xy_lsig[..., 1]
+            
             out = {
-                "time": time_output,
-                "x": self.x_coord_head(s).view(B, self.max_actions),
-                "y": self.y_coord_head(s).view(B, self.max_actions),
+                "time_q_pre": tq_pre,
+                "time_q": time_q,
+                "x_mu": x_mu,
+                "y_mu": y_mu,
+                "x_logsig": x_ls,
+                "y_logsig": y_ls,
                 "button_logits": self.button_head(s).view(B, self.max_actions, n_btn),
                 "key_action_logits": self.key_action_head(s).view(B, self.max_actions, n_ka),
                 "key_id_logits": self.key_id_head(s).view(B, self.max_actions, n_kid),
                 "scroll_y_logits": self.scroll_y_head(s).view(B, self.max_actions, n_sy),
             }
             
-            # Apply exclusive event gating if enabled
-            if CFG.exclusive_event:
-                # For now, we'll create a dummy event prediction since we don't have event_logits
-                # In a real implementation, you would have an event head
-                # This is a placeholder for the exclusive gating logic
-                pass
+            # Add event logits
+            out["event_logits"] = event_logits
             
             return out
 
@@ -733,7 +824,50 @@ class ImitationHybridModel(nn.Module):
         
         # 5. Decode actions
         heads = self.action_decoder(fused_output)  # dict of heads for training
+        
+        # --- DEBUG: confirm the heads and time activation
         if return_logits:
+            # event head
+            if "event_logits" in heads:
+                if heads["event_logits"].detach().abs().mean() < 1e-6:
+                    LOG.warning("[DBG] event_logits ~ constant (%.2e)", float(heads["event_logits"].detach().abs().mean()))
+            # scroll_y head
+            if "scroll_y_logits" in heads:
+                if heads["scroll_y_logits"].detach().abs().mean() < 1e-6:
+                    LOG.warning("[DBG] scroll_y_logits ~ constant (%.2e)", float(heads["scroll_y_logits"].detach().abs().mean()))
+            # time head
+            if "time" in heads:
+                t = heads["time"]
+                t_act = F.softplus(t) if getattr(self, "time_softplus", True) else t
+                time_ms_pred = t_act * getattr(self, "time_scale", 1.0)
+                if time_ms_pred.detach().abs().mean() < 1e-6:
+                    LOG.warning("[DBG] time_ms_pred ~ 0; check mask/scale/clip path")
+            # xy head
+            if "x" in heads and "y" in heads:
+                xy = torch.stack([heads["x"], heads["y"]], dim=-1)
+                xy_scaled = xy * getattr(self, "xy_scale", 1.0)
+                # Quick range check
+                LOG.info("[DBG] fwd ranges: event|scroll logits mean=%.3f|%.3f, time_ms mean=%.3f, xy mean=%.3f",
+                         float(heads.get("event_logits", torch.zeros(1)).detach().abs().mean()),
+                         float(heads.get("scroll_y_logits", torch.zeros(1)).detach().abs().mean()),
+                         float(time_ms_pred.detach().mean()) if 'time_ms_pred' in locals() else 0.0,
+                         float(xy_scaled.detach().abs().mean()))
+            
+            # quick ranges (cheap)
+            with torch.no_grad():
+                # Get xy_abs safely - only if xy heads exist
+                xy_abs_mean = 0.0
+                if "x" in heads and "y" in heads:
+                    xy = torch.stack([heads["x"], heads["y"]], dim=-1)
+                    xy_scaled = xy * getattr(self, "xy_scale", 1.0)
+                    xy_abs_mean = float(xy_scaled.detach().abs().mean())
+                
+                LOG.info("[DBG] fwd means: event|scroll=%.3f|%.3f  time_ms=%.3f  xy_abs=%.3f",
+                         float(heads.get("event_logits", torch.zeros(1)).abs().mean()),
+                         float(heads.get("scroll_y_logits", torch.zeros(1)).abs().mean()),
+                         float(time_ms_pred.detach().mean()) if 'time_ms_pred' in locals() else 0.0,
+                         xy_abs_mean)
+            
             return heads
         return self.decode_legacy(heads)
     
@@ -791,6 +925,22 @@ def create_model(config: Dict = None) -> ImitationHybridModel:
             'sequence_length': 10,
             'hidden_dim': 256,
             'num_heads': 8
+        }
+    
+    # Provide default feature_spec if not present
+    if 'feature_spec' not in config:
+        config['feature_spec'] = {
+            'group_indices': {
+                'categorical': [],
+                'continuous': list(range(128)),  # All features as continuous
+                'boolean': [],
+                'counts': [],
+                'angles': [],
+                'time': []
+            },
+            'total_cat_vocab': 0,
+            'cat_offsets': [],
+            'unknown_index_per_field': []
         }
     
     model = ImitationHybridModel(**config)

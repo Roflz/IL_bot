@@ -7,13 +7,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import math
 import json
+import os
+from datetime import datetime
 import time
 import argparse
 from pathlib import Path
@@ -25,12 +27,116 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from ilbot.utils.feature_spec import load_feature_spec
 
+# Optional plotting (works headless)
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    _MPL_OK = True
+except Exception:
+    _MPL_OK = False
+
+# Enhanced loss configuration
+
+# Add debugging imports and helpers
+import logging
+import torch
+import math
+LOG = logging.getLogger(__name__)
+
+def _dbg_hist(name, t, mask=None, bins=10, max_items=5):
+    try:
+        if t is None:
+            LOG.warning("[DBG] %s=None", name); return
+        x = t.detach().float().cpu()
+        if mask is not None:
+            m = mask.detach().cpu().bool()
+            if m.numel() == x.numel():
+                x = x[m]
+        if x.numel() == 0:
+            LOG.warning("[DBG] %s: empty after mask", name); return
+        vmin, vmax = float(x.min()), float(x.max())
+        uniq = torch.unique(x)
+        LOG.info("[DBG] %s: shape=%s min=%.4f max=%.4f uniq=%d%s",
+                 name, tuple(t.shape), vmin, vmax, uniq.numel(),
+                 f" e.g. {uniq[:max_items].tolist()}" if uniq.numel()<=max_items else "")
+    except Exception as e:
+        LOG.exception("[DBG] hist failed for %s: %s", name, e)
+
+def _dbg_counts(name, t, mask=None, max_items=10):
+    try:
+        if t is None: LOG.warning("[DBG] %s=None", name); return
+        x = t.detach().cpu().view(-1)
+        if mask is not None:
+            m = mask.detach().cpu().view(-1).bool()
+            if m.shape == x.shape: x = x[m]
+        vals, counts = torch.unique(x, return_counts=True)
+        pairs = sorted(zip(vals.tolist(), counts.tolist()), key=lambda p: -p[1])[:max_items]
+        LOG.info("[DBG] %s counts: %s", name, pairs)
+    except Exception as e:
+        LOG.exception("[DBG] counts failed for %s: %s", name, e)
+
+
+def _as_int(x):
+    try:
+        return int(x.item()) if hasattr(x, "item") else int(x)
+    except Exception:
+        return int(x)
+
+def _percentiles_t(t: torch.Tensor):
+    """Return dict of common percentiles and summary stats for a 1D tensor."""
+    if t.numel() == 0:
+        return {"min":0.0,"p25":0.0,"median":0.0,"p75":0.0,"max":0.0,"mean":0.0,"std":0.0,"uniq":0}
+    q = torch.quantile(t, torch.tensor([0.25, 0.5, 0.75], device=t.device))
+    return {
+        "min":   float(t.min().item()),
+        "p25":   float(q[0].item()),
+        "median":float(q[1].item()),
+        "p75":   float(q[2].item()),
+        "max":   float(t.max().item()),
+        "mean":  float(t.mean().item()),
+        "std":   float(t.std(unbiased=False).item()),
+        "uniq":  int(t.unique().numel())
+    }
+
+
+
+
+
+
+
+
+
+
+
 # Add new imports for the updated run_training function
 from ilbot.training.setup import OSRSDataset, create_data_loaders
 from ilbot.model.imitation_hybrid_model import create_model
 import random
 
+try:
+    # config flags (time_positive, debug_time, report_time_clamped_reference)
+    from ilbot import config as CFG
+except Exception:
+    class _CFG:
+        debug_time = False
+        report_time_clamped_reference = False
+    CFG = _CFG()
+
 # ---- helpers ---------------------------------------------------------------
+def _as_int(x):
+    try:
+        # Works for Python ints/floats and torch scalars
+        return int(x.item()) if hasattr(x, "item") else int(x)
+    except Exception:
+        return int(x)
+
+def _topk_counts_list(counts, k=10):
+    # counts can be list[int] or list[torch.Tensor]; return sorted (idx, int_count)
+    items = [(i, _as_int(c)) for i, c in enumerate(counts) if _as_int(c) > 0]
+    items.sort(key=lambda t: t[1], reverse=True)
+    return items[:k]
+
 # reproducibility
 def _seed_everything(seed: int):
     random.seed(seed)
@@ -139,11 +245,21 @@ def setup_model_v2(manifest, targets_version, device, data_dir: Path | None = No
         enum_sizes=enum_sizes,
         feature_spec=spec
     )
+    # Put the time head into a high-gradient region at init:
+    # softplus(-3.7) ≈ 0.024 s, matching your mean target (~24 ms).
+    try:
+        with torch.no_grad():
+            if hasattr(model, "time_head") and getattr(model.time_head, "bias", None) is not None:
+                model.time_head.bias.fill_(-3.7)
+    except Exception:
+        pass
     return model
 
 def estimate_class_weights(train_loader, targets_version="v2", enum_sizes=None):
     """
-    Build inverse-frequency class weights with dynamic lengths.
+    Build softened inverse-frequency class weights with capping.
+    This keeps rare classes helpful without letting weights explode.
+    Also prints key_id usage stats so you can see the actual range present.
     """
     # V2 only
     n_btn  = int(enum_sizes["button"]["size"])
@@ -175,9 +291,29 @@ def estimate_class_weights(train_loader, targets_version="v2", enum_sizes=None):
         none_idx_sy = int(enum_sizes["scroll_y"]["none_index"])  # usually 1
         sy_idx = (tgt[...,6].long() + none_idx_sy).clamp(0, n_sy-1).view(-1)
         sy_counts.index_add_(0, sy_idx[m_flat], one(sy_idx[m_flat]))
-    inv = lambda c: (1.0/(c+1e-9)); norm = lambda w: (w/w.mean())
-    return {"btn": norm(inv(btn_counts)), "ka": norm(inv(ka_counts)),
-            "kid": norm(inv(kid_counts)), "sy": norm(inv(sy_counts))}
+    inv = lambda c: (1.0/(c+1e-9))
+    def soften_cap(w: torch.Tensor) -> torch.Tensor:
+        # soften very large ratios and cap extreme outliers
+        w = torch.pow(w, 0.5)                      # sqrt inverse-frequency
+        cap = 4.0 * w.mean().clamp_min(1e-6)       # cap at 4x mean
+        return torch.clamp(w, max=cap)
+    norm = lambda w: (w / w.mean().clamp_min(1e-6))
+    w_btn = norm(soften_cap(inv(btn_counts)))
+    w_ka  = norm(soften_cap(inv(ka_counts)))
+    w_kid = norm(soften_cap(inv(kid_counts)))
+    w_sy  = norm(soften_cap(inv(sy_counts)))
+
+    # --- DEBUG: key_id usage evidence ---
+    # counts were initialized at 1; "used" means >1 after accumulation
+    used_idx = (kid_counts > 1).nonzero(as_tuple=False).view(-1)
+    kid_used = int(used_idx.numel())
+    kid_max_idx = int(used_idx.max().item()) if kid_used > 0 else -1
+    # Top key_id indices by count (will mostly be true used ids)
+    topk = min(10, n_kid)
+    top_ids = torch.topk(kid_counts, k=topk).indices.cpu().tolist()
+    print(f"[class_w] key_id used={kid_used}/{n_kid}, max_idx={kid_max_idx}, top_ids={top_ids}")
+
+    return {"btn": w_btn, "ka": w_ka, "kid": w_kid, "sy": w_sy}
 
 def clamp_time(t, time_div, time_clip, already_scaled=False):
     if already_scaled:  # V2 saved time already scaled
@@ -198,13 +334,32 @@ def _init_val_agg(enum_sizes: Dict[str, Dict[str, int]]) -> Dict:
         "kid_tgt":  z(enum_sizes["key_id"]["size"]),
         "sy_pred":  z(enum_sizes["scroll_y"]["size"]),
         "sy_tgt":   z(enum_sizes["scroll_y"]["size"]),
-        "time_pred_sum": 0.0,
+        "time_pred_sum": 0.0,              # post-activation (what the model outputs)
+        "time_pred_sum_clamped": 0.0,      # post-activation but clamped to >= 0 (reference only)
+        "time_mae_sum": 0.0,
         "time_tgt_sum":  0.0,
         "time_count":    0,
-        "time_pred_neg": 0,
+        "time_pred_neg": 0,                # from time_pre (pre-activation)
+        "time_post_zero": 0,               # post-activation ~ 0 (after softplus)
+        # full value captures for richer stats & plots (safe: ~6–10k rows)
+        "time_pred_vals": [],
+        "time_tgt_vals":  [],
+        "x_pred_vals":    [],
+        "x_tgt_vals":     [],
+        "y_pred_vals":    [],
+        "y_tgt_vals":     [],
         # event-type summaries
         "evt_pred": {"MOVE":0, "CLICK":0, "KEY":0, "SCROLL":0, "MULTI":0},
         "evt_tgt":  {"MOVE":0, "CLICK":0, "KEY":0, "SCROLL":0},
+        # event confusion (rows=tgt, cols=pred) over {CLICK, KEY, SCROLL, MOVE}
+        "evt_cm":   [[0,0,0,0] for _ in range(4)],
+        # optional coordinate errors (we only print them; already in summary)
+        "mae_x_sum": 0.0,
+        "mae_y_sum": 0.0,
+        # key_id top-k on eligible rows (where key_action != NONE)
+        "kid_n": 0,
+        "kid_top1": 0,
+        "kid_top3": 0,
     }
 
 def _update_val_agg(agg: Dict, heads: Dict[str, torch.Tensor], target: torch.Tensor,
@@ -252,6 +407,13 @@ def _update_val_agg(agg: Dict, heads: Dict[str, torch.Tensor], target: torch.Ten
     if kid_keep.any():
         agg["kid_pred"] += torch.bincount(kid_pred[kid_keep], minlength=n_kid).cpu()
         agg["kid_tgt"]  += torch.bincount(kid_tgt[kid_keep],  minlength=n_kid).cpu()
+        # key_id top-k (eligible rows only)
+        agg["kid_n"]     += int(kid_keep.sum().item())
+        # top-1
+        agg["kid_top1"]  += int((kid_pred[kid_keep] == kid_tgt[kid_keep]).sum().item())
+        # top-3
+        top3 = kid_logits.topk(k=3, dim=-1).indices[kid_keep]
+        agg["kid_top3"]  += int((top3 == kid_tgt[kid_keep].unsqueeze(-1)).any(dim=-1).sum().item())
 
     # --- scroll_y mapping: raw {-1,0,+1} -> idx {0,1,2} (none=center) ---
     sy_raw = fl(target[...,6]).long()
@@ -262,44 +424,84 @@ def _update_val_agg(agg: Dict, heads: Dict[str, torch.Tensor], target: torch.Ten
     agg["sy_tgt"]  += torch.bincount(sy_tgt[m],  minlength=n_sy).cpu()
 
     # --- time stats on masked rows ---
-    t_pred = fl(heads["time"])
+    # post-act (what we evaluate with) and pre-act (for negative-rate debug)
+    t_pred = fl(heads["time_q"][..., 1])  # Use median quantile (q=0.5)
     t_tgt  = fl(clamp_time(target[...,0], time_div, time_clip, already_scaled=True))
     t_pred_m = t_pred[m]
     t_tgt_m  = t_tgt[m]
     agg["time_pred_sum"] += float(t_pred_m.sum().item())
+    agg["time_pred_sum_clamped"] += float(t_pred_m.clamp_min(0.0).sum().item())
     agg["time_tgt_sum"]  += float(t_tgt_m.sum().item())
     agg["time_count"]    += int(t_pred_m.numel())
-    agg["time_pred_neg"] += int((t_pred_m < 0).sum().item())
+    agg["time_mae_sum"]  += float((t_pred_m - t_tgt_m).abs().sum().item())
+    agg["time_post_zero"] += int((t_pred_m <= 1e-8).sum().item())
+    # collect full vals for richer stats/plots
+    if t_pred_m.numel() > 0:
+        agg["time_pred_vals"].extend(t_pred_m.detach().flatten().cpu().tolist())
+        agg["time_tgt_vals"].extend(t_tgt_m.detach().flatten().cpu().tolist())
+    # If the model exposes pre-activation, count negatives there:
+    if "time_q_pre" in heads:
+        t_pre_m = fl(heads["time_q_pre"][..., 1])[m]  # Use median quantile (q=0.5)
+        agg["time_pred_neg"] += int((t_pre_m < 0).sum().item())
 
-    # --- event-type summaries & contradictions (pred vs tgt) ---
-    # Predicted non-NONE flags
-    p_btn = (btn_pred != btn_none)
-    p_ka  = (ka_pred  != ka_none)
-    p_sy  = (sy_pred  != sy_none)
-    p_btn = p_btn[m]; p_ka = p_ka[m]; p_sy = p_sy[m]
-    # Target non-NONE flags
-    t_btn = (btn_tgt != btn_none)[m]
-    t_ka  = (ka_tgt  != ka_none)[m]
-    t_sy  = (sy_tgt  != sy_none)[m]
-    # Pred event type (MOVE if none fire; MULTI if more than one fire)
-    nxt = p_btn.to(torch.int) + p_ka.to(torch.int) + p_sy.to(torch.int)
-    if m.any():
-        # counts
-        agg["evt_pred"]["MULTI"] += int((nxt > 1).sum().item())
-        # single-type
-        only_btn = (nxt == 1) & p_btn
-        only_ka  = (nxt == 1) & p_ka
-        only_sy  = (nxt == 1) & p_sy
-        only_mv  = (nxt == 0)
-        agg["evt_pred"]["CLICK"]  += int(only_btn.sum().item())
-        agg["evt_pred"]["KEY"]    += int(only_ka.sum().item())
-        agg["evt_pred"]["SCROLL"] += int(only_sy.sum().item())
-        agg["evt_pred"]["MOVE"]   += int(only_mv.sum().item())
-        # target event type
+    # --- optional: accumulate coordinate MAE (masked) so we can print inside detailed block ---
+    # xy tensors (heteroscedastic means only)
+    x_pred = fl(heads["x_mu"]); y_pred = fl(heads["y_mu"])
+    x_tgt = fl(target[...,1]); y_tgt = fl(target[...,2])
+    xpm = x_pred[m]; xtm = x_tgt[m]
+    ypm = y_pred[m]; ytm = y_tgt[m]
+    agg["mae_x_sum"] += float((xpm - xtm).abs().sum().item())
+    agg["mae_y_sum"] += float((ypm - ytm).abs().sum().item())
+    if xpm.numel() > 0:
+        agg["x_pred_vals"].extend(xpm.detach().flatten().cpu().tolist())
+        agg["x_tgt_vals"].extend(xtm.detach().flatten().cpu().tolist())
+        agg["y_pred_vals"].extend(ypm.detach().flatten().cpu().tolist())
+        agg["y_tgt_vals"].extend(ytm.detach().flatten().cpu().tolist())
+
+    # --- event-type summaries (from event head) ---
+    with torch.no_grad():
+        n_btn = int(enum_sizes["button"]["size"])
+        n_ka  = int(enum_sizes["key_action"]["size"])
+        n_sy  = int(enum_sizes["scroll_y"]["size"])
+        btn_none = int(enum_sizes["button"]["none_index"])
+        ka_none  = int(enum_sizes["key_action"]["none_index"])
+        sy_none  = int(enum_sizes["scroll_y"]["none_index"])
+
+        # Define m_flat for both paths
+        m_flat = m.view(-1)
+        
+        # --- event predictions: event head only ---
+        evt_pred = heads["event_logits"].argmax(-1)  # (B,A)
+        evt_pred_m = evt_pred.view(-1)[m]
+        agg["evt_pred"]["CLICK"]  += int((evt_pred_m == 0).sum().item())
+        agg["evt_pred"]["KEY"]    += int((evt_pred_m == 1).sum().item())
+        agg["evt_pred"]["SCROLL"] += int((evt_pred_m == 2).sum().item())
+        agg["evt_pred"]["MOVE"]   += int((evt_pred_m == 3).sum().item())
+
+        # --- event TARGETS using canonical order (CLICK=0, KEY=1, SCROLL=2, MOVE=3) ---
+        btn_tgt = target[...,3].long().view(-1)
+        ka_tgt  = target[...,4].long().view(-1)
+        sy_raw  = target[...,6].long().view(-1)  # {-1,0,+1}
+        t_sy = (sy_raw != 0)
+        t_btn = (btn_tgt != btn_none)
+        t_ka  = (ka_tgt  != ka_none)
+        evt_tgt = torch.where(t_btn, torch.tensor(0, device=sy_raw.device),   # CLICK idx 0
+                              torch.where(t_ka,  torch.tensor(1, device=sy_raw.device),   # KEY idx 1
+                              torch.where(t_sy,  torch.tensor(2, device=sy_raw.device),   # SCROLL idx 2
+                                                   torch.tensor(3, device=sy_raw.device)))) # MOVE idx 3
+        
+        # Confusion matrix
+        for t, p in zip(evt_tgt[m_flat].tolist(), evt_pred_m.tolist()):
+            agg["evt_cm"][t][p] += 1
+
+        # Target non-NONE flags using canonical order
+        t_btn = (btn_tgt != btn_none)[m]
+        t_ka  = (ka_tgt  != ka_none)[m]
+        t_sy  = (sy_tgt  != sy_none)[m]
         t_is = t_btn.to(torch.int) + t_ka.to(torch.int) + t_sy.to(torch.int)
-        agg["evt_tgt"]["SCROLL"] += int((t_sy & m[m]).sum().item())  # m[m] is all True; kept for clarity
-        agg["evt_tgt"]["CLICK"]  += int(((~t_sy) & t_btn).sum().item())
-        agg["evt_tgt"]["KEY"]    += int(((~t_sy) & (~t_btn) & t_ka).sum().item())
+        agg["evt_tgt"]["CLICK"]  += int(t_btn.sum().item())
+        agg["evt_tgt"]["KEY"]    += int(t_ka.sum().item())
+        agg["evt_tgt"]["SCROLL"] += int(t_sy.sum().item())
         agg["evt_tgt"]["MOVE"]   += int((t_is == 0).sum().item())
 
 def _topk_from_counts(counts: torch.Tensor, k: int = 10):
@@ -308,145 +510,143 @@ def _topk_from_counts(counts: torch.Tensor, k: int = 10):
     out = [(i, arr[i]) for i in order[:k] if arr[i] > 0]
     return out
 
-def _print_val_agg(agg: Dict, enum_sizes: Dict, time_div: float):
-    def pct(cnt, total): return (100.0*cnt/total) if total > 0 else 0.0
+def _print_val_agg(agg: Dict, enum_sizes: Dict, time_div: float, outdir: str = None, epoch_idx: int = None):
+    def topk_counts(counts: List[int], k=10):
+        return _topk_counts_list(counts, k)
+    total_masked = agg["time_count"]  # same denominator for most per-row stats
+
     print("=== Detailed validation report ===")
-    total_masked = int(agg["time_count"])
     print(f"masked rows used: {total_masked}")
-    # Button
-    btn_tot = int(agg["btn_pred"].sum().item())
-    print(f"[button] pred total={btn_tot}, top5={_topk_from_counts(agg['btn_pred'],5)}, tgt top5={_topk_from_counts(agg['btn_tgt'],5)}")
-    # Key action
-    ka_tot = int(agg["ka_pred"].sum().item())
-    print(f"[key_action] pred total={ka_tot}, top5={_topk_from_counts(agg['ka_pred'],5)}, tgt top5={_topk_from_counts(agg['ka_tgt'],5)}")
-    # Key id
-    kid_tot = int(agg["kid_pred"].sum().item())
-    print(f"[key_id] pred total={kid_tot}, top10={_topk_from_counts(agg['kid_pred'],10)}")
-    # Scroll
-    sy_tot = int(agg["sy_pred"].sum().item())
-    print(f"[scroll_y] pred total={sy_tot}, counts={_topk_from_counts(agg['sy_pred'],3)} (idx order)")
-    # Time
-    if total_masked > 0:
-        mean_pred = agg["time_pred_sum"]/total_masked
-        mean_tgt  = agg["time_tgt_sum"]/total_masked
-        print(f"[time] mean_pred={mean_pred:.4f} ({mean_pred*time_div:.1f} ms) | mean_tgt={mean_tgt:.4f} ({mean_tgt*time_div:.1f} ms) "
-              f"| neg_pred_frac={pct(agg['time_pred_neg'], total_masked):.2f}%")
-    # Event types & contradictions
+    # Button / Key Action: show both preds & tgts (plain ints)
+    btn_pred_sum = sum(_as_int(c) for c in agg['btn_pred']); btn_tgt_sum = sum(_as_int(c) for c in agg['btn_tgt'])
+    ka_pred_sum  = sum(_as_int(c) for c in agg['ka_pred']);  ka_tgt_sum  = sum(_as_int(c) for c in agg['ka_tgt'])
+    print(f"[button]     pred total={btn_pred_sum}, top5={[(i,_as_int(c)) for i,c in topk_counts(agg['btn_pred'],5)]}, tgt top5={[(i,_as_int(c)) for i,c in topk_counts(agg['btn_tgt'],5)]}")
+    print(f"[key_action] pred total={ka_pred_sum},  top5={[(i,_as_int(c)) for i,c in topk_counts(agg['ka_pred'],5)]},  tgt top5={[(i,_as_int(c)) for i,c in topk_counts(agg['ka_tgt'],5)]}")
+    # Key ID: show both preds & tgts (only counted where key_action!=NONE)
+    kid_pred_sum = sum(_as_int(c) for c in agg['kid_pred'])
+    kid_tgt_sum  = sum(_as_int(c) for c in agg['kid_tgt'])
+    print(f"[key_id]     pred total={kid_pred_sum}, top10={[(i,_as_int(c)) for i,c in topk_counts(agg['kid_pred'],10)]}")
+    print(f"[key_id]     tgt  total={kid_tgt_sum},  top10={[(i,_as_int(c)) for i,c in topk_counts(agg['kid_tgt'],10)]}")
+    if agg["kid_n"] > 0:
+        top1 = 100.0 * agg["kid_top1"] / agg["kid_n"]
+        top3 = 100.0 * agg["kid_top3"] / agg["kid_n"]
+        print(f"[key_id]     top-1={top1:.1f}% | top-3={top3:.1f}% (n={agg['kid_n']})")
+    # Scroll: show both preds & tgts
+    sy_pred_sum = sum(_as_int(c) for c in agg['sy_pred']); sy_tgt_sum = sum(_as_int(c) for c in agg['sy_tgt'])
+    sy_pred_pairs = [(i,_as_int(c)) for i,c in enumerate(agg['sy_pred']) if _as_int(c)>0]
+    sy_tgt_pairs  = [(i,_as_int(c)) for i,c in enumerate(agg['sy_tgt'])  if _as_int(c)>0]
+    print(f"[scroll_y]   pred total={sy_pred_sum}, counts={sy_pred_pairs}  (idx: 0=-1, 1=NONE, 2=+1)")
+    print(f"[scroll_y]   tgt  total={sy_tgt_sum},  counts={sy_tgt_pairs}   (idx: 0=-1, 1=NONE, 2=+1)")
+    mean_pred = agg["time_pred_sum"]/total_masked if total_masked>0 else 0.0
+    mean_tgt  = agg["time_tgt_sum"]/total_masked if total_masked>0 else 0.0
+    mae_t     = agg["time_mae_sum"]/total_masked if total_masked>0 else 0.0
+    print(f"[time] mean_pred={mean_pred:.4f} ({mean_pred*time_div:.1f} ms) | mean_tgt={mean_tgt:.4f} ({mean_tgt*time_div:.1f} ms)")
+    print(f"[time/ref] mean_pred_clamped={agg['time_pred_sum_clamped']/total_masked:.4f} ({(agg['time_pred_sum_clamped']/total_masked)*time_div:.1f} ms)")
+    print(f"[time] mae={mae_t*time_div:.1f} ms")
+    # richer distribution stats for time/x/y
+    tp = torch.tensor(agg["time_pred_vals"])
+    tt = torch.tensor(agg["time_tgt_vals"])
+    xp = torch.tensor(agg["x_pred_vals"])
+    xt = torch.tensor(agg["x_tgt_vals"])
+    yp = torch.tensor(agg["y_pred_vals"])
+    yt = torch.tensor(agg["y_tgt_vals"])
+    if tp.numel() and tt.numel():
+        sp = _percentiles_t(tp); st = _percentiles_t(tt)
+        def fmt_ms(d): return {k:(v*time_div if k!="uniq" else v) for k,v in d.items()}
+        spm, stm = fmt_ms(sp), fmt_ms(st)
+        print(f"[time/dist] pred ms: min={spm['min']:.1f} p25={spm['p25']:.1f} med={spm['median']:.1f} p75={spm['p75']:.1f} max={spm['max']:.1f} | mean={spm['mean']:.1f} std={spm['std']:.1f} | uniq={spm['uniq']}")
+        print(f"[time/dist]  tgt ms: min={stm['min']:.1f} p25={stm['p25']:.1f} med={stm['median']:.1f} p75={stm['p75']:.1f} max={stm['max']:.1f} | mean={stm['mean']:.1f} std={stm['std']:.1f} | uniq={stm['uniq']}")
+    if xp.numel() and xt.numel():
+        sxp = _percentiles_t(xp); sxt = _percentiles_t(xt)
+        syp = _percentiles_t(yp); syt = _percentiles_t(yt)
+        def fmt_xy(tag, spred, stgt):
+            print(f"[{tag}/dist] pred: min={spred['min']:.1f} p25={spred['p25']:.1f} med={spred['median']:.1f} p75={spred['p75']:.1f} max={spred['max']:.1f} | mean={spred['mean']:.1f} std={spred['std']:.1f} | uniq={spred['uniq']}")
+            print(f"[{tag}/dist]  tgt: min={stgt['min']:.1f} p25={stgt['p25']:.1f} med={stgt['median']:.1f} p75={stgt['p75']:.1f} max={stgt['max']:.1f} | mean={stgt['mean']:.1f} std={stgt['std']:.1f} | uniq={stgt['uniq']}")
+        fmt_xy("x", sxp, sxt)
+        fmt_xy("y", syp, syt)
+    if getattr(CFG, "debug_time", False):
+        def pct(n,d): return 100.0*n/max(1,d)
+        print(f"[time/debug] post_zero_frac={pct(agg['time_post_zero'], total_masked):.2f}%")
+        if 'time_pred_neg' in agg:
+            print(f"[time/debug] pre_neg_frac={pct(agg['time_pred_neg'], total_masked):.2f}%")
+    # Echo coordinate MAE in the detailed block too (rounded)
+    if agg["mae_x_sum"] > 0 or agg["mae_y_sum"] > 0:
+        print(f"[xy] mae_x={agg['mae_x_sum']/total_masked:.1f} px | mae_y={agg['mae_y_sum']/total_masked:.1f} px")
+    # Event distributions + pretty confusion matrix
     ep = agg["evt_pred"]; et = agg["evt_tgt"]
-    pred_sum = sum(ep.values())
-    tgt_sum  = sum(et.values())
-    print(f"[event(pred)] MOVE={ep['MOVE']} ({pct(ep['MOVE'],pred_sum):.1f}%), "
-          f"CLICK={ep['CLICK']} ({pct(ep['CLICK'],pred_sum):.1f}%), "
-          f"KEY={ep['KEY']} ({pct(ep['KEY'],pred_sum):.1f}%), "
-          f"SCROLL={ep['SCROLL']} ({pct(ep['SCROLL'],pred_sum):.1f}%), "
-          f"MULTI={ep['MULTI']} ({pct(ep['MULTI'],pred_sum):.1f}%)")
-    print(f"[event(tgt)]  MOVE={et['MOVE']} ({pct(et['MOVE'],tgt_sum):.1f}%), "
-          f"CLICK={et['CLICK']} ({pct(et['CLICK'],tgt_sum):.1f}%), "
-          f"KEY={et['KEY']} ({pct(et['KEY'],tgt_sum):.1f}%), "
-          f"SCROLL={et['SCROLL']} ({pct(et['SCROLL'],tgt_sum):.1f}%)")
+    total_evt = sum(ep.values())  # same as total_masked
+    def fr(v): return f"{v} ({100.0*v/max(1,total_evt):.1f}%)"
+    print(f"[event(pred)] MOVE={fr(ep['MOVE'])}, CLICK={fr(ep['CLICK'])}, KEY={fr(ep['KEY'])}, SCROLL={fr(ep['SCROLL'])}, MULTI={fr(ep['MULTI'])}")
+    print(f"[event(tgt)]  MOVE={fr(et['MOVE'])}, CLICK={fr(et['CLICK'])}, KEY={fr(et['KEY'])}, SCROLL={fr(et['SCROLL'])}")
+    # Confusion (rows=tgt, cols=pred) with labels
+    labels = ["CLICK","KEY","SCROLL","MOVE"]
+    cm = [[_as_int(c) for c in row] for row in agg["evt_cm"]]
+    # header
+    header = " " * 12 + " | " + "  ".join(f"{lab:>6}" for lab in labels) + " |  total"
+    print(header)
+    print("-" * len(header))
+    for i, row in enumerate(cm):
+        row_total = max(1, sum(row))
+        cells = "  ".join(f"{n:>6}" for n in row)
+        pct  = "  ".join(f"{(n/row_total*100):>5.1f}%" for n in row)
+        print(f"{labels[i]:>12} | {cells} | {row_total:>6}")
+        print(f"{'':>12} | {pct} |")
     print("=== End detailed report ===")
+
+    # -------- optional plots saved under checkpoints/<run>/val_plots/ --------
+    if outdir and _MPL_OK:
+        os.makedirs(outdir, exist_ok=True)
+        eid = f"epoch_{int(epoch_idx):03d}" if epoch_idx is not None else "epoch"
+        # time series overlay (downsample to first 2k points to keep files small)
+        try:
+            maxn = 2000
+            if tp.numel() and tt.numel():
+                n = min(int(tp.numel()), int(tt.numel()), maxn)
+                x_axis = range(n)
+                plt.figure(figsize=(10,3))
+                plt.plot(x_axis, (tp[:n]*time_div).cpu().numpy(), label="pred ms")
+                plt.plot(x_axis, (tt[:n]*time_div).cpu().numpy(), label="tgt ms", alpha=0.7)
+                plt.legend(); plt.xlabel("masked row idx"); plt.ylabel("time (ms)"); plt.tight_layout()
+                plt.savefig(os.path.join(outdir, f"{eid}_time_series.png")); plt.close()
+                # residual histogram
+                res = (tp - tt).cpu().numpy() * time_div
+                plt.figure(figsize=(6,4)); plt.hist(res, bins=50)
+                plt.xlabel("time residual (ms)"); plt.ylabel("count"); plt.tight_layout()
+                plt.savefig(os.path.join(outdir, f"{eid}_time_residual_hist.png")); plt.close()
+            if xp.numel() and xt.numel():
+                n = min(int(xp.numel()), int(xt.numel()), maxn)
+                xa = range(n)
+                plt.figure(figsize=(10,3))
+                plt.plot(xa, xp[:n].cpu().numpy(), label="x pred")
+                plt.plot(xa, xt[:n].cpu().numpy(), label="x tgt", alpha=0.7)
+                plt.legend(); plt.xlabel("masked row idx"); plt.ylabel("x (px)"); plt.tight_layout()
+                plt.savefig(os.path.join(outdir, f"{eid}_x_series.png")); plt.close()
+                rx = (xp - xt).cpu().numpy()
+                plt.figure(figsize=(6,4)); plt.hist(rx, bins=50)
+                plt.xlabel("x residual (px)"); plt.ylabel("count"); plt.tight_layout()
+                plt.savefig(os.path.join(outdir, f"{eid}_x_residual_hist.png")); plt.close()
+            if yp.numel() and yt.numel():
+                n = min(int(yp.numel()), int(yt.numel()), maxn)
+                xa = range(n)
+                plt.figure(figsize=(10,3))
+                plt.plot(xa, yp[:n].cpu().numpy(), label="y pred")
+                plt.plot(xa, yt[:n].cpu().numpy(), label="y tgt", alpha=0.7)
+                plt.legend(); plt.xlabel("masked row idx"); plt.ylabel("y (px)"); plt.tight_layout()
+                plt.savefig(os.path.join(outdir, f"{eid}_y_series.png")); plt.close()
+                ry = (yp - yt).cpu().numpy()
+                plt.figure(figsize=(6,4)); plt.hist(ry, bins=50)
+                plt.xlabel("y residual (px)"); plt.ylabel("count"); plt.tight_layout()
+                plt.savefig(os.path.join(outdir, f"{eid}_y_residual_hist.png")); plt.close()
+        except Exception as e:
+            print(f"[warn] plotting failed: {e}")
 
 # (removed: legacy V1 IL loss)
 
 import torch
 import torch.nn.functional as F
 
-def compute_il_loss_v2(heads, target, valid_mask, class_w, loss_w, time_div, time_clip, enum_sizes):
-    """
-    heads: dict with keys:
-        'time','x','y' -> [B,A] or [B,A,1]
-        'button_logits' -> [B,A,C_btn]
-        'key_action_logits' -> [B,A,C_ka]
-        'key_id_logits' -> [B,A,C_kid]
-        'scroll_y_logits' -> [B,A,C_sy]
-    target: [B,A,7] (v2: [time,x,y,click,key_action,key_id,scroll_y_raw])
-    valid_mask: [B,A] or flat [B*A]
-    class_w: dict of optional class weight tensors/lists for 'btn','ka','kid','sy'
-    loss_w: dict of scalars for 'time','x','y','btn','ka','kid','sy'
-    enum_sizes: dict with e.g. {'key_action': {'none_index': 0}, 'scroll_y': {'size': 3, 'none_index': 1}}
-    """
 
-    B, A, _ = target.shape
 
-    # ---- mask prep ----
-    m2d = valid_mask
-    if m2d.dtype != torch.bool:
-        m2d = m2d > 0
-    if m2d.dim() == 1:
-        m2d = m2d.view(B, A)
-    elif m2d.shape[:2] != (B, A):
-        m2d = m2d.view(B, A)
-    m_flat = m2d.view(-1)
-
-    # ---- sizes ----
-    n_btn = heads["button_logits"].shape[-1]
-    n_ka  = heads["key_action_logits"].shape[-1]
-    n_kid = heads["key_id_logits"].shape[-1]
-    n_sy  = int(enum_sizes["scroll_y"]["size"])
-    none_idx_ka = int(enum_sizes["key_action"]["none_index"])
-    none_idx_sy = int(enum_sizes["scroll_y"]["none_index"])  # usually 1 for {-1,0,+1} → {0,1,2}
-
-    # ---- helpers ----
-    def _squeeze(x):
-        return x.squeeze(-1) if x.dim() == 3 and x.size(-1) == 1 else x
-
-    def _to_weight(key, logits):
-        w = class_w.get(key, None)
-        if isinstance(w, torch.Tensor):
-            return w.to(logits.device, dtype=logits.dtype)
-        elif w is not None:
-            # list/np -> tensor
-            return torch.tensor(w, device=logits.device, dtype=logits.dtype)
-        return None
-
-    mask_f = m2d.float()
-    denom  = mask_f.sum().clamp_min(1.0)
-
-    # ---- TIME (masked 2D) ----
-    t_pred = _squeeze(heads["time"])  # [B,A]
-    t_tgt  = clamp_time(target[..., 0], time_div, time_clip, already_scaled=True)  # [B,A]
-    l_time = (F.smooth_l1_loss(t_pred, t_tgt, reduction="none") * mask_f).sum() / denom
-
-    # ---- X/Y (masked 2D) ----
-    x_pred = _squeeze(heads["x"])  # [B,A]
-    y_pred = _squeeze(heads["y"])  # [B,A]
-    l_x = (F.smooth_l1_loss(x_pred, target[..., 1], reduction="none") * mask_f).sum() / denom
-    l_y = (F.smooth_l1_loss(y_pred, target[..., 2], reduction="none") * mask_f).sum() / denom
-
-    # ---- BUTTON (masked flat) ----
-    btn_logits = heads["button_logits"].view(-1, n_btn)
-    btn_tgt    = target[..., 3].long().view(-1).clamp(0, n_btn - 1)
-    l_btn      = F.cross_entropy(btn_logits[m_flat], btn_tgt[m_flat], weight=_to_weight("btn", btn_logits))
-
-    # ---- KEY ACTION (masked flat) ----
-    ka_logits = heads["key_action_logits"].view(-1, n_ka)
-    ka_tgt    = target[..., 4].long().view(-1).clamp(0, n_ka - 1)
-    l_ka      = F.cross_entropy(ka_logits[m_flat], ka_tgt[m_flat], weight=_to_weight("ka", ka_logits))
-
-    # ---- KEY ID (gated by KA != NONE, masked flat) ----
-    kid_logits = heads["key_id_logits"].view(-1, n_kid)
-    kid_tgt    = target[..., 5].long().view(-1).clamp(0, n_kid - 1)
-    ka_flat    = target[..., 4].long().view(-1)
-    kid_mask   = m_flat & (ka_flat != none_idx_ka)
-    if kid_mask.any():
-        l_kid = F.cross_entropy(kid_logits[kid_mask], kid_tgt[kid_mask], weight=_to_weight("kid", kid_logits))
-    else:
-        l_kid = torch.tensor(0.0, device=target.device)
-
-    # ---- SCROLL Y (remap {-1,0,+1} -> indices, masked flat) ----
-    sy_raw  = target[..., 6].long()                # [-1,0,+1]
-    sy_idx  = (sy_raw + none_idx_sy).clamp(0, n_sy - 1).view(-1)  # {0,1,2}
-    sy_logits = heads["scroll_y_logits"].view(-1, n_sy)
-    l_sy = F.cross_entropy(sy_logits[m_flat], sy_idx[m_flat], weight=_to_weight("sy", sy_logits))
-
-    # ---- weighted sum ----
-    return (loss_w["time"] * l_time +
-            loss_w["x"]    * l_x +
-            loss_w["y"]    * l_y +
-            loss_w["btn"]  * l_btn +
-            loss_w["key_action"]   * l_ka + 
-            loss_w["key_id"]  * l_kid + 
-            loss_w["scroll_y"]   * l_sy)
 
 def _masked_metrics(heads: dict, target: torch.Tensor, targets_version="v2"):
     """Simple masked metrics to track IL progress."""
@@ -476,9 +676,9 @@ def _masked_metrics(heads: dict, target: torch.Tensor, targets_version="v2"):
             "acc_key_action": m_acc(ka, tka),
             "acc_key_id": m_acc(kid, tkid),
             "acc_scroll_y": m_acc(sy, tsy),
-            "mae_time": m_mae(heads["time"], target[...,0]),
-            "mae_x":    m_mae(heads["x"],    target[...,1]),
-            "mae_y":    m_mae(heads["y"],    target[...,2]),
+            "mae_time": m_mae(heads["time_q"][..., 1], target[...,0]),  # Use median quantile (q=0.5)
+            "mae_x":    m_mae(heads["x_mu"],    target[...,1]),  # Use heteroscedastic mean
+            "mae_y":    m_mae(heads["y_mu"],    target[...,2]),  # Use heteroscedastic mean
             "valid_frac": valid_frac,
         }
 
@@ -521,6 +721,14 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
     ckpt_dir = os.path.join("checkpoints", datetime.now().strftime("%Y%m%d_%H%M%S"))
     os.makedirs(ckpt_dir, exist_ok=True)
     
+    # Create ActionTensorLoss criterion
+    if enum_sizes is not None:
+        from ilbot.model.losses import ActionTensorLoss
+        criterion = ActionTensorLoss(enum_sizes)
+        print(f"Created ActionTensorLoss with enum_sizes: {list(enum_sizes.keys())}")
+    else:
+        raise ValueError("enum_sizes is required for ActionTensorLoss")
+    
 
     for epoch in range(num_epochs):
         # Training phase
@@ -540,6 +748,28 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
             # Forward pass
             optimizer.zero_grad()
             outputs = model(temporal_sequence, action_sequence, return_logits=True)
+
+            # --- DEBUG: shapes, masks, and basic stats
+            tgt = {"event": action_target[..., 1], "scroll_y_idx": action_target[..., 6], "time_ms": action_target[..., 0], "xy_px": action_target[..., 2:4]}
+            mask = batch.get("valid_mask", None)
+            if mask is not None:
+                valid_sum = int(mask.detach().sum().item())
+                total = int(mask.numel())
+                LOG.info("[dbg-train] batch_idx=%d valid_sum=%d / %d (%.2f%%)",
+                         batch_idx, valid_sum, total, 100.0*valid_sum/max(1,total))
+            _dbg_counts("tgt.event", tgt.get("event"), mask)
+            _dbg_counts("tgt.scroll_y_idx", tgt.get("scroll_y_idx"), mask)
+            _dbg_hist("tgt.time_ms", tgt.get("time_ms"), mask)
+            # XY index audit - Replace your current y tap with this very explicit version:
+            # Suppose action_target shape is (B, A, C)
+            x_col, y_col = 1, 2  # <the exact indices you believe are x and y>
+            x_t = action_target[..., x_col]
+            y_t = action_target[..., y_col]
+            print(f"[CHK] tgt.xy_px_x (masked) min={x_t[mask].min():.1f} max={x_t[mask].max():.1f}")
+            print(f"[CHK] tgt.xy_px_y (masked) min={y_t[mask].min():.1f} max={y_t[mask].max():.1f}")
+            
+            _dbg_hist("tgt.xy_px_x", tgt.get("xy_px")[...,0] if tgt.get("xy_px") is not None else None, mask)
+            _dbg_hist("tgt.xy_px_y", tgt.get("xy_px")[...,1] if tgt.get("xy_px") is not None else None, mask)
 
             # how many total train batches this epoch
             total_train_batches = len(train_loader)
@@ -592,16 +822,43 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
 
                 print(f"[dbg] B={B} A={A} valid={total_valid} ({frac:.3f}) | "
                     f"kid_rows={kid_rows} | sy_rows={sy_rows} (nonzero={sy_events})")
+                
+                # Sanity check: verify model outputs match loss consumption
+                if isinstance(outputs, dict):
+                    expected_keys = {"event_logits", "time_q_pre", "time_q", "x_mu", "x_logsig", "y_mu", "y_logsig", 
+                                   "button_logits", "key_action_logits", "key_id_logits", "scroll_y_logits"}
+                    actual_keys = set(outputs.keys())
+                    missing_keys = expected_keys - actual_keys
+                    extra_keys = actual_keys - expected_keys
+                    if missing_keys:
+                        raise ValueError(f"Model missing required outputs: {missing_keys}")
+                    if extra_keys:
+                        print(f"[warn] Model has extra outputs: {extra_keys}")
+                    print(f"[sanity] ✓ Model outputs match loss consumption ({len(expected_keys)} keys)")
             # ---------------------------------------------------------------------------
 
             
             if isinstance(outputs, dict):
-                # V2 only
+                # Use ActionTensorLoss for V2 outputs
                 valid_mask = batch['valid_mask'].to(device)
-                loss = compute_il_loss_v2(outputs, action_target, valid_mask, class_w, loss_w, time_div, time_clip, enum_sizes)
+                loss, loss_details = criterion(outputs, action_target, valid_mask)
             else:
                 # Back-compat with legacy tensor output + custom criterion
                 loss = criterion(outputs, action_target)
+
+            # --- DEBUG: check if any head is constant / NaN / wrong sized
+            for k,v in outputs.items():
+                if torch.is_tensor(v):
+                    if torch.isnan(v).any():
+                        LOG.error("[DBG] outputs.%s contains NaNs", k)
+                    _dbg_hist(f"out.{k}", v)
+
+            # --- DEBUG: individual loss terms
+            try:
+                for lk, lv in loss_details.items():
+                    LOG.info("[dbg-train] loss[%s]=%.4f", lk, float(lv.detach().item()))
+            except Exception:
+                pass
             
             # Backward pass
             loss.backward()
@@ -637,6 +894,16 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
                 action_target = batch['action_target'].to(device)
                 
                 outputs = model(temporal_sequence, action_sequence, return_logits=True)
+
+                # --- DEBUG: validation targets and masks
+                tgt = {"event": action_target[..., 1], "scroll_y_idx": action_target[..., 6], "time_ms": action_target[..., 0], "xy_px": action_target[..., 2:4]}
+                mask = batch.get("valid_mask", None)
+                if mask is not None:
+                    LOG.info("[dbg-val] batch_idx=%d valid_sum=%d / %d",
+                             val_idx, int(mask.detach().sum().item()), int(mask.numel()))
+                _dbg_counts("VAL tgt.event", tgt.get("event"), mask)
+                _dbg_counts("VAL tgt.scroll_y_idx", tgt.get("scroll_y_idx"), mask)
+                _dbg_hist("VAL tgt.time_ms", tgt.get("time_ms"), mask)
 
                 # how many total VAL batches this epoch
                 n_val_batches = len(val_loader)
@@ -691,9 +958,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
 
 
                 if isinstance(outputs, dict):
-                    # V2 only
+                    # Use ActionTensorLoss for V2 outputs
                     valid_mask = batch['valid_mask'].to(device)
-                    vloss = compute_il_loss_v2(outputs, action_target, valid_mask, class_w, loss_w, time_div, time_clip, enum_sizes)
+                    vloss, vloss_details = criterion(outputs, action_target, valid_mask)
                     mm = _masked_metrics(outputs, action_target, "v2")
                     for k in vm: vm[k] += mm[k]
                     vm_n += 1
@@ -702,6 +969,14 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
                         _update_val_agg(val_agg, outputs, action_target, vm_mask, enum_sizes, time_div, time_clip)
                 else:
                     vloss = criterion(outputs, action_target)
+
+                # --- DEBUG: validation loss terms
+                try:
+                    if isinstance(outputs, dict) and 'vloss_details' in locals():
+                        for lk, lv in vloss_details.items():
+                            LOG.info("[dbg-val] loss[%s]=%.4f", lk, float(lv.detach().item()))
+                except Exception:
+                    pass
                 val_loss_sum += float(vloss.item())
                 val_batches += 1
         
@@ -720,7 +995,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
                   f"| valid_frac={vm['valid_frac']:.3f}")
             # print detailed per-head distributions and time stats
             if val_agg is not None:
-                _print_val_agg(val_agg, enum_sizes, time_div)
+                # Save plots to run checkpoint dir
+                plot_dir = os.path.join(ckpt_dir, "val_plots")
+                _print_val_agg(val_agg, enum_sizes, time_div, outdir=plot_dir, epoch_idx=epoch+1)
         else:
             print(f"Epoch {epoch+1} Summary:")
             print(f"  Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
@@ -976,10 +1253,10 @@ def run_training(config: dict):
     })
 
     # 3) optimizer/scheduler
-    lr = config.get("lr", 2.5e-4)
+    lr = config.get("lr", 1e-4)  # Reduce learning rate for stability
     wd = config.get("weight_decay", 1e-4)
-    step_size = config.get("step_size", 8)
-    gamma = config.get("gamma", 0.5)
+    step_size = config.get("step_size", 4)  # More frequent LR reduction
+    gamma = config.get("gamma", 0.7)  # Gentler LR reduction
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
 

@@ -3,20 +3,39 @@
 Configuration file for OSRS imitation learning
 """
 
-# Event classification reweighting (MOVE, CLICK, KEY, SCROLL)
-# Rationale: dataset is ~95% MOVE; these tempered weights keep rare classes learning
-# without exploding gradients. You can set to None to auto-compute from label counts.
-event_cls_weights = [1.0, 8.0, 6.0, 12.0]  # or None → auto (tempered inverse-frequency)
+# Canonical event class order used everywhere (indices 0..3)
+EVENT_ORDER = ["CLICK", "KEY", "SCROLL", "MOVE"]
 
-# Enforce physically non-negative time at the model head.
-# If True, time head uses softplus; negatives cannot occur.
-# If False, reporting will still print negative stats un-clamped.
-time_positive = False
+# Time (seconds). Targets are already scaled in v2; we clamp for metrics.
+time_clip = 3.0
+time_div = 1000
+time_quantiles = [0.1, 0.5, 0.9]
+# bias so softplus(bias) ≈ dataset median (~11ms for true Δt, ~24ms for prior)
+# From your data: targets are ~29.3ms, so bias should be log(29.3/1000) ≈ -3.4
+time_head_bias_default = -3.4
 
-# Validation report knobs
-report_examples = 8            # how many raw example predictions to print
-report_k_top = 5               # top-k for key_id and scroll_y in report
-exclusive_event = True         # derive event by argmax(event_logits); forbids MULTI in reports
+# XY heteroscedastic floor (pixels)
+xy_min_sigma = 3.0
 
-# Optional: also show a reference "clamped-to-0" mean for time (raw stays raw)
+# Event head CE weights and loss weight (CLICK, KEY, SCROLL, MOVE)
+# Up-weight rare events: CLICK and SCROLL
+event_cls_weights = [8.0, 1.0, 12.0, 1.0]
+event_loss_weight = 1.0
+
+# Loss weights for different components
+# Aggressive weights to force learning and prevent collapse
+loss_weights = {
+    "event": 5.0,    # Much stronger event weight to break collapse
+    "time": 3.0,     # Stronger time weight to prevent all-zeros
+    "xy": 2.0,       # Increase XY weight for better coordinate learning
+    "btn": 1.0,      # Keep legacy weights
+    "ka": 1.0,
+    "kid": 1.0,
+    "sy": 1.0
+}
+
+# Reporting configuration
+report_k_top = 10
+report_examples = 20
 report_time_clamped_reference = False
+debug_time = False

@@ -1,0 +1,17 @@
+diff --git a/ilbot/model/losses.py b/ilbot/model/losses.py
+index 0000000..0000001 100644
+--- a/ilbot/model/losses.py
++++ b/ilbot/model/losses.py
+@@ -1,6 +1,7 @@
+ import torch
+-from torch.nn import functional as F
++import torch.nn.functional as F
++import torch.nn as nn
+ 
+ ...
+ 
+ def _make_event_criterion(class_weights=None, device=None):
+@@
+-    return F.CrossEntropyLoss(weight=w)
++    # CrossEntropyLoss is a module under torch.nn (F has the functional 'cross_entropy')
++    return nn.CrossEntropyLoss(weight=w)

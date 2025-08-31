@@ -7,6 +7,21 @@ import torch
 import numpy as np
 from typing import Dict
 
+# Add debugging imports
+import logging
+import torch
+LOG = logging.getLogger(__name__)
+
+def apply_masks_for_head(name, mask_dict, base_mask):
+    # Check mask intersections per head
+    m = base_mask.clone()
+    head_m = mask_dict.get(name, None)
+    if head_m is not None:
+        m = m & head_m.bool()
+    kept = int(m.sum().item())
+    LOG.info("[DBG] mask[%s]: kept=%d / %d", name, kept, int(m.numel()))
+    return m
+
 def denorm_time(t_norm, stats):
     """Denormalize time values based on normalization mode"""
     mode = stats.get("time_norm", "z")  # "z" or "minmax" or "none"
@@ -60,3 +75,21 @@ def topk_counts(arr, k=5):
     pairs = list(zip(uniques.tolist(), counts.tolist()))
     pairs.sort(key=lambda t: t[1], reverse=True)
     return pairs[:k]
+
+def compute_event_metrics(outputs, targets):
+    logits = outputs.get("event_logits")
+    if logits is None:
+        LOG.error("[DBG] event_logits missing; refusing to use scroll_y_logits fallback")
+        return {}
+    tgt = targets.get("event")
+    if tgt is None:
+        LOG.error("[DBG] targets.event missing")
+        return {}
+    
+    pred = logits.argmax(dim=-1)
+    LOG.info("[DBG] EVENT: pred counts=%s", torch.bincount(pred.view(-1).cpu(), minlength=logits.size(-1)).tolist())
+    LOG.info("[DBG] EVENT: tgt  counts=%s", torch.bincount(tgt.view(-1).cpu(), minlength=logits.size(-1)).tolist())
+    
+    # Compute accuracy
+    correct = (pred == tgt).float().mean()
+    return {"event_accuracy": correct.item()}

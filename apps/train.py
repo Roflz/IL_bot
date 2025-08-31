@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+
+# --- force verbose module logging ---
+import logging, sys
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+
+# Make sure our modules actually bubble up INFO:
+for name in ("train_loop", "losses", "metrics", "eval", "imitation_hybrid_model"):
+    logging.getLogger(name).setLevel(logging.INFO)
+    logging.getLogger(name).propagate = True
+
 import argparse, json
 from pathlib import Path
 from ilbot.training.train_loop import run_training
