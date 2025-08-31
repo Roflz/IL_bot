@@ -61,12 +61,12 @@ class GamestateEncoder(nn.Module):
         self.hidden_dim = hidden_dim
         self.feature_spec = feature_spec or {}
         groups = (self.feature_spec.get("group_indices") or {})
-        self.idx_cat   = list(feature_spec["group_indices"].get("categorical", []))
-        self.idx_cont  = list(feature_spec["group_indices"].get("continuous", []))
-        self.idx_bool  = list(feature_spec["group_indices"].get("boolean", []))
-        self.idx_count = list(feature_spec["group_indices"].get("counts", []))
-        self.idx_angle = list(feature_spec["group_indices"].get("angles", []))
-        self.idx_time  = list(feature_spec["group_indices"].get("time", []))
+        self.idx_cat   = list(groups.get("categorical", []))
+        self.idx_cont  = list(groups.get("continuous", []))
+        self.idx_bool  = list(groups.get("boolean", []))
+        self.idx_count = list(groups.get("counts", []))
+        self.idx_angle = list(groups.get("angles", []))
+        self.idx_time  = list(groups.get("time", []))
 
         n_cont  = len(self.idx_cont)
         n_bool  = len(self.idx_bool)
@@ -95,6 +95,14 @@ class GamestateEncoder(nn.Module):
         self._cont_mlp = nn.Sequential(
             nn.Linear(max(1, n_cont), emb_dim_cont),
             nn.LayerNorm(emb_dim_cont),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # Fallback MLP for when no feature_spec is provided (treats all features as continuous)
+        self._fallback_mlp = nn.Sequential(
+            nn.Linear(128, hidden_dim),  # 128 is the default gamestate_dim, output full hidden_dim
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.1)
         )
@@ -210,6 +218,13 @@ class GamestateEncoder(nn.Module):
             tim = self._time_mlp(tim)
             chunks.append(tim)
 
+        # If no chunks were added (no feature_spec provided), treat all features as continuous
+        if len(chunks) == 0:
+            # Treat all features as continuous using fallback MLP
+            cont = x.float()
+            cont = self._fallback_mlp(cont)
+            chunks.append(cont)
+
         h = torch.cat(chunks, dim=-1) if len(chunks) > 1 else chunks[0]
         x_encoded = torch.relu(self.fuse(h))
         
@@ -312,103 +327,116 @@ class CrossAttention(nn.Module):
         return cross_features
 
 class ActionDecoder(nn.Module):
-    """V1/V2 decoder with dynamic sizes taken from manifest/config."""
-    def __init__(self, input_dim, *,
-                 max_actions: int,
-                 head_version: str,
-                 enum_sizes: dict,
-                 use_log1p_time: bool = True,
-                 time_div_ms: int = 1000,
-                 time_positive: bool = False):
+    """Unified event system decoder with exclusive event classification."""
+    
+    def __init__(self, input_dim, *, max_actions: int, enum_sizes: dict):
         super().__init__()
         self.max_actions = max_actions
-        self.head_version = head_version
-        self.enum_sizes = enum_sizes  # dict of sizes & indices
-        self.use_log1p_time = use_log1p_time
-        self.time_div_ms = time_div_ms
-        self.time_positive = time_positive
-
+        self.enum_sizes = enum_sizes
+        
+        # Shared feature processing
         self.shared = nn.Sequential(
             nn.Linear(input_dim, input_dim),
             nn.GELU(),
             nn.Linear(input_dim, input_dim),
         )
-        # Common regressors (no hardcoding on A)
-        self.time_head = nn.Linear(input_dim, max_actions)
-        self.x_coord_head = nn.Linear(input_dim, max_actions)
-        self.y_coord_head = nn.Linear(input_dim, max_actions)
-        if head_version == "v1":
-            n_type = int(enum_sizes.get("action_type", {"size": 5})["size"])
-            n_btn  = int(enum_sizes.get("button", {"size": 4})["size"])
-            n_key  = int(enum_sizes.get("key_id", {"size": 151})["size"])
-            n_sy   = int(enum_sizes.get("scroll_y", {"size": 3})["size"])
-            self.action_type_head = nn.Linear(input_dim, max_actions * n_type)
-            self.button_head      = nn.Linear(input_dim, max_actions * n_btn)
-            self.key_head         = nn.Linear(input_dim, max_actions * n_key)
-            self.scroll_y_head    = nn.Linear(input_dim, max_actions * n_sy)
-            self.scroll_x_head    = nn.Linear(input_dim, max_actions * 3)  # ignored in loss; legacy buffer
-        else:
-            def _get_size(d, k, default):
-                v = d.get(k, default)
-                return int(v.get("size", v)) if isinstance(v, dict) else int(v)
-            def _get_none(d, k, default):
-                v = d.get(k, {})
-                return int(v.get("none_index", default)) if isinstance(v, dict) else int(default)
-            
-            n_btn = _get_size(enum_sizes, "button", 4)
-            n_ka  = _get_size(enum_sizes, "key_action", 3)
-            n_kid = _get_size(enum_sizes, "key_id", 151)
-            n_sy  = _get_size(enum_sizes, "scroll_y", 3)
-            self.sy_none_index = _get_none(enum_sizes, "scroll_y", 1)  # store for inference mapping
-            
-            self.button_head      = nn.Linear(input_dim, max_actions * n_btn)
-            self.key_action_head  = nn.Linear(input_dim, max_actions * n_ka)
-            self.key_id_head      = nn.Linear(input_dim, max_actions * n_kid)
-            self.scroll_y_head    = nn.Linear(input_dim, max_actions * n_sy)
+        
+        # Unified event classification head: [CLICK, KEY, SCROLL, MOVE]
+        self.event_head = nn.Linear(input_dim, 4)
+        
+        # Time quantile head: [q10, q50, q90] for robust time prediction
+        self.time_quantile_head = nn.Linear(input_dim, 3)
+        
+        # Heteroscedastic XY heads: mean + uncertainty for cursor positions
+        self.x_mu_head = nn.Linear(input_dim, 1)      # X coordinate mean
+        self.x_logsig_head = nn.Linear(input_dim, 1)  # X coordinate log(std)
+        self.y_mu_head = nn.Linear(input_dim, 1)      # Y coordinate mean
+        self.y_logsig_head = nn.Linear(input_dim, 1)  # Y coordinate log(std)
+        
+        # Event-specific detail heads (only used when that event wins)
+        n_btn = int(enum_sizes["button"]["size"])
+        n_ka = int(enum_sizes["key_action"]["size"])
+        n_kid = int(enum_sizes["key_id"]["size"])
+        n_sy = int(enum_sizes["scroll_y"]["size"])
+        
+        self.button_head = nn.Linear(input_dim, n_btn)
+        self.key_action_head = nn.Linear(input_dim, n_ka)
+        self.key_id_head = nn.Linear(input_dim, n_kid)
+        self.scroll_y_head = nn.Linear(input_dim, n_sy)
     
     def forward(self, x):
-        s = self.shared(x); B = x.size(0)
-        if self.head_version == "v1":
-            n_type = int(self.enum_sizes.get("action_type", {"size": 5})["size"])
-            n_btn  = int(self.enum_sizes.get("button", {"size": 4})["size"])
-            n_key  = int(self.enum_sizes.get("key_id", {"size": 151})["size"])
-            n_sy   = int(self.enum_sizes.get("scroll_y", {"size": 3})["size"])
-            time_raw = self.time_head(s).view(B, self.max_actions)
-            time_output = F.softplus(time_raw) if CFG.time_positive else time_raw
-            return {
-                "time": time_output,
-                "x": self.x_coord_head(s).view(B, self.max_actions),
-                "y": self.y_coord_head(s).view(B, self.max_actions),
-                "action_type_logits": self.action_type_head(s).view(B, self.max_actions, n_type),
-                "button_logits": self.button_head(s).view(B, self.max_actions, n_btn),
-                "key_logits": self.key_head(s).view(B, self.max_actions, n_key),
-                "scroll_y_logits": self.scroll_y_head(s).view(B, self.max_actions, n_sy),
-            }
-        else:
-            n_btn = int(self.enum_sizes["button"]["size"])
-            n_ka  = int(self.enum_sizes["key_action"]["size"])
-            n_kid = int(self.enum_sizes["key_id"]["size"])
-            n_sy  = int(self.enum_sizes["scroll_y"]["size"])
-            time_raw = self.time_head(s).view(B, self.max_actions)
-            time_output = F.softplus(time_raw) if CFG.time_positive else time_raw
-            out = {
-                "time": time_output,
-                "x": self.x_coord_head(s).view(B, self.max_actions),
-                "y": self.y_coord_head(s).view(B, self.max_actions),
-                "button_logits": self.button_head(s).view(B, self.max_actions, n_btn),
-                "key_action_logits": self.key_action_head(s).view(B, self.max_actions, n_ka),
-                "key_id_logits": self.key_id_head(s).view(B, self.max_actions, n_kid),
-                "scroll_y_logits": self.scroll_y_head(s).view(B, self.max_actions, n_sy),
-            }
+        """
+        Forward pass producing unified event system outputs.
+        
+        Returns:
+            dict with keys:
+            - event_logits: [B, A, 4] - logits for [CLICK, KEY, SCROLL, MOVE]
+            - time_q: [B, A, 3] - time quantiles [q10, q50, q90]
+            - x_mu, x_logsig: [B, A] - X coordinate mean + log(std)
+            - y_mu, y_logsig: [B, A] - Y coordinate mean + log(std)
+            - button_logits: [B, A, 4] - button classification (conditional)
+            - key_action_logits: [B, A, 3] - key action classification (conditional)
+            - key_id_logits: [B, A, vocab_size] - key ID classification (conditional)
+            - scroll_y_logits: [B, A, 3] - scroll direction (conditional)
+        """
+        s = self.shared(x)
+        B, A = x.size(0), x.size(1)
+        
+        # Process each action position individually
+        event_logits = []
+        time_q_raw = []
+        x_mu_list = []
+        x_logsig_list = []
+        y_mu_list = []
+        y_logsig_list = []
+        button_logits = []
+        key_action_logits = []
+        key_id_logits = []
+        scroll_y_logits = []
+        
+        for i in range(A):
+            # Get features for this action position
+            action_features = s[:, i, :]  # [B, F]
             
-            # Apply exclusive event gating if enabled
-            if CFG.exclusive_event:
-                # For now, we'll create a dummy event prediction since we don't have event_logits
-                # In a real implementation, you would have an event head
-                # This is a placeholder for the exclusive gating logic
-                pass
-            
-            return out
+            # Process through each head
+            event_logits.append(self.event_head(action_features))           # [B, 4]
+            time_q_raw.append(self.time_quantile_head(action_features))     # [B, 3]
+            x_mu_list.append(self.x_mu_head(action_features))              # [B, 1]
+            x_logsig_list.append(self.x_logsig_head(action_features))      # [B, 1]
+            y_mu_list.append(self.y_mu_head(action_features))              # [B, 1]
+            y_logsig_list.append(self.y_logsig_head(action_features))      # [B, 1]
+            button_logits.append(self.button_head(action_features))         # [B, n_btn]
+            key_action_logits.append(self.key_action_head(action_features)) # [B, n_ka]
+            key_id_logits.append(self.key_id_head(action_features))         # [B, n_kid]
+            scroll_y_logits.append(self.scroll_y_head(action_features))     # [B, n_sy]
+        
+        # Stack all outputs along action dimension
+        event_logits = torch.stack(event_logits, dim=1)           # [B, A, 4]
+        time_q_raw = torch.stack(time_q_raw, dim=1)              # [B, A, 3]
+        x_mu = torch.stack(x_mu_list, dim=1).squeeze(-1)        # [B, A]
+        x_logsig = torch.stack(x_logsig_list, dim=1).squeeze(-1) # [B, A]
+        y_mu = torch.stack(y_mu_list, dim=1).squeeze(-1)        # [B, A]
+        y_logsig = torch.stack(y_logsig_list, dim=1).squeeze(-1) # [B, A]
+        button_logits = torch.stack(button_logits, dim=1)         # [B, A, n_btn]
+        key_action_logits = torch.stack(key_action_logits, dim=1) # [B, A, n_ka]
+        key_id_logits = torch.stack(key_id_logits, dim=1)         # [B, A, n_kid]
+        scroll_y_logits = torch.stack(scroll_y_logits, dim=1)     # [B, A, n_sy]
+        
+        # Apply time positivity constraint
+        time_q = F.softplus(time_q_raw) + 0.1  # Small bias to avoid 0
+        
+        return {
+            "event_logits": event_logits,           # [B, A, 4]
+            "time_q": time_q,                       # [B, A, 3]
+            "x_mu": x_mu,                          # [B, A]
+            "x_logsig": x_logsig,                  # [B, A]
+            "y_mu": y_mu,                          # [B, A]
+            "y_logsig": y_logsig,                  # [B, A]
+            "button_logits": button_logits,        # [B, A, n_btn]
+            "key_action_logits": key_action_logits, # [B, A, n_ka]
+            "key_id_logits": key_id_logits,        # [B, A, n_kid]
+            "scroll_y_logits": scroll_y_logits,    # [B, A, n_sy]
+        }
 
     @torch.no_grad()
     def _invert_time(self, t: torch.Tensor) -> torch.Tensor:
@@ -590,14 +618,11 @@ class ImitationHybridModel(nn.Module):
             nn.Dropout(0.2)
         )
         
-        # 5. Action Decoder (Multi-Head)
+                # 5. Action Decoder (Unified Event System)
         self.action_decoder = ActionDecoder(
             input_dim=hidden_dim,
             max_actions=max_actions,
-            head_version=head_version,
             enum_sizes=self.enum_sizes,
-            use_log1p_time=self.use_log1p_time,
-            time_div_ms=self.time_div_ms,
         )
         
         # Initialize weights
@@ -731,43 +756,65 @@ class ImitationHybridModel(nn.Module):
         
         fused_output = self.fusion_layer(fused_features)
         
+        # Expand fused output to cover all action positions
+        # fused_output: [B, hidden_dim] -> [B, max_actions, hidden_dim]
+        fused_output = fused_output.unsqueeze(1).expand(-1, self.max_actions, -1)
+        
         # 5. Decode actions
         heads = self.action_decoder(fused_output)  # dict of heads for training
         if return_logits:
             return heads
-        return self.decode_legacy(heads)
+        return self.decode_unified(heads)
     
     @torch.no_grad()
-    def decode_legacy(self, heads: dict[str, torch.Tensor]) -> torch.Tensor:
+    def decode_unified(self, heads: dict[str, torch.Tensor]) -> torch.Tensor:
         """
-        Inference-only: discretize heads to the legacy (B,100,8) tensor.
-        Synthesizes type when head_version=='v2'.
+        Inference-only: decode unified event system to legacy (B,100,8) tensor format.
         """
-        B, A = heads["time"].shape
-        x = heads["x"].round()
-        y = heads["y"].round()
-        time = self._invert_time(heads["time"])
-        if self.head_version == "v2":
-            btn = heads["button_logits"].argmax(-1)            # 0=None,1=L,2=R,3=M
-            ka  = heads["key_action_logits"].argmax(-1)        # 0=None,1=Press,2=Release
-            kid = heads["key_id_logits"].argmax(-1)            # 0=None,1=None,1..K
-            sy  = heads["scroll_y_logits"].argmax(-1) - self.action_decoder.sy_none_index      # {0,1,2}->{-1,0,1}
-            # synthesize legacy type: 1=click, 2=press, 3=release, 4=scroll, else 0
-            type_ = torch.zeros_like(btn)
-            type_ = torch.where(btn > 0, torch.ones_like(type_), type_)
-            type_ = torch.where((type_==0) & (ka==1), torch.full_like(type_, 2), type_)
-            type_ = torch.where((type_==0) & (ka==2), torch.full_like(type_, 3), type_)
-            type_ = torch.where((type_==0) & (sy!=0), torch.full_like(type_, 4), type_)
-            sx = torch.zeros_like(sy)  # legacy scroll_dx = 0
-            return torch.stack([time, type_.float(), x, y,
-                                btn.float(), kid.float(), sx.float(), sy.float()], dim=-1)
-        else:
-            at = heads["action_type_logits"].argmax(-1).float()
-            btn = heads["button_logits"].argmax(-1).float()
-            key = heads["key_logits"].argmax(-1).float()
-            sx = heads["scroll_x_logits"].argmax(-1) - 1
-            sy = heads["scroll_y_logits"].argmax(-1) - 1
-            return torch.stack([time, at, x, y, btn, key, sx.float(), sy.float()], dim=-1)
+        B, A = heads["time_q"].shape[:2]
+        
+        # Extract event type: [CLICK, KEY, SCROLL, MOVE] -> [0, 1, 2, 3]
+        event_probs = F.softmax(heads["event_logits"], dim=-1)
+        event_type = event_probs.argmax(dim=-1)  # [B, A] with values 0-3
+        
+        # Extract time (use median quantile q50)
+        time_delta = heads["time_q"][:, :, 1]  # q50 (median)
+        
+        # Extract XY coordinates (use mean predictions)
+        x = heads["x_mu"].round()
+        y = heads["y_mu"].round()
+        
+        # Initialize event-specific details
+        button = torch.zeros_like(event_type)
+        key_action = torch.zeros_like(event_type)
+        key_id = torch.zeros_like(event_type)
+        scroll_y = torch.zeros_like(event_type)
+        
+        # CLICK events (event_type == 0)
+        click_mask = (event_type == 0)
+        if click_mask.any():
+            button[click_mask] = heads["button_logits"][click_mask].argmax(dim=-1)
+        
+        # KEY events (event_type == 1)
+        key_mask = (event_type == 1)
+        if key_mask.any():
+            key_action[key_mask] = heads["key_action_logits"][key_mask].argmax(dim=-1)
+            key_id[key_mask] = heads["key_id_logits"][key_mask].argmax(dim=-1)
+        
+        # SCROLL events (event_type == 2)
+        scroll_mask = (event_type == 2)
+        if scroll_mask.any():
+            scroll_y[scroll_mask] = heads["scroll_y_logits"][scroll_mask].argmax(dim=-1)
+        
+        # MOVE events (event_type == 3) - no additional details needed
+        
+        # Convert to legacy format: [time, type, x, y, button, key_id, scroll_dx, scroll_y]
+        # Note: scroll_dx is always 0 in our system
+        scroll_dx = torch.zeros_like(scroll_y)
+        
+        return torch.stack([time_delta, event_type.float(), x, y,
+                          button.float(), key_id.float(), 
+                          scroll_dx.float(), scroll_y.float()], dim=-1)
     
     def get_model_info(self) -> Dict[str, int]:
         """Get model information and parameter count"""
