@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from tqdm import tqdm
 
 from .features import FeatureExtractor
-from .actions import extract_action_sequences, convert_raw_actions_to_tensors
+
 from .encodings import ActionEncoder
 
 
@@ -459,15 +459,20 @@ def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir:
     np.save(Path(normalized_dir) / "normalized_features.npy", normalized_features)
     print(f"    ✓ normalized_features.npy: {normalized_features.shape}")
     
-    with open(Path(normalized_dir) / "normalized_action_data.json", 'w') as f:
-        json.dump(normalized_action_data, f, indent=2)
-    print(f"    ✓ normalized_action_data.json: {len(normalized_action_data)} gamestates")
+    # Save normalized action data if provided
+    if normalized_action_data is not None:
+        with open(Path(normalized_dir) / "normalized_action_data.json", 'w') as f:
+            json.dump(normalized_action_data, f, indent=2)
+        print(f"    ✓ normalized_action_data.json: {len(normalized_action_data)} gamestates")
 
-    # Normalized tensors (no count) with consistent naming
-    normalized_action_tensors = [_flatten_actions_no_count(gs) for gs in normalized_action_data]
-    with open(Path(normalized_dir) / "normalized_action_tensors.json", 'w') as f:
-        json.dump(normalized_action_tensors, f, indent=2)
-    print(f"    ✓ normalized_action_tensors.json: {len(normalized_action_tensors)} gamestates")
+        # Normalized tensors (no count) with consistent naming
+        normalized_action_tensors = [_flatten_actions_no_count(gs) for gs in normalized_action_data]
+        with open(Path(normalized_dir) / "normalized_action_tensors.json", 'w') as f:
+            json.dump(normalized_action_tensors, f, indent=2)
+        print(f"    ✓ normalized_action_tensors.json: {len(normalized_action_tensors)} gamestates")
+    else:
+        print("    ⚠ normalized_action_data.json: Skipped (not available)")
+        print("    ⚠ normalized_action_tensors.json: Skipped (not available)")
     
     # 4. SEQUENCES (data/sequences/) - SKIPPED - only final training data needed
     print("  📂 Sequences directory... SKIPPED (only final training data needed)")
@@ -503,13 +508,8 @@ def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir:
         np.save(Path(final_dir) / "action_input_sequences.npy", action_input_sequences)
         print(f"    ✓ action_input_sequences.npy (raw): {action_input_sequences.shape}")
 
-    if normalized_target_sequences is not None:
-        np.save(Path(final_dir) / "action_targets.npy", normalized_target_sequences)
-        print(f"    ✓ action_targets.npy (normalized): {normalized_target_sequences.shape}")
-    else:
-        # Fallback to raw if normalized not available
-        np.save(Path(final_dir) / "action_targets.npy", target_sequences)
-        print(f"    ✓ action_targets.npy (raw): {target_sequences.shape}")
+    # Note: action_targets.npy and action_targets_non_delta.npy are now saved separately
+    # to avoid conflicts with the new naming scheme
     
     # Create clean metadata
     final_metadata = {
@@ -533,11 +533,16 @@ def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir:
             }
         },
         'targets': {
-            'action_targets': {
-                'file': 'action_targets.npy',
-                'count': len(target_sequences),
-                'description': 'Action sequences to predict for timestep t+1'
-            }
+                    'action_targets_non_delta': {
+            'file': 'action_targets_non_delta.npy',
+            'count': len(target_sequences),
+            'description': 'Raw action sequences with actual timestamps to predict for timestep t+1'
+        },
+        'action_targets': {
+            'file': 'action_targets.npy',
+            'count': len(target_sequences),
+            'description': 'Delta action sequences (time deltas) to predict for timestep t+1'
+        }
         },
         'training_pattern': {
             'input': 'Given 10 gamestates + 10 action sequences',
@@ -547,12 +552,12 @@ def save_organized_training_data(raw_dir: str, trimmed_dir: str, normalized_dir:
         },
         'feature_info': {
             'gamestate_features': 128,
-            'action_features_per_action': 8,
-            'action_features': ['timestamp', 'type', 'x', 'y', 'button', 'key', 'scroll_dx', 'scroll_dy']
+            'action_features_per_action': 7,
+            'action_features': ['time', 'x', 'y', 'button', 'key_action', 'key_id', 'scroll_y']
         },
         'normalization': {
             'gamestate_features': 'Coordinate system grouping (preserves spatial relationships)',
-            'action_features': 'Timestamps scaled to 0-10000 range, coordinates preserved',
+            'action_features': 'Actual timestamps in seconds, coordinates preserved',
             'note': 'All normalization pre-computed, no on-the-fly processing needed'
         },
         'folder_structure': {
@@ -720,12 +725,12 @@ def save_final_training_data(final_dir: str, normalized_input_sequences: np.ndar
         },
         'feature_info': {
             'gamestate_features': 128,
-            'action_features_per_action': 8,
-            'action_features': ['timestamp', 'type', 'x', 'y', 'button', 'key', 'scroll_dx', 'scroll_dy']
+            'action_features_per_action': 7,
+            'action_features': ['time', 'x', 'y', 'button', 'key_action', 'key_id', 'scroll_y']
         },
         'normalization': {
             'gamestate_features': 'Coordinate system grouping (preserves spatial relationships)',
-            'action_features': 'Timestamps scaled to 0-10000 range, coordinates preserved',
+            'action_features': 'Actual timestamps in seconds, coordinates preserved',
             'note': 'All normalization pre-computed, no on-the-fly processing needed'
         }
     }

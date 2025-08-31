@@ -19,7 +19,7 @@ from .io_offline import (
 )
 
 from .features import FeatureExtractor
-from .actions import extract_action_sequences, convert_raw_actions_to_tensors, extract_raw_action_data
+from .actions import extract_raw_action_data, create_v2_actions_directly
 from .encodings import ActionEncoder
 from .normalize import normalize_features, normalize_input_sequences, normalize_action_data
 
@@ -61,8 +61,8 @@ __all__ = [
     'save_organized_training_data',
     'validate_data_files',
     'FeatureExtractor',
-    'extract_action_sequences',
-    'convert_raw_actions_to_tensors',
+    'extract_raw_action_data',
+    'create_v2_actions_directly',
     'ActionEncoder',
     'normalize_features',
     'normalize_input_sequences',

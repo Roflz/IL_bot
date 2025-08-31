@@ -24,8 +24,8 @@ def create_temporal_sequences(features: np.ndarray, normalized_action_data: List
     Returns:
         Tuple of:
         - input_sequences: Array of shape (n_sequences, sequence_length, n_features)
-        - action_input_sequences: Array of shape (n_sequences, sequence_length, max_actions_per_timestep, 8)
-        - target_sequences: Array of shape (n_sequences, max_actions_per_timestep, 8) - targets for next timestep
+        - action_input_sequences: Array of shape (n_sequences, sequence_length, max_actions_per_timestep, 7)
+        - target_sequences: Array of shape (n_sequences, max_actions_per_timestep, 7) - targets for next timestep
     """
     print("Creating temporal sequences using simple sliding window...")
     
@@ -39,11 +39,11 @@ def create_temporal_sequences(features: np.ndarray, normalized_action_data: List
     # Input sequences: [batch, sequence_length, features]
     input_sequences = np.zeros((n_sequences, sequence_length, features.shape[1]), dtype=np.float64)
     
-    # Action input sequences: [batch, sequence_length, max_actions_per_timestep, 8]
-    action_input_sequences = np.zeros((n_sequences, sequence_length, max_actions_per_timestep, 8), dtype=np.float32)
+    # Action input sequences: [batch, sequence_length, max_actions_per_timestep, 7]
+    action_input_sequences = np.zeros((n_sequences, sequence_length, max_actions_per_timestep, 7), dtype=np.float32)
     
-    # Target sequences: [batch, max_actions_per_timestep, 8] - actions for next timestep
-    target_sequences = np.zeros((n_sequences, max_actions_per_timestep, 8), dtype=np.float32)
+    # Target sequences: [batch, max_actions_per_timestep, 7] - actions for next timestep
+    target_sequences = np.zeros((n_sequences, max_actions_per_timestep, 7), dtype=np.float32)
     
     # Create sequences using simple sliding window
     for i in range(n_sequences):
@@ -55,14 +55,14 @@ def create_temporal_sequences(features: np.ndarray, normalized_action_data: List
             action_idx = i + j
             if action_idx < len(normalized_action_data):
                 # Convert actions to numpy array and pad to max_actions_per_timestep
-                actions_array = _convert_actions_to_array(normalized_action_data[action_idx], max_actions_per_timestep)
+                actions_array = _convert_actions_to_v2_array(normalized_action_data[action_idx], max_actions_per_timestep)
                 action_input_sequences[i, j] = actions_array
         
         # Target: action sequence for the NEXT gamestate after the sequence (10, 11, 12, etc.)
         target_idx = i + sequence_length
         if target_idx < len(normalized_action_data):
             # Convert target actions to numpy array and pad to max_actions_per_timestep
-            target_actions_array = _convert_actions_to_array(normalized_action_data[target_idx], max_actions_per_timestep)
+            target_actions_array = _convert_actions_to_v2_array(normalized_action_data[target_idx], max_actions_per_timestep)
             target_sequences[i] = target_actions_array
     
     print(f"Created {n_sequences} training sequences")
@@ -73,127 +73,123 @@ def create_temporal_sequences(features: np.ndarray, normalized_action_data: List
     return input_sequences, action_input_sequences, target_sequences
 
 
-def _convert_actions_to_array(action_data: Dict, max_actions: int = 100) -> np.ndarray:
+def _convert_actions_to_v2_array(action_data: Dict, max_actions: int = 100) -> np.ndarray:
     """
-    Convert normalized action data to numpy array and pad to max_actions with zeros.
+    Convert normalized action data to V2 numpy array with 7 features and pad to max_actions with zeros.
     
     Args:
         action_data: Dictionary with 'mouse_movements', 'clicks', 'key_presses', 'key_releases', 'scrolls'
         max_actions: Maximum number of actions to pad to (default: 100)
         
     Returns:
-        Numpy array of shape (max_actions, 8) with actions padded with zeros
+        Numpy array of shape (max_actions, 7) with V2 format: [timestamp, x, y, button, key_action, key_id, scroll_y]
+        Note: Uses actual timestamps (not deltas) to avoid double-delta issues
     """
     # Initialize array with zeros
-    actions_array = np.zeros((max_actions, 8), dtype=np.float32)
+    actions_array = np.zeros((max_actions, 7), dtype=np.float32)
     
     # Collect all actions from the gamestate
     all_actions = []
     
     # Add mouse movements
     for action in action_data.get('mouse_movements', []):
-        all_actions.append([
-            action.get('timestamp', 0.0),  # timestamp
-            0,                             # type (0 = mouse movement)
-            action.get('x', 0),            # x
-            action.get('y', 0),            # y
-            0,                             # button (0 = none)
-            0,                             # key (0 = none)
-            0,                             # scroll_dx (0 = none)
-            0                              # scroll_dy (0 = none)
-        ])
+        all_actions.append({
+            'timestamp': action.get('timestamp', 0.0),
+            'x': action.get('x', 0),
+            'y': action.get('y', 0),
+            'button': 0,  # No button for moves
+            'key_action': 0,  # No key action for moves
+            'key_id': 0,  # No key ID for moves
+            'scroll_y': 0  # No scroll for moves
+        })
     
     # Add clicks
     for action in action_data.get('clicks', []):
         # Convert button to numeric code if it's a string
         button_value = action.get('button', 0)
         if isinstance(button_value, str):
-            # Simple mapping for button types
             button_map = {'left': 1, 'right': 2, 'middle': 3, 'none': 0}
             button_value = button_map.get(button_value.lower(), 0)
         
-        all_actions.append([
-            action.get('timestamp', 0.0),  # timestamp
-            1,                             # type (1 = click)
-            action.get('x', 0),            # x
-            action.get('y', 0),            # y
-            button_value,                  # button (converted to numeric)
-            0,                             # key (0 = none)
-            0,                             # scroll_dx (0 = none)
-            0                              # scroll_dy (0 = none)
-        ])
+        all_actions.append({
+            'timestamp': action.get('timestamp', 0.0),
+            'x': action.get('x', 0),
+            'y': action.get('y', 0),
+            'button': button_value,
+            'key_action': 0,  # No key action for clicks
+            'key_id': 0,  # No key ID for clicks
+            'scroll_y': 0  # No scroll for clicks
+        })
     
     # Add key presses
     for action in action_data.get('key_presses', []):
         # Convert key to numeric code if it's a string
         key_value = action.get('key', 0)
         if isinstance(key_value, str):
-            try:
-                from utils.key_mapper import KeyboardKeyMapper
-                key_value = int(KeyboardKeyMapper.map_key_to_number(key_value))
-            except ImportError:
-                # Fallback to simple mapping if key_mapper not available
-                key_map = {'w': 87, 'a': 65, 's': 83, 'd': 68, 'space': 32, 'enter': 13, 'escape': 27}
-                key_value = key_map.get(key_value.lower(), 0)
+            key_map = {'w': 87, 'a': 65, 's': 83, 'd': 68, 'space': 32, 'enter': 13, 'escape': 27}
+            key_value = key_map.get(key_value.lower(), 0)
         
-        all_actions.append([
-            action.get('timestamp', 0.0),  # timestamp
-            2,                             # type (2 = key_press)
-            action.get('x', 0),            # x (use actual coordinate)
-            action.get('y', 0),            # y (use actual coordinate)
-            0,                             # button (0 = none)
-            key_value,                     # key (converted to numeric)
-            0,                             # scroll_dx (0 = none)
-            0                              # scroll_dy (0 = none)
-        ])
+        all_actions.append({
+            'timestamp': action.get('timestamp', 0.0),
+            'x': action.get('x', 0),
+            'y': action.get('y', 0),
+            'button': 0,  # No button for keys
+            'key_action': 1,  # Press
+            'key_id': key_value,
+            'scroll_y': 0  # No scroll for keys
+        })
     
     # Add key releases
     for action in action_data.get('key_releases', []):
         # Convert key to numeric code if it's a string
         key_value = action.get('key', 0)
         if isinstance(key_value, str):
-            try:
-                from utils.key_mapper import KeyboardKeyMapper
-                key_value = int(KeyboardKeyMapper.map_key_to_number(key_value))
-            except ImportError:
-                # Fallback to simple mapping if key_mapper not available
-                key_map = {'w': 87, 'a': 65, 's': 83, 'd': 68, 'space': 32, 'enter': 13, 'escape': 27}
-                key_value = key_map.get(key_value.lower(), 0)
+            key_map = {'w': 87, 'a': 65, 's': 83, 'd': 68, 'space': 32, 'enter': 13, 'escape': 27}
+            key_value = key_map.get(key_value.lower(), 0)
         
-        all_actions.append([
-            action.get('timestamp', 0.0),  # timestamp
-            3,                             # type (3 = key_release)
-            action.get('x', 0),            # x (use actual coordinate)
-            action.get('y', 0),            # y (use actual coordinate)
-            0,                             # button (0 = none)
-            key_value,                     # key (converted to numeric)
-            0,                             # scroll_dx (0 = none)
-            0                              # scroll_dy (0 = none)
-        ])
+        all_actions.append({
+            'timestamp': action.get('timestamp', 0.0),
+            'x': action.get('x', 0),
+            'y': action.get('y', 0),
+            'button': 0,  # No button for keys
+            'key_action': 2,  # Release
+            'key_id': key_value,
+            'scroll_y': 0  # No scroll for keys
+        })
     
-        # Add scrolls
+    # Add scrolls
     for action in action_data.get('scrolls', []):
-        all_actions.append([
-            action.get('timestamp', 0.0),  # timestamp
-            4,                             # type (4 = scroll)
-            action.get('x', 0),            # x (use actual coordinate)
-            action.get('y', 0),            # y (use actual coordinate)
-            0,                             # button (0 = none)
-            0,                             # key (0 = none)
-            action.get('dx', 0),           # scroll_dx
-            action.get('dy', 0)            # scroll_dy
-        ])
+        scroll_dy = action.get('dy', 0)
+        # Map scroll direction: -1=down, 0=none, +1=up
+        scroll_y = -1 if scroll_dy < 0 else (1 if scroll_dy > 0 else 0)
+        
+        all_actions.append({
+            'timestamp': action.get('timestamp', 0.0),
+            'x': action.get('x', 0),
+            'y': action.get('y', 0),
+            'button': 0,  # No button for scrolls
+            'key_action': 0,  # No key action for scrolls
+            'key_id': 0,  # No key ID for scrolls
+            'scroll_y': scroll_y
+        })
     
-    # Fill the actions array (up to max_actions)
-    # Ensure chronological order across all action types (stable sort by timestamp)
-    # This preserves within-timestamp relative order.
-    all_actions.sort(key=lambda a: a[0])
-
-    # Fill the actions array (up to max_actions)
-    for i, action in enumerate(all_actions[:max_actions]):
-        actions_array[i] = action
-    # Remaining slots are already zero-padded
-
+    # Sort actions by timestamp
+    all_actions.sort(key=lambda x: x['timestamp'])
+    
+    # Fill the actions array for this gamestate
+    for action_idx, action in enumerate(all_actions[:max_actions]):
+        # Store in V2 format: [timestamp, x, y, button, key_action, key_id, scroll_y]
+        # Use actual timestamp (not delta) to avoid double-delta issues
+        actions_array[action_idx] = [
+            float(action['timestamp']),  # actual timestamp in seconds (not delta)
+            float(action['x']),   # x coordinate
+            float(action['y']),   # y coordinate
+            float(action['button']),  # button code (0=none, 1=left, 2=right, 3=middle)
+            float(action['key_action']), # key action (0=none, 1=press, 2=release)
+            float(action['key_id']),  # key ID
+            float(action['scroll_y']) # scroll direction (-1=down, 0=none, +1=up)
+        ]
+    
     return actions_array
 
 

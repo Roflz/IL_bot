@@ -109,12 +109,12 @@ def normalize_features(features: np.ndarray, feature_mappings_file: str = "data/
         for feature_idx in screen_coord_features:
             normalized_features[:, feature_idx] = features[:, feature_idx]
     
-    # Time features: Values are already relative ms since session start. Scale by dividing by 180.
+    # Time features: Values are already relative ms since session start. Scale by dividing by 1000 to get seconds.
     if time_features:
-        print("  Scaling time features (ms) by dividing by 180 (no re-zeroing)...")
+        print("  Scaling time features (ms) by dividing by 1000 to get seconds...")
         for feature_idx in time_features:
             raw_ms = features[:, feature_idx]
-            scaled = raw_ms / 180.0
+            scaled = raw_ms / 1000.0  # Convert to seconds for consistency with action time deltas
             normalized_features[:, feature_idx] = scaled
             # Log brief stats
             try:
@@ -126,7 +126,7 @@ def normalize_features(features: np.ndarray, feature_mappings_file: str = "data/
                 feature_name = 'unknown'
             print(f"    Feature {feature_idx}: {feature_name}")
             print(f"      Raw ms range: {np.min(raw_ms):.0f} to {np.max(raw_ms):.0f}")
-            print(f"      Scaled (/180) range: {np.min(scaled):.6f} to {np.max(scaled):.6f}")
+            print(f"      Scaled (/1000) range: {np.min(scaled):.6f} to {np.max(scaled):.6f}")
     
     # Categorical features (no normalization)
     if categorical_features:

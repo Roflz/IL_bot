@@ -84,9 +84,9 @@ class ActionTensorLoss(nn.Module):
 def _make_event_criterion(num_classes=4):
     """Create event classification criterion with optional class weights"""
     if CFG.event_cls_weights is None:
-        return F.CrossEntropyLoss()
+        return nn.CrossEntropyLoss()
     w = torch.tensor(CFG.event_cls_weights, dtype=torch.float32)
-    return F.CrossEntropyLoss(weight=w)
+    return nn.CrossEntropyLoss(weight=w)
 
 
 def compute_tempered_event_weights(counts, power=None, use_log=True):

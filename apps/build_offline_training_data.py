@@ -20,7 +20,7 @@ sys.path.append(str(pathlib.Path(__file__).parent.parent))
 from ilbot.pipeline.shared_pipeline import (
     load_gamestates, load_actions, load_existing_features, load_feature_mappings,
     load_gamestates_metadata, load_raw_action_data, load_action_targets,
-    extract_features_from_gamestates, extract_raw_action_data, convert_raw_actions_to_tensors,
+    extract_features_from_gamestates, extract_raw_action_data, create_v2_actions_directly,
     create_temporal_sequences, create_screenshot_paths,
     normalize_features, normalize_input_sequences, normalize_action_data,
     save_training_data, save_final_training_data, validate_data_files,
@@ -262,7 +262,7 @@ def process_fresh(session_root, gamestates_dir, actions_csv,
     np.save(raw_dir / "state_features.npy", features)
     (mappings_dir / "id_mappings.json").write_text(_json.dumps(id_mappings, indent=2, ensure_ascii=False))
     
-    # ---- 7) Build sequences --------------------------------------------------------
+    # ---- 8) Build sequences --------------------------------------------------------
     print("Creating temporal sequences from raw features…")
     input_sequences, action_input_sequences, target_sequences = create_temporal_sequences(
         trimmed_features, trimmed_raw_action_data
@@ -274,18 +274,97 @@ def process_fresh(session_root, gamestates_dir, actions_csv,
         normalized_features, trimmed_raw_action_data
     )
     
+    # ---- 7) Create action targets for sequences --------------------------------------------------------
+    print("Creating action targets for sequences...")
+    # The target_sequences already contain the target actions for each of the 44 sequences
+    # We need to convert these to the proper format and create both non-delta and delta versions
+    
+    # Create action_targets_non_delta.npy from the target_sequences
+    # target_sequences shape: (44, 100, 7) - 44 sequences, 100 actions per sequence, 7 features per action
+    action_targets_non_delta = np.array(target_sequences, dtype=np.float32)
+    
+    # Create action_targets.npy by computing deltas from the non-delta version
+    print("Computing deltas for action_targets.npy...")
+    action_targets = np.zeros_like(action_targets_non_delta, dtype=np.float32)
+    
+    for seq_idx in range(len(action_targets_non_delta)):
+        sequence_actions = action_targets_non_delta[seq_idx]  # Shape: (100, 7)
+        
+        for action_idx in range(len(sequence_actions)):
+            action = sequence_actions[action_idx]
+            
+            # Check if this is a padding row (timestamp = 0.0)
+            if action[0] <= 0.0:
+                # This is padding - keep delta as 0.0
+                time_delta = 0.0
+            else:
+                # This is a real action - find the next action (either in same sequence or in future sequences)
+                next_timestamp = None
+                next_seq_idx = seq_idx
+                next_action_idx = action_idx + 1
+                
+                # First try to find next action in current sequence
+                if next_action_idx < len(sequence_actions) and sequence_actions[next_action_idx][0] > 0:
+                    # Next action exists in same sequence and has valid timestamp
+                    next_timestamp = sequence_actions[next_action_idx][0]
+                else:
+                    # Look in future sequences for the next action
+                    for future_seq in range(seq_idx + 1, len(action_targets_non_delta)):
+                        future_actions = action_targets_non_delta[future_seq]
+                        for future_action_idx, future_action in enumerate(future_actions):
+                            if future_action[0] > 0:  # Check if timestamp is valid (not padding)
+                                next_timestamp = future_action[0]
+                                next_seq_idx = future_seq
+                                next_action_idx = future_action_idx
+                                break
+                        if next_timestamp is not None:
+                            break
+                
+                if next_timestamp is not None:
+                    # Compute delta to next action's timestamp
+                    current_timestamp = action[0]
+                    time_delta = max(0.0, next_timestamp - current_timestamp)
+                else:
+                    # No next action found, use 0 as delta
+                    time_delta = 0.0
+            
+            # Store delta version: [time_delta, x, y, button, key_action, key_id, scroll_y]
+            action_targets[seq_idx, action_idx] = [
+                time_delta,  # time delta in seconds
+                action[1],   # x coordinate (unchanged)
+                action[2],   # y coordinate (unchanged)
+                action[3],   # button (unchanged)
+                action[4],   # key_action (unchanged)
+                action[5],   # key_id (unchanged)
+                action[6]    # scroll_y (unchanged)
+            ]
+    
+    # Create actions_v2 for the manifest (this should match the sequence count)
+    # We'll create it from the target gamestates for each sequence
+    sequence_length = 10
+    n_sequences = len(input_sequences)
+    
+    # Create actions_v2 from the target gamestates for each sequence
+    target_gamestate_indices = []
+    for i in range(n_sequences):
+        target_idx = i + sequence_length
+        if target_idx < len(trimmed_raw_action_data):
+            target_gamestate_indices.append(target_idx)
+    
+    # Create actions_v2 from only the target gamestates
+    target_raw_action_data = [trimmed_raw_action_data[i] for i in target_gamestate_indices]
+    actions_v2, valid_mask = create_v2_actions_directly(
+        target_raw_action_data,
+        time_div=time_div,
+        time_clip=time_clip,
+        time_transform=time_transform
+    )
+    
     # Use raw sequences as the default input sequences
     # (input_sequences is already set above)
     
-    # Normalize action data
-    print("Normalizing action data...")
-    normalized_action_data = normalize_action_data(trimmed_raw_action_data, normalized_features)
-
-    # Create normalized sequences from normalized action data
-    print("Creating normalized action sequences...")
-    _, normalized_action_input_sequences, normalized_target_sequences = create_temporal_sequences(
-        normalized_features, normalized_action_data
-    )
+    # Note: action_input_sequences and target_sequences are now V2 format (7 features)
+    # No need to normalize action data separately since we're using V2 actions directly
 
     # (optional but helpful) persist the trimmed raw actions for inspection
     try:
@@ -320,32 +399,29 @@ def process_fresh(session_root, gamestates_dir, actions_csv,
                                  input_sequences, normalized_input_sequences,
                                  target_sequences, action_input_sequences,
                                  raw_action_data, trimmed_raw_action_data,
-                                 normalized_action_data, feature_mappings,
+                                 None, feature_mappings,  # normalized_action_data is None now
                                  id_mappings,
                                  gamestates_metadata_raw,
                                  screenshot_paths,
-                                 normalized_target_sequences,
-                                 normalized_action_input_sequences
+                                 None,  # normalized_target_sequences is None now
+                                 None   # normalized_action_input_sequences is None now
                                  )
+
+    # Save the new action target files
+    print("Saving action target files...")
+    np.save(final_dir / "action_targets_non_delta.npy", action_targets_non_delta)
+    print(f"    ✓ action_targets_non_delta.npy: {action_targets_non_delta.shape}")
+    
+    np.save(final_dir / "action_targets.npy", action_targets)
+    print(f"    ✓ action_targets.npy: {action_targets.shape}")
 
 
 
     # ----- Build V2 outputs + manifest (optional) -----
     if emit_v2:
         print("\n🧩 Building V2 event-centric targets + manifest…")
-        # Convert finalized V1 targets → V2 (no undefined helpers, no frame_ts).
-        at_v1_path = final_dir / "action_targets.npy"
-        if not at_v1_path.exists():
-            raise FileNotFoundError(f"Missing {at_v1_path} to build V2 targets.")
-        at_v1 = np.load(at_v1_path)  # shape (N, 100, 8), legacy layout
-
-        actions_v2, valid_mask = _v1_to_v2(
-            at_v1,
-            time_div=time_div,
-            time_clip=time_clip,
-            time_transform=time_transform,
-            v1_time_scale=v1_time_scale
-        )
+        # V2 actions already created directly from raw data above
+        # actions_v2 and valid_mask are already available from step 7
 
         # --- Densify key_id vocab to only the values that actually appear (on valid KEY rows) ---
         # actions_v2 layout (v2): [time_s, x, y, button, key_action, key_id, scroll_y_raw]
@@ -497,80 +573,9 @@ def _save_np(path, arr):
     path.parent.mkdir(parents=True, exist_ok=True)
     np.save(path, arr)
 
-def _v1_to_v2(at_v1, time_div, time_clip, time_transform, v1_time_scale):
-    """
-    Convert V1 action targets (N,100,8) to V2 event-centric targets (N,100,7)
-    V1 layout (per metadata): [timestamp, type, x, y, button, key, scroll_dx, scroll_dy]
-    V2 layout we emit:        [time,      x,   y, click, key_action, key_id, scroll_y]
-    """
-    # ----- read correct V1 columns -----
-    t_raw  = at_v1[..., 0].astype(np.float32)   # absolute or session-relative timestamp in (ms / v1_time_scale)
-    ty     = at_v1[..., 1].astype(np.int64)     # V1 action type (0=move,1=click,2=key press,3=key release,4=scroll)
-    x      = at_v1[..., 2].astype(np.float32)
-    y      = at_v1[..., 3].astype(np.float32)
-    b1     = at_v1[..., 4].astype(np.int64)     # V1 button code
-    kid_v1 = at_v1[..., 5].astype(np.int64)     # V1 key id
-    sy_v1  = at_v1[..., 7].astype(np.float32)   # V1 scroll dy in {-1,0,+1}
+# Legacy V1 to V2 conversion function removed - now using direct V2 creation
 
-    # ----- build Δt per row along action axis -----
-    # Convert to ms, then compute time deltas: time until next interaction
-    ts_ms = (t_raw * float(v1_time_scale)).astype(np.float64)  # (N,100) ms
-    N, L = ts_ms.shape
-    dt_ms = np.zeros_like(ts_ms, dtype=np.float64)
 
-    # Precompute the first valid timestamp in each sequence (for look-ahead).
-    first_valid_ts = np.full(N, np.nan, dtype=np.float64)
-    for i in range(N):
-        vmask = ts_ms[i] > 0
-        if vmask.any():
-            first_valid_ts[i] = ts_ms[i, np.argmax(vmask)]
-
-    # Compute deltas only on valid positions; last valid in a window looks into future windows.
-    for i in range(N):
-        vmask = ts_ms[i] > 0
-        if not vmask.any():
-            continue
-        vidx = np.flatnonzero(vmask)      # indices of valid events in this window
-        t_i  = ts_ms[i, vidx]
-        # Intra-window Δt between consecutive valid events
-        if len(vidx) > 1:
-            dt_ms[i, vidx[:-1]] = np.maximum(t_i[1:] - t_i[:-1], 0.0)
-        # Last valid event in this window → find next valid event in future windows
-        j_last = vidx[-1]
-        next_ts = np.nan
-        for k in range(i + 1, N):
-            if not np.isnan(first_valid_ts[k]):
-                next_ts = first_valid_ts[k]
-                break
-        if not np.isnan(next_ts):
-            dt_ms[i, j_last] = max(next_ts - ts_ms[i, j_last], 0.0)
-        # Else leave 0.0 if truly no future event (end-of-session).
-    
-    # Scale to seconds and apply optional clip/log1p
-    dt_sec = dt_ms / float(time_div)
-    if time_clip is not None:
-        dt_sec = np.clip(dt_sec, 0.0, float(time_clip))
-    t_store = np.log1p(dt_sec).astype(np.float32) if time_transform == "log1p" else dt_sec.astype(np.float32)
-
-    # ----- click mapping (maintain consistency with V1) -----
-    click = b1.astype(np.int64)  # Keep original button codes: 0=none, 1=left, 2=right, 3=middle
-
-    key_action = np.zeros_like(ty)              # 0=None, 1=Press, 2=Release
-    key_action[ty == 2] = 1
-    key_action[ty == 3] = 2
-    key_id = np.where(key_action > 0, kid_v1, 0).astype(np.int64)
-
-    # ----- scroll mapping (correct values: -1=down, 0=none, 1=up) -----
-    scroll_y = np.where(sy_v1 < 0, -1, np.where(sy_v1 > 0, 1, 0)).astype(np.int64)
-
-    a_v2 = np.stack([t_store, x, y,
-                     click.astype(np.float32),
-                     key_action.astype(np.float32),
-                     key_id.astype(np.float32),
-                     scroll_y.astype(np.float32)], axis=-1).astype(np.float32)
-    # Valid iff any event signal present (don't use absolute t for validity)
-    pad_mask = ~np.all(a_v2 == 0.0, axis=-1)
-    return a_v2, pad_mask
 
 
 
