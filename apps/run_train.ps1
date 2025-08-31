@@ -3,9 +3,9 @@
 
 param(
     [string]$DataDir = "data/recording_sessions/20250831_113719/06_final_training_data",
-    [int]$Epochs = 40,
+    [int]$Epochs = 25,
     [double]$LR = 2.5e-4,
-    [int]$Batch = 16
+    [int]$Batch = 64
 )
 
 $py = "py"

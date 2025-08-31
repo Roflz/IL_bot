@@ -410,8 +410,12 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
         train_loss = 0.0
         train_batches = 0
         
-        print(f"Epoch {epoch+1}/{num_epochs}")
-        print("Training...")
+        print(f"\n🚀 Epoch {epoch+1}/{num_epochs}")
+        print("🎯 Training...")
+        
+        # Reset epoch flag for loss function
+        if hasattr(loss_fn, 'reset_epoch_flag'):
+            loss_fn.reset_epoch_flag()
         
         for batch_idx, batch in enumerate(train_loader):
             # Move data to device
@@ -426,23 +430,14 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
             # how many total train batches this epoch
             total_train_batches = len(train_loader)
 
-            # LAST-BATCH diagnostics
+            # LAST-BATCH diagnostics (cleaner)
             if batch_idx == total_train_batches - 1:
                 vm_last = batch['valid_mask'].to(device)
                 B, A = action_target.size(0), action_target.size(1)
                 if vm_last.dim() == 1 or vm_last.shape[:2] != (B, A):
                     vm_last = vm_last.view(B, A)
                 vcount = int(vm_last.sum().item())
-                print(f"[dbg-last-train] batch_idx={batch_idx} B={B} A={A} valid_sum={vcount}")
-
-            # ---------- one-time debug (place INSIDE the loop, after outputs) ----------
-            if not hasattr(model, "_dbg_heads_once"):
-                model._dbg_heads_once = True
-                if isinstance(outputs, dict):
-                    for k, v in outputs.items():
-                        print(f"[dbg] head {k}: {tuple(v.shape)}")
-                else:
-                    print(f"[dbg] model output shape: {tuple(outputs.shape)}")
+                print(f"  📊 Last batch: {vcount} valid actions")
 
             # Prepare a 2D mask for diagnostics and optional skipping
             vm = batch['valid_mask'].to(device)
@@ -452,29 +447,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
 
             # Skip batches with zero valid rows to avoid NaNs in CE
             if vm.sum().item() == 0:
-                # optionally: print once
-                if not hasattr(model, "_dbg_skip_once"):
-                    model._dbg_skip_once = True
-                    print("[dbg] skipped a batch with zero valid rows")
                 continue
-
-            # One-time stats print
-            if not hasattr(model, "_dbg_once"):
-                model._dbg_once = True
-                total_valid = int(vm.sum().item())
-                frac = total_valid / (B * A)
-
-                ka_none = 0  # Default none index for key_action
-                ka = action_target[..., 4].long()
-                kid_rows = int((vm & (ka != ka_none)).sum().item())
-
-                sy_vals = action_target[..., 6].long()         # {-1,0,+1}
-                sy_rows = int(vm.sum().item())                 # all valid rows participate
-                sy_events = int((vm & (sy_vals != 0)).sum().item())
-
-                print(f"[dbg] B={B} A={A} valid={total_valid} ({frac:.3f}) | "
-                    f"kid_rows={kid_rows} | sy_rows={sy_rows} (nonzero={sy_events})")
-            # ---------------------------------------------------------------------------
 
             
             if isinstance(outputs, dict):
@@ -493,13 +466,17 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
             train_loss += loss.item()
             train_batches += 1
             
-            # Progress update
-            if (batch_idx + 1) % 5 == 0:
-                print(f"  Batch {batch_idx + 1}/{len(train_loader)}, Loss: {loss.item():.4f}")
+                    # Progress update (cleaner format)
+        if (batch_idx + 1) % 5 == 0:
+            print(f"  Batch {batch_idx + 1}/{len(train_loader)}, Loss: {loss.item():.1f}")
 
 
         avg_train_loss = train_loss / train_batches
         train_losses.append(avg_train_loss)
+        
+        # Clean Epoch Summary
+        print(f"\n📊 Epoch {epoch+1} Summary:")
+        print(f"  🎯 Training Loss: {avg_train_loss:.1f}")
         
         # Validation
         print("Validating...")
@@ -519,23 +496,14 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                 # how many total VAL batches this epoch
                 n_val_batches = len(val_loader)
 
-                # LAST-BATCH diagnostics  (requires: for val_idx, batch in enumerate(val_loader))
+                # LAST-BATCH diagnostics (cleaner)
                 if val_idx == n_val_batches - 1:
                     vm_last = batch['valid_mask'].to(device)
                     B, A = action_target.size(0), action_target.size(1)
                     if vm_last.dim() == 1 or vm_last.shape[:2] != (B, A):
                         vm_last = vm_last.view(B, A)
                     vcount = int(vm_last.sum().item())
-                    print(f"[dbg-last-val] batch_idx={val_idx} B={B} A={A} valid_sum={vcount}")
-
-                # one-time head shapes (val)
-                if not hasattr(model, "_dbg_heads_val_once"):
-                    model._dbg_heads_val_once = True
-                    if isinstance(outputs, dict):
-                        for k, v in outputs.items():
-                            print(f"[dbg] head {k}: {tuple(v.shape)}")
-                    else:
-                        print(f"[dbg] model output shape: {tuple(outputs.shape)}")
+                    print(f"    📊 Last val batch: {vcount} valid actions")
 
                 # Prepare a 2D mask for diagnostics and optional skipping
                 vm_mask = batch['valid_mask'].to(device)
@@ -545,27 +513,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
 
                 # Skip VAL batches with zero valid rows to avoid NaNs in CE
                 if vm_mask.sum().item() == 0:
-                    if not hasattr(model, "_dbg_skip_val_once"):
-                        model._dbg_skip_val_once = True
-                        print("[dbg] skipped a VAL batch with zero valid rows")
                     continue
-
-                # One-time stats print (val)
-                if not hasattr(model, "_dbg_val_once"):
-                    model._dbg_val_once = True
-                    total_valid = int(vm_mask.sum().item())
-                    frac = total_valid / (B * A)
-
-                    ka_none = 0  # Default none index for key_action
-                    ka = action_target[..., 4].long()
-                    kid_rows = int((vm_mask & (ka != ka_none)).sum().item())
-
-                    sy_vals = action_target[..., 6].long()   # {-1,0,+1}
-                    sy_rows = int(vm_mask.sum().item())      # all valid rows participate
-                    sy_events = int((vm_mask & (sy_vals != 0)).sum().item())
-
-                    print(f"[dbg] (val) B={B} A={A} valid={total_valid} ({frac:.3f}) | "
-                        f"kid_rows={kid_rows} | sy_rows={sy_rows} (nonzero={sy_events})")
 
 
                 if isinstance(outputs, dict):
@@ -581,6 +529,47 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
         avg_val_loss = val_loss_sum / max(val_batches, 1)
         val_losses.append(avg_val_loss)
         
+        # Clean Event Distribution Display
+        if val_batches > 0:
+            # Get event predictions from validation
+            sample_batch = next(iter(val_loader))
+            sample_temporal = sample_batch['temporal_sequence'].to(device)
+            sample_action = sample_batch['action_sequence'].to(device)
+            sample_valid = sample_batch['valid_mask'].to(device)
+            
+            with torch.no_grad():
+                sample_outputs = model(sample_temporal, sample_action)
+                if isinstance(sample_outputs, dict):
+                    event_logits = sample_outputs['event_logits']
+                    event_probs = torch.softmax(event_logits, dim=-1)
+                    
+                    # Calculate average probabilities across all actions
+                    avg_probs = event_probs.mean(dim=(0, 1))  # Average across batch and actions
+                    
+                    # Display clean event distribution
+                    print(f"  🎮 What the Bot Thinks:")
+                    event_names = ['CLICK', 'KEY', 'SCROLL', 'MOVE']
+                    for i, (name, prob) in enumerate(zip(event_names, avg_probs)):
+                        bar_length = int(prob * 20)  # 20 character bar
+                        bar = '█' * bar_length + '░' * (20 - bar_length)
+                        print(f"    {name:>6}: {prob:.1%} {bar}")
+                    
+                    # Show what this means in plain English
+                    dominant_event = event_names[avg_probs.argmax()]
+                    dominant_prob = avg_probs.max()
+                    print(f"\n  🧠 Bot's Decision: '{dominant_event}' actions {dominant_prob:.1%} of the time")
+                    
+                    # Show coordinate predictions
+                    if 'x_mu' in sample_outputs and 'y_mu' in sample_outputs:
+                        x_pred = sample_outputs['x_mu'].mean().item()
+                        y_pred = sample_outputs['y_mu'].mean().item()
+                        print(f"  🖱️  Mouse Position: Bot thinks mouse should be at ({x_pred:.0f}, {y_pred:.0f})")
+                    
+                    # Show timing predictions
+                    if 'time_q' in sample_outputs:
+                        time_pred = sample_outputs['time_q'][:, 1].mean().item()  # median
+                        print(f"  ⏰ Action Timing: Bot thinks actions should happen every {time_pred:.1f} seconds")
+        
         # Behavioral Intelligence Analysis (every 5 epochs)
         if val_batches > 0:
             # Get a sample batch for analysis
@@ -590,52 +579,116 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
             sample_target = sample_batch['action_target'].to(device)
             sample_valid = sample_batch['valid_mask'].to(device)
             
-            # Debug: Print tensor shapes and mask statistics
-            print(f"\n🔍 Debug Info (Epoch {epoch}):")
-            print(f"  Sample batch shapes:")
-            print(f"    temporal_sequence: {sample_temporal.shape}")
-            print(f"    action_sequence: {sample_action.shape}")
-            print(f"    action_target: {sample_target.shape}")
-            print(f"    valid_mask: {sample_valid.shape}")
-            print(f"  Mask statistics:")
-            print(f"    Total actions: {sample_valid.numel()}")
-            print(f"    Valid actions: {sample_valid.sum().item()}")
-            print(f"    Valid ratio: {sample_valid.float().mean().item():.3f}")
-            print(f"    Valid per sequence: {sample_valid.sum(dim=1).tolist()[:5]}...")  # First 5 sequences
-            
-            # Debug: Look at actual action targets
-            valid_targets = sample_target[sample_valid]
-            print(f"\n🔍 Action Target Debug:")
-            print(f"  Button actions: {valid_targets[:, 3].unique().tolist()}")
-            print(f"  Key actions: {valid_targets[:, 4].unique().tolist()}")
-            print(f"  Scroll actions: {valid_targets[:, 6].unique().tolist()}")
-            print(f"  Sample targets (first 3): {valid_targets[:3].tolist()}")
+            print(f"\n🔍 What the Bot is Learning (Epoch {epoch + 1}):")
+            print("=" * 50)
             
             # Get model predictions on sample
             with torch.no_grad():
                 sample_outputs = model(sample_temporal, sample_action)
+                
+                # Debug: Show tensor shapes (but only once)
+                if not hasattr(model, "_shapes_shown"):
+                    model._shapes_shown = True
+                    print(f"🔧 Model Output Shapes:")
+                    if isinstance(sample_outputs, dict):
+                        for k, v in sample_outputs.items():
+                            print(f"  {k}: {tuple(v.shape)}")
+                    print(f"  temporal_sequence: {sample_temporal.shape}")
+                    print(f"  valid_mask: {sample_valid.shape}")
+                    print("─" * 30)
+            
+            # 1. Show what the bot learned about events
+            if isinstance(sample_outputs, dict) and 'event_logits' in sample_outputs:
+                try:
+                    event_probs = torch.softmax(sample_outputs['event_logits'], dim=-1)
+                    # event_probs has shape [B, A, 4] where 4 = [CLICK, KEY, SCROLL, MOVE]
+                    # We need to average across all actions for each batch, then across batches
+                    avg_event_probs = event_probs.mean(dim=(0, 1))  # Average across batch and actions
+                    event_names = ['CLICK', 'KEY', 'SCROLL', 'MOVE']
+                    
+                    print(f"🎮 Event Learning:")
+                    for name, prob in zip(event_names, avg_event_probs):
+                        confidence = "High" if prob > 0.7 else "Medium" if prob > 0.3 else "Low"
+                        print(f"  {name:>6}: {prob:.1%} confidence ({confidence})")
+                    
+                    # Show what the bot learned
+                    dominant_event = event_names[avg_event_probs.argmax()]
+                    print(f"\n  🧠 Bot learned: '{dominant_event}' is the most common action")
+                except Exception as e:
+                    print(f"🎮 Event Learning: Could not analyze events (error: {e})")
+            
+            # 2. Show what the bot learned about mouse positions
+            if isinstance(sample_outputs, dict) and 'x_mu' in sample_outputs and 'y_mu' in sample_outputs:
+                try:
+                    # x_mu and y_mu have shape [B, A] where A = max_actions
+                    # We need to average across valid actions for each batch, then across batches
+                    x_pred = sample_outputs['x_mu'].mean().item()  # Average across all positions
+                    y_pred = sample_outputs['y_mu'].mean().item()
+                    x_std = sample_outputs['x_logsig'].exp().mean().item()
+                    y_std = sample_outputs['y_logsig'].exp().mean().item()
+                    
+                    print(f"\n🖱️  Mouse Learning:")
+                    print(f"  Position: Bot learned mouse is usually at ({x_pred:.0f}, {y_pred:.0f})")
+                    print(f"  Uncertainty: ±{x_std:.0f} pixels X, ±{y_std:.0f} pixels Y")
+                except Exception as e:
+                    print(f"\n🖱️  Mouse Learning: Could not analyze mouse positions (error: {e})")
+            
+            # 3. Show what the bot learned about timing
+            if isinstance(sample_outputs, dict) and 'time_q' in sample_outputs:
+                try:
+                    # time_q has shape [B, 3] where 3 = [q0.1, q0.5, q0.9]
+                    # We need to get the median (q0.5) for each batch
+                    time_pred = sample_outputs['time_q'][:, 1].mean().item()  # median across all batches
+                    time_uncertainty = (sample_outputs['time_q'][:, 2] - sample_outputs['time_q'][:, 0]).mean().item() / 2
+                    
+                    print(f"\n⏰ Timing Learning:")
+                    print(f"  Interval: Bot learned actions happen every {time_pred:.1f} seconds")
+                    print(f"  Uncertainty: ±{time_uncertainty:.1f} seconds")
+                except Exception as e:
+                    print(f"\n⏰ Timing Learning: Could not analyze timing (error: {e})")
+            
+            # 4. Show what the bot sees in the game
+            if sample_temporal.numel() > 0:
+                try:
+                    # Show what the bot sees in the game state
+                    player_x = sample_temporal[0, -1, 0].item()  # Last timestep, first feature
+                    player_y = sample_temporal[0, -1, 1].item()  # Last timestep, second feature
+                    
+                    print(f"\n🎯 Game State Learning:")
+                    print(f"  Player Position: Bot sees player at ({player_x:.0f}, {player_y:.0f})")
+                    print(f"  Input: Bot sees {sample_temporal.size(1)} timesteps of game history")
+                    print(f"  Features: Bot analyzes {sample_temporal.size(2)} different game features")
+                except Exception as e:
+                    print(f"\n🎯 Game State Learning: Could not extract player position (error: {e})")
             
             # Analyze behavioral intelligence
-            behavioral_metrics.analyze_epoch_predictions(
-                model_outputs=sample_outputs,
-                gamestates=sample_temporal,  # [B, 10, 128]
-                action_targets=sample_target,  # [B, 100, 7]
-                valid_mask=sample_valid,      # [B, 100]
-                epoch=epoch
-            )
-            
-            # Debug: Check what the loss function sees
-            print(f"\n🔍 Loss Function Debug:")
-            print(f"  Event logits shape: {sample_outputs['event_logits'].shape}")
-            print(f"  Event logits sample: {sample_outputs['event_logits'][0, 0].tolist()}")
-            print(f"  Event probs sample: {torch.softmax(sample_outputs['event_logits'][0, 0], dim=-1).tolist()}")
+            try:
+                behavioral_metrics.analyze_epoch_predictions(
+                    model_outputs=sample_outputs,
+                    gamestates=sample_temporal,  # [B, 10, 128]
+                    action_targets=sample_target,  # [B, 100, 7]
+                    valid_mask=sample_valid,      # [B, 100]
+                    epoch=epoch
+                )
+            except Exception as e:
+                print(f"⚠️  Behavioral analysis failed: {e}")
         
-        print(f"Epoch {epoch+1} Summary:")
-        print(f"  Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
-
+        # Clean Epoch Summary
+        print(f"\n📊 Epoch {epoch+1} Summary:")
+        print(f"  🎯 Training Loss: {avg_train_loss:.1f}")
+        print(f"  🔍 Validation Loss: {avg_val_loss:.1f}")
+        
+        # Progress indicator
+        progress = (epoch + 1) / num_epochs
+        bar_length = 20
+        filled_length = int(bar_length * progress)
+        bar = '█' * filled_length + '░' * (bar_length - filled_length)
+        print(f"  📈 Progress: [{bar}] {progress:.0%}")
+        
         # Scheduler step (if any)
         if scheduler is not None:
             scheduler.step()
+            
         # Early stopping + checkpoint
         if avg_val_loss < best_val:
             best_val = avg_val_loss
@@ -645,24 +698,33 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                         "optimizer": optimizer.state_dict(),
                         "epoch": epoch+1,
                         "val_loss": best_val}, best_path)
-            print(f"  ↳ Saved best checkpoint: {best_path}")
+            print(f"  🏆 New Best! Saved checkpoint")
         else:
             patience_left -= 1
-            print(f"  ↳ No improvement. Patience left: {patience_left}")
+            print(f"  ⏳ No improvement. Patience left: {patience_left}")
             if patience_left <= 0:
-                print("Early stopping triggered.")
+                print("🚨 Early stopping triggered.")
                 break
         
-        # CUDA memory management
+        # CUDA memory management (cleaner)
         if torch.cuda.is_available():
-            print(f"  CUDA Memory: {torch.cuda.memory_allocated(0) / 1024**2:.1f} MB allocated, {torch.cuda.memory_reserved(0) / 1024**2:.1f} MB reserved")
+            allocated = torch.cuda.memory_allocated(0) / 1024**2
+            reserved = torch.cuda.memory_reserved(0) / 1024**2
+            print(f"  💾 Memory: {allocated:.0f}MB allocated, {reserved:.0f}MB reserved")
             # Clear cache to free up memory
             torch.cuda.empty_cache()
         
-        print("-" * 40)
+        print("─" * 60)
     
     # Generate final behavioral intelligence summary
-    print("\n🎯 Training Complete! Generating Behavioral Intelligence Summary...")
+    print("\n🎉 Training Complete!")
+    print("=" * 60)
+    print("📊 Final Results:")
+    print(f"  🏆 Best Validation Loss: {best_val:.1f}")
+    print(f"  📈 Final Training Loss: {train_losses[-1]:.1f}")
+    print(f"  📈 Final Validation Loss: {val_losses[-1]:.1f}")
+    print(f"  🎯 Total Epochs: {len(train_losses)}")
+    print("\n🔍 Generating Behavioral Intelligence Summary...")
     behavioral_metrics.generate_training_summary()
     
     return train_losses, val_losses
@@ -936,6 +998,29 @@ def run_training(config: dict):
     
     loss_fn = UnifiedEventLoss(data_config=data_config)
     print(f"Created UnifiedEventLoss with data config: {data_config}")
+    
+    # Set global class weights based on the entire dataset
+    print("🎯 Computing global class weights from dataset...")
+    all_event_targets = []
+    all_valid_masks = []
+    
+    # Collect all event targets and valid masks
+    for batch in train_loader:
+        action_targets = batch["action_target"]
+        valid_masks = batch["valid_mask"]
+        
+        # Derive event targets
+        button_target = action_targets[..., 3]  # Button column
+        key_action_target = action_targets[..., 4]  # Key action column
+        scroll_y_target = action_targets[..., 6]  # Scroll column
+        
+        event_targets = loss_fn._derive_event_target(button_target, key_action_target, scroll_y_target)
+        
+        all_event_targets.append(event_targets)
+        all_valid_masks.append(valid_masks)
+    
+    # Set global weights
+    loss_fn.set_global_event_weights(all_event_targets, all_valid_masks)
     
     # 5) train loop
     # V2-only training with unified event system

@@ -203,7 +203,14 @@ class UnifiedEventLoss(nn.Module):
         )
         losses['event'] = event_loss
         
-        # 2. Time Quantile Loss
+        # 2. Distribution Regularization Loss
+        if hasattr(self, '_target_distribution'):
+            dist_reg_loss = self._compute_distribution_regularization(
+                predictions['event_logits'], valid_mask
+            )
+            losses['dist_reg'] = dist_reg_loss
+        
+        # 3. Time Quantile Loss
         time_loss = self._compute_time_loss(
             predictions['time_q'],
             time_target,
@@ -264,14 +271,31 @@ class UnifiedEventLoss(nn.Module):
     
     def _compute_event_loss(self, event_logits: torch.Tensor, event_target: torch.Tensor, 
                            valid_mask: torch.Tensor) -> torch.Tensor:
-        """Compute event classification loss."""
-        # Get class weights if available
+        """Compute event classification loss with automatic class balancing."""
+        # Get class weights if available, otherwise compute balanced weights
         weights = None
         if 'event' in self.class_weights:
             weights = self.class_weights['event'].to(event_logits.device)
+        else:
+            # Use global class weights if available, otherwise compute batch weights
+            if hasattr(self, '_global_event_weights'):
+                weights = self._global_event_weights.to(event_logits.device)
+            else:
+                # Automatically compute balanced class weights based on target distribution
+                weights = self._compute_balanced_class_weights(event_target, valid_mask)
         
-        # Compute cross-entropy loss
-        event_loss = self.event_loss(event_logits.view(-1, 4), event_target.view(-1))
+        # Compute cross-entropy loss with weights
+        if weights is not None:
+            # Use weighted cross-entropy loss
+            event_loss = F.cross_entropy(
+                event_logits.view(-1, 4), 
+                event_target.view(-1), 
+                weight=weights, 
+                reduction='none'
+            )
+        else:
+            # Fallback to unweighted loss
+            event_loss = self.event_loss(event_logits.view(-1, 4), event_target.view(-1))
         
         # Apply mask and average
         event_loss = event_loss.view_as(valid_mask)
@@ -279,6 +303,103 @@ class UnifiedEventLoss(nn.Module):
         valid_count = valid_mask.sum().clamp_min(1.0)
         
         return event_loss.sum() / valid_count
+    
+    def _compute_balanced_class_weights(self, event_target: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
+        """Compute balanced class weights to handle imbalanced event distributions."""
+        # Count occurrences of each event type in valid positions
+        valid_events = event_target[valid_mask]
+        
+        if valid_events.numel() == 0:
+            return None
+        
+        # Count each class
+        class_counts = torch.bincount(valid_events, minlength=4)  # [4] for CLICK, KEY, SCROLL, MOVE
+        
+        # Avoid division by zero
+        class_counts = class_counts.float().clamp(min=1.0)
+        
+        # Compute inverse frequency weights (more rare classes get higher weights)
+        total_valid = class_counts.sum()
+        class_weights = total_valid / (4.0 * class_counts)  # Normalize by number of classes
+        
+        # Normalize weights to sum to number of classes
+        class_weights = class_weights / class_weights.mean()
+        
+        # Only print once per epoch to avoid spam
+        if not hasattr(self, '_printed_weights_this_epoch'):
+            print(f"🔍 Batch class weights: CLICK={class_weights[0]:.3f}, KEY={class_weights[1]:.3f}, SCROLL={class_weights[2]:.3f}, MOVE={class_weights[3]:.3f}")
+            self._printed_weights_this_epoch = True
+        
+        return class_weights
+    
+    def set_global_event_weights(self, event_targets: torch.Tensor, valid_masks: torch.Tensor):
+        """Set global class weights based on the entire dataset distribution."""
+        # Collect all valid events from the dataset
+        all_valid_events = []
+        for event_target, valid_mask in zip(event_targets, valid_masks):
+            valid_events = event_target[valid_mask]
+            all_valid_events.append(valid_events)
+        
+        if not all_valid_events:
+            return
+        
+        # Concatenate all valid events
+        all_events = torch.cat(all_valid_events)
+        
+        # Count each class
+        class_counts = torch.bincount(all_events, minlength=4)  # [4] for CLICK, KEY, SCROLL, MOVE
+        
+        # Avoid division by zero
+        class_counts = class_counts.float().clamp(min=1.0)
+        
+        # Compute inverse frequency weights (more rare classes get higher weights)
+        total_valid = class_counts.sum()
+        class_weights = total_valid / (4.0 * class_counts)  # Normalize by number of classes
+        
+        # Normalize weights to sum to number of classes
+        class_weights = class_weights / class_weights.mean()
+        
+        # Store global weights
+        self._global_event_weights = class_weights
+        
+        # Store target distribution for regularization
+        self._target_distribution = class_counts / class_counts.sum()
+        
+        print(f"🎯 Global class weights set: CLICK={class_weights[0]:.3f}, KEY={class_weights[1]:.3f}, SCROLL={class_weights[2]:.3f}, MOVE={class_weights[3]:.3f}")
+        print(f"📊 Dataset distribution: CLICK={class_counts[0]:,}, KEY={class_counts[1]:,}, SCROLL={class_counts[2]:,}, MOVE={class_counts[3]:,}")
+        print(f"🎯 Target distribution: CLICK={self._target_distribution[0]:.1%}, KEY={self._target_distribution[1]:.1%}, SCROLL={self._target_distribution[2]:.1%}, MOVE={self._target_distribution[3]:.1%}")
+    
+    def reset_epoch_flag(self):
+        """Reset the epoch flag to allow printing weights again."""
+        if hasattr(self, '_printed_weights_this_epoch'):
+            delattr(self, '_printed_weights_this_epoch')
+    
+    def _compute_distribution_regularization(self, event_logits: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
+        """Compute distribution regularization to encourage stable event predictions."""
+        if not hasattr(self, '_target_distribution'):
+            return torch.tensor(0.0, device=event_logits.device)
+        
+        # Get predicted probabilities
+        event_probs = F.softmax(event_logits, dim=-1)  # [B, A, 4]
+        
+        # Average probabilities across batch and actions
+        avg_probs = event_probs[valid_mask].mean(dim=0)  # [4]
+        
+        # Target distribution from dataset
+        target_dist = self._target_distribution.to(event_probs.device)
+        
+        # KL divergence between predicted and target distribution
+        # Add small epsilon to avoid log(0)
+        eps = 1e-8
+        avg_probs = avg_probs.clamp(min=eps)
+        target_dist = target_dist.clamp(min=eps)
+        
+        # KL divergence: KL(target || predicted)
+        kl_loss = (target_dist * torch.log(target_dist / avg_probs)).sum()
+        
+        # Scale the regularization (stronger weight to force stable distributions)
+        reg_weight = 1.0  # Increased from 0.1 to 1.0
+        return reg_weight * kl_loss
     
     def _compute_time_loss(self, time_q: torch.Tensor, time_target: torch.Tensor, 
                           valid_mask: torch.Tensor) -> torch.Tensor:
@@ -365,7 +486,7 @@ class UnifiedEventLoss(nn.Module):
         
         if mask_flat.any():
             loss = F.cross_entropy(logits_flat[mask_flat], targets_flat[mask_flat], weight=weights)
-    else:
+        else:
             loss = torch.tensor(0.0, device=logits.device)
         
         return loss
