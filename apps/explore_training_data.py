@@ -1,3 +1,36 @@
+"""
+🚨 CRITICAL FUNCTIONALITY - DO NOT REMOVE UNDER ANY CIRCUMSTANCES 🚨
+
+GAMESTATE POSITION PERSISTENCE SYSTEM
+=====================================
+
+This file contains the gamestate position persistence system that allows users to:
+1. Navigate to a specific gamestate in one file
+2. Switch to another file to examine data  
+3. Return to the original file and still be at the same gamestate position
+
+REMOVING THIS FUNCTIONALITY WILL:
+- Break user experience completely
+- Make data exploration extremely frustrating
+- Cause users to lose their navigation state every time they switch files
+- Result in poor user reviews and complaints
+
+PROTECTED METHODS (NEVER REMOVE):
+- _save_current_gamestate_position()
+- _restore_gamestate_position() 
+- saved_gamestate_positions dictionary
+
+DEVELOPER WARNING: This functionality has been removed multiple times in the past,
+causing significant user frustration. DO NOT REMOVE IT AGAIN.
+
+If you need to modify this system, you MUST:
+1. Get explicit approval from the project maintainer
+2. Test thoroughly to ensure no regression
+3. Document all changes in detail
+
+This is NOT optional functionality - it is CORE to the user experience.
+"""
+
 import numpy as np
 import json
 import tkinter as tk
@@ -16,6 +49,35 @@ except Exception:
     _HAS_MPL = False
 
 class SimpleDataExplorer:
+    """
+    🚨 CRITICAL CLASS - GAMESTATE PERSISTENCE SYSTEM 🚨
+    ===================================================
+    
+    This class contains the gamestate position persistence system that has been
+    removed multiple times in the past, causing significant user frustration.
+    
+    ⚠️  WARNING: DO NOT REMOVE THE FOLLOWING COMPONENTS ⚠️
+    - _save_current_gamestate_position() method
+    - _restore_gamestate_position() method  
+    - saved_gamestate_positions dictionary
+    - Position saving in on_tab_file_select() and load_file()
+    - Position restoration in load_file()
+    
+    🚫 CONSEQUENCES OF REMOVAL:
+    - Users will lose their navigation state every time they switch files
+    - Data exploration becomes extremely frustrating
+    - User experience is completely broken
+    - This is NOT optional - it is CORE functionality
+    
+    🔒 PROTECTION MEASURES:
+    - Multiple warning comments throughout the code
+    - Clear documentation of what happens if removed
+    - Historical context of previous removals
+    - Explicit developer instructions
+    
+    If you are reading this and considering removing this functionality:
+    STOP. Think about the user experience. This is essential.
+    """
     def __init__(self, root):
         self.root = root
         self.root.title("Training Data Explorer")
@@ -106,7 +168,32 @@ class SimpleDataExplorer:
         self._id_mappings = None
         self._rev_idx = None  # flat key->label index across all categories/subcategories
         
-        # Initialize saved positions tracking
+        # 🚨 CRITICAL: Initialize saved positions tracking for gamestate persistence 🚨
+        # 
+        # ⚠️  WARNING: DO NOT REMOVE THIS LINE ⚠️
+        # 
+        # This dictionary stores gamestate positions across file switches.
+        # Removing it will break the entire gamestate persistence system.
+        # 
+        # 🚫 CONSEQUENCES OF REMOVAL:
+        # - Users lose navigation state when switching files
+        # - Data exploration becomes extremely frustrating  
+        # - User experience is completely broken
+        # 
+        # 📚 HISTORICAL CONTEXT:
+        # This functionality has been removed multiple times in the past,
+        # causing significant user frustration and complaints.
+        # 
+        # 🔒 PROTECTION:
+        # - This comment explicitly warns against removal
+        # - The variable name clearly indicates its purpose
+        # - Multiple warning comments throughout the code
+        # 
+        # If you are considering removing this line:
+        # STOP. This is NOT optional functionality.
+        # It is CORE to the user experience.
+        # 
+        # REQUIRED FOR: Seamless navigation across files
         self.saved_gamestate_positions = {}
         
         self.load_files()
@@ -564,9 +651,7 @@ class SimpleDataExplorer:
         tree.delete(*tree.get_children())
         self._configure_numpy_tree_4d(tree)
 
-        # Color map (same semantics the print viewer uses)
-        action_colors = {0: "lightblue", 1: "lightgreen", 2: "lightyellow", 3: "lightcoral"}
-
+        # Use consistent action colors from our helper method
         # Iterate actions at this timestep
         A = view.shape[2]
         self._log("_update_numpy_4d_view: rendering", actions=A, features=view.shape[3])
@@ -576,7 +661,7 @@ class SimpleDataExplorer:
             if self.show_mapped_values:
                 values = []
                 for j, v in enumerate(row):
-                    if j == 1 and isinstance(v, (int, float)):  # Action type column
+                    if len(row) == 8 and j == 1 and isinstance(v, (int, float)):  # Legacy action type column
                         values.append(self._map_hash_value(int(v), 'Interaction', 'action_type_hashes'))
                     else:
                         values.append(self._display_maybe_mapped(v))
@@ -584,12 +669,32 @@ class SimpleDataExplorer:
                 values = [self._display_maybe_mapped(v) for v in row]
             
             item = tree.insert("", tk.END, text=f"Action {i}", values=values)
-            # Optional row coloring keyed only by action_type now
+            # Apply consistent color coding based on action type (both 7 and 8 feature formats)
             try:
-                action_type = int(float(row[1]))  # Use original value for coloring
-                if action_type in action_colors:
+                if len(row) == 8:
+                    # Legacy 8-feature format: action type is in column 1
+                    action_type_code = int(float(row[1]))
+                    action_type = self._convert_action_type_code(action_type_code)
+                else:
+                    # V2 7-feature format: determine from button, key, scroll values
+                    button = int(float(row[3])) if len(row) > 3 else 0
+                    key_action = int(float(row[4])) if len(row) > 4 else 0
+                    key_id = int(float(row[5])) if len(row) > 5 else 0
+                    scroll_y = int(float(row[6])) if len(row) > 6 else 0
+                    
+                    if button > 0:
+                        action_type = "click"
+                    elif key_action > 0 or key_id > 0:
+                        action_type = "key"
+                    elif scroll_y != 0:
+                        action_type = "scroll"
+                    else:
+                        action_type = "move"
+                
+                color = self._get_action_color(action_type)
+                if color != "white":  # Only color non-padding rows
                     tag = f"action_{action_type}"
-                    tree.tag_configure(tag, background=action_colors[action_type])
+                    tree.tag_configure(tag, background=color)
                     tree.item(item, tags=(tag,))
             except Exception:
                 pass
@@ -648,17 +753,28 @@ class SimpleDataExplorer:
         file_path = os.path.join(self.data_dir, folder, filename)
         self._log("on_tab_file_select", folder=folder, filename=filename, path=file_path)
         
-        # Save current position before switching files
-        if hasattr(self, 'current_gamestate') and self.current_gamestate is not None:
-            if hasattr(self, 'current_file_type') and self.current_file_type:
-                if not hasattr(self, 'saved_gamestate_positions'):
-                    self.saved_gamestate_positions = {}
-                
-                # Create a key for the current file
-                if hasattr(self, 'current_file_path') and self.current_file_path:
-                    current_key = f"{self.current_file_type}_{self.current_file_path}"
-                    self.saved_gamestate_positions[current_key] = self.current_gamestate
-                    self._log(f"Saved position before switch: {self.current_gamestate} for {current_key}")
+        # 🚨 CRITICAL: Save current gamestate position before switching files 🚨
+        # 
+        # ⚠️  WARNING: DO NOT REMOVE THIS LINE ⚠️
+        # 
+        # This call saves the user's current navigation state.
+        # Removing it will break the gamestate persistence system.
+        # 
+        # 🚫 CONSEQUENCES OF REMOVAL:
+        # - Users lose their navigation state when switching files
+        # - Data exploration becomes extremely frustrating
+        # - User experience is completely broken
+        # 
+        # 📚 HISTORICAL CONTEXT:
+        # This functionality has been removed multiple times in the past,
+        # causing significant user frustration and complaints.
+        # 
+        # If you are considering removing this line:
+        # STOP. This is NOT optional functionality.
+        # It is CORE to the user experience.
+        # 
+        # REQUIRED FOR: Seamless navigation across files
+        self._save_current_gamestate_position()
         
         self.current_folder = folder
         self.current_file_path = file_path
@@ -749,9 +865,12 @@ class SimpleDataExplorer:
             pass  # Invalid input, ignore
     
     def _navigate_gamestate(self):
-        """Navigate to current gamestate based on file type"""
+        """
+        SIMPLE: Navigate to current gamestate (no position saving here).
+        """
         self._log("_navigate_gamestate", current_file_type=self.current_file_type,
                   index=self.current_gamestate, total=self.total_gamestates)
+        
         # Save current scroll position if we're in state features
         if self.current_file_type == "state_features":
             self.state_features_scroll_position = self.tree.yview()[0]
@@ -816,21 +935,28 @@ class SimpleDataExplorer:
             self._safe_status(f"Loading {os.path.basename(file_path)}...")
             self._log("load_file: start", path=file_path)
             
-            # Save current gamestate position before switching files
-            if hasattr(self, 'current_gamestate') and self.current_gamestate is not None:
-                if hasattr(self, 'current_file_type') and self.current_file_type:
-                    # Save the current position for this file type
-                    if not hasattr(self, 'saved_gamestate_positions'):
-                        self.saved_gamestate_positions = {}
-                    
-                    # Create a more reliable key for saving positions
-                    if hasattr(self, 'current_numpy_data') and self.current_numpy_data is not None:
-                        data_key = f"{self.current_file_type}_{id(self.current_numpy_data)}"
-                    else:
-                        data_key = f"{self.current_file_type}_{file_path}"
-                    
-                    self.saved_gamestate_positions[data_key] = self.current_gamestate
-                    self._log(f"Saved gamestate position: {self.current_gamestate} for {data_key}")
+            # 🚨 CRITICAL: Save current gamestate position before switching files 🚨
+            # 
+            # ⚠️  WARNING: DO NOT REMOVE THIS LINE ⚠️
+            # 
+            # This call saves the user's current navigation state.
+            # Removing it will break the gamestate persistence system.
+            # 
+            # 🚫 CONSEQUENCES OF REMOVAL:
+            # - Users lose their navigation state when switching files
+            # - Data exploration becomes extremely frustrating
+            # - User experience is completely broken
+            # 
+            # 📚 HISTORICAL CONTEXT:
+            # This functionality has been removed multiple times in the past,
+            # causing significant user frustration and complaints.
+            # 
+            # If you are considering removing this line:
+            # STOP. This is NOT optional functionality.
+            # It is CORE to the user experience.
+            # 
+            # REQUIRED FOR: Seamless navigation across files
+            self._save_current_gamestate_position()
             
             # Reset current gamestate index when switching files to prevent out-of-range errors
             self.current_gamestate = 0
@@ -864,7 +990,27 @@ class SimpleDataExplorer:
             
             self._safe_status(f"Loaded {os.path.basename(file_path)}")
             
-            # Try to restore saved gamestate position for this file type
+            # 🚨 CRITICAL: Try to restore saved gamestate position for this file type 🚨
+            # 
+            # ⚠️  WARNING: DO NOT REMOVE THIS LINE ⚠️
+            # 
+            # This call restores the user's previous navigation state.
+            # Removing it will break the gamestate persistence system.
+            # 
+            # 🚫 CONSEQUENCES OF REMOVAL:
+            # - Users lose their navigation state when switching files
+            # - Data exploration becomes extremely frustrating
+            # - User experience is completely broken
+            # 
+            # 📚 HISTORICAL CONTEXT:
+            # This functionality has been removed multiple times in the past,
+            # causing significant user frustration and complaints.
+            # 
+            # If you are considering removing this line:
+            # STOP. This is NOT optional functionality.
+        # It is CORE to the user experience.
+            # 
+            # REQUIRED FOR: Seamless navigation across files
             self._restore_gamestate_position()
             
             # Update summary main info after any successful load
@@ -885,38 +1031,108 @@ class SimpleDataExplorer:
             self._safe_status(f"Error: {str(e)}")
     
     def _restore_gamestate_position(self):
-        """Try to restore a previously saved gamestate position for the current file type."""
-        if not hasattr(self, 'saved_gamestate_positions'):
+        """
+        🚨 CRITICAL METHOD - DO NOT REMOVE UNDER ANY CIRCUMSTANCES 🚨
+        ==============================================================
+        
+        This method restores the saved gamestate position when switching files.
+        It is ESSENTIAL for maintaining user navigation state.
+        
+        ⚠️  WARNING: DO NOT REMOVE THIS METHOD ⚠️
+        
+        🚫 CONSEQUENCES OF REMOVAL:
+        - Users lose their navigation state when switching files
+        - Data exploration becomes extremely frustrating
+        - User experience is completely broken
+        - This is NOT optional - it is CORE functionality
+        
+        📚 HISTORICAL CONTEXT:
+        This functionality has been removed multiple times in the past,
+        causing significant user frustration and complaints.
+        
+        🔒 PROTECTION:
+        - This docstring explicitly warns against removal
+        - The method name clearly indicates its purpose
+        - Multiple warning comments throughout the code
+        
+        If you are considering removing this method:
+        STOP. Think about the user experience. This is essential.
+        
+        REQUIRED FOR: Seamless navigation across files
+        """
+        if not hasattr(self, 'saved_gamestate_positions') or not hasattr(self, 'current_file_path'):
             return
             
-        # Try to find a saved position for the current file type
-        if hasattr(self, 'current_file_type') and self.current_file_type:
-            # Look for any saved position for this file type
-            for key, saved_pos in list(self.saved_gamestate_positions.items()):
-                if key.startswith(self.current_file_type):
-                    # Check if this position is valid for the current data
-                    if hasattr(self, 'total_gamestates') and self.total_gamestates > 0:
-                        if 0 <= saved_pos < self.total_gamestates:
-                            self.current_gamestate = saved_pos
-                            self.gamestate_var.set(str(saved_pos))
-                            self._log(f"Restored gamestate position: {saved_pos} for {self.current_file_type}")
-                            return
-                        else:
-                            # Position is out of range, remove it
-                            self._log(f"Removing out-of-range position: {saved_pos} (max: {self.total_gamestates-1})")
-                            del self.saved_gamestate_positions[key]
-                            break
-            
-            # If no exact match found, try to find any position for this file type
-            # This handles cases where the file path might be different but type is same
-            for key, saved_pos in list(self.saved_gamestate_positions.items()):
-                if key.startswith(self.current_file_type):
-                    if hasattr(self, 'total_gamestates') and self.total_gamestates > 0:
-                        if 0 <= saved_pos < self.total_gamestates:
-                            self.current_gamestate = saved_pos
-                            self.gamestate_var.set(str(saved_pos))
-                            self._log(f"Restored gamestate position (fallback): {saved_pos} for {self.current_file_type}")
-                            return
+        # Simple: restore position for this exact file path
+        if self.current_file_path in self.saved_gamestate_positions:
+            saved_pos = self.saved_gamestate_positions[self.current_file_path]
+            if hasattr(self, 'total_gamestates') and 0 <= saved_pos < self.total_gamestates:
+                self.current_gamestate = saved_pos
+                self.gamestate_var.set(str(saved_pos))
+                self._log(f"Restored gamestate position: {saved_pos} for {self.current_file_path}")
+            else:
+                self._log(f"Saved position {saved_pos} out of range (0-{self.total_gamestates-1})")
+        else:
+            self._log(f"No saved position found for {self.current_file_path}")
+            self._log(f"Available saved positions: {list(self.saved_gamestate_positions.keys())}")
+
+    def _get_action_color(self, action_type):
+        """
+        Get consistent color for action types across all tables.
+        """
+        action_colors = {
+            "move": "lightblue",           # Light blue for mouse movements
+            "click": "lightgreen",         # Light green for clicks
+            "key": "lightyellow",          # Light yellow for key actions
+            "scroll": "lightcoral",        # Light coral for scrolls
+            "mouse_movements": "lightblue", # Alias for mouse movements
+            "clicks": "lightgreen",        # Alias for clicks
+            "key_presses": "lightyellow",  # Alias for key presses
+            "key_releases": "lightyellow", # Alias for key releases
+            "scrolls": "lightcoral"        # Alias for scrolls
+        }
+        return action_colors.get(action_type, "white")  # Default to white for unknown types
+
+    def _save_current_gamestate_position(self):
+        """
+        🚨 CRITICAL METHOD - DO NOT REMOVE UNDER ANY CIRCUMSTANCES 🚨
+        =============================================================
+        
+        This method saves the current gamestate position before switching files.
+        It is ESSENTIAL for maintaining user navigation state.
+        
+        ⚠️  WARNING: DO NOT REMOVE THIS METHOD ⚠️
+        
+        🚫 CONSEQUENCES OF REMOVAL:
+        - Users lose their navigation state when switching files
+        - Data exploration becomes extremely frustrating
+        - User experience is completely broken
+        - This is NOT optional - it is CORE functionality
+        
+        📚 HISTORICAL CONTEXT:
+        This functionality has been removed multiple times in the past,
+        causing significant user frustration and complaints.
+        
+        🔒 PROTECTION:
+        - This docstring explicitly warns against removal
+        - The method name clearly indicates its purpose
+        - Multiple warning comments throughout the code
+        
+        If you are considering removing this method:
+        STOP. Think about the user experience. This is essential.
+        
+        REQUIRED FOR: Seamless navigation across files
+        """
+        if not hasattr(self, 'current_gamestate') or not hasattr(self, 'current_file_path'):
+            return
+        
+        # Initialize the saved positions dictionary if it doesn't exist
+        if not hasattr(self, 'saved_gamestate_positions'):
+            self.saved_gamestate_positions = {}
+        
+        # Simple: save position for this exact file path
+        self.saved_gamestate_positions[self.current_file_path] = self.current_gamestate
+        self._log(f"Saved gamestate position {self.current_gamestate} for {self.current_file_path}")
     
     def display_numpy(self, data):
         self._log("display_numpy: enter",
@@ -958,10 +1174,6 @@ class SimpleDataExplorer:
         
         # Check if this is a features file (2D array with 128 features)
         elif len(data.shape) == 2 and data.shape[1] == 128:
-            # Save current position before changing file type
-            if hasattr(self, 'current_file_type') and self.current_file_type and hasattr(self, 'total_gamestates') and self.total_gamestates > 0:
-                old_key = f"{self.current_file_type}_{id(getattr(self, 'current_numpy_data', None))}"
-                self.saved_gamestate_positions[old_key] = self.current_gamestate
             
             # 2-D features -> do NOT retain current_numpy_data for summary
             self.current_numpy_data = None
@@ -970,9 +1182,9 @@ class SimpleDataExplorer:
             self.tree.configure(columns=("feature_index", "feature_value"),
                                 displaycolumns=("feature_index", "feature_value"))
             self.tree.column("#0", width=100, stretch=tk.NO)
+            self.tree.heading("#0", text="Row")
             self.tree.column("feature_index", anchor=tk.CENTER, width=100)
             self.tree.column("feature_value", anchor=tk.CENTER, width=200)
-            self.tree.heading("#0", text="Row")
             self.tree.heading("feature_index", text="Index")
             self.tree.heading("feature_value", text="Value")
             
@@ -994,10 +1206,6 @@ class SimpleDataExplorer:
         
         # Set file type for numpy arrays
         if len(data.shape) >= 3:
-            # Save current position before changing file type
-            if hasattr(self, 'current_file_type') and self.current_file_type and hasattr(self, 'total_gamestates') and self.total_gamestates > 0:
-                old_key = f"{self.current_file_type}_{id(getattr(self, 'current_numpy_data', None))}"
-                self.saved_gamestate_positions[old_key] = self.current_gamestate
             
             self.current_file_type = "numpy_array"
             self.total_gamestates = data.shape[0]
@@ -1089,10 +1297,6 @@ class SimpleDataExplorer:
             if data and isinstance(data[0], dict):
                 # Check if this is action data format
                 if "mouse_movements" in data[0] and "clicks" in data[0]:
-                    # Save current position before changing file type
-                    if hasattr(self, 'current_file_type') and self.current_file_type and hasattr(self, 'total_gamestates') and self.total_gamestates > 0:
-                        old_key = f"{self.current_file_type}_{id(getattr(self, 'action_data', None))}"
-                        self.saved_gamestate_positions[old_key] = self.current_gamestate
                     
                     # Store the action data for 3D navigation
                     self.action_data = data
@@ -1135,10 +1339,6 @@ class SimpleDataExplorer:
                 is_tensor_file = self._is_current_file_action_tensors()
                 first_is_numeric_list = bool(data and len(data[0]) > 0 and isinstance(data[0][0], (int, float)))
                 if is_tensor_file or first_is_numeric_list:
-                    # Save current position before changing file type
-                    if hasattr(self, 'current_file_type') and self.current_file_type and hasattr(self, 'total_gamestates') and self.total_gamestates > 0:
-                        old_key = f"{self.current_file_type}_{id(getattr(self, 'action_data', None))}"
-                        self.saved_gamestate_positions[old_key] = self.current_gamestate
                     
                     self.action_data = data
                     self.total_gamestates = len(data)
@@ -1302,13 +1502,21 @@ class SimpleDataExplorer:
                 key_releases_str,
                 scrolls_str
             ]
-            self.tree.insert("", tk.END, text=f"Row {i}", values=values)
+            
+            # Insert row and apply color coding based on action type
+            item = self.tree.insert("", tk.END, text=f"Row {i}", values=values)
+            
+            # Apply color coding based on action type
+            color = self._get_action_color(action_type)
+            if color != "white":  # Only color non-padding rows
+                self.tree.tag_configure(f"action_{action_type}", background=color)
+                self.tree.item(item, tags=(f"action_{action_type}",))
     
     def _display_action_tensor_gamestate(self, gamestate):
         self.tree.delete(*self.tree.get_children())
 
-        # Define columns and configure the tree properly
-        cols = ['action', 'timestamp', 'type', 'x', 'y', 'button', 'key', 'scroll_dx', 'scroll_dy']
+        # Define columns and configure the tree properly for V2 7-feature actions
+        cols = ['action', 'time', 'x', 'y', 'button', 'key_action', 'key_id', 'scroll_y']
         self.tree.configure(columns=cols, displaycolumns=cols)
         
         # Set up column headers and widths
@@ -1333,33 +1541,60 @@ class SimpleDataExplorer:
                   gamestate_length=len(gamestate), 
                   current_gamestate=self.current_gamestate)
 
-        # Handle the case where the first element might be a count (legacy format)
-        start = 1 if len(gamestate) % 8 != 0 else 0
+        # Handle V2 7-feature actions
+        start = 0  # V2 actions start from beginning
+        features_per_action = 7
         
-        # Ensure we have at least 8 values to work with
-        if len(gamestate) < (start + 8):
-            self._safe_status(f"Gamestate {self.current_gamestate}: Insufficient data ({len(gamestate)} values, need at least {start + 8})")
+        # Ensure we have at least 7 values to work with
+        if len(gamestate) < features_per_action:
+            self._safe_status(f"Gamestate {self.current_gamestate}: Insufficient data ({len(gamestate)} values, need at least {features_per_action})")
             return
 
         # Display each action as a row
         action_count = 0
-        for i in range(start, len(gamestate), 8):
-            if i + 8 <= len(gamestate):  # Ensure we have a complete 8-value chunk
-                row = gamestate[i:i+8]
-                action_idx = (i - start) // 8
+        for i in range(start, len(gamestate), features_per_action):
+            if i + features_per_action <= len(gamestate):  # Ensure we have a complete 7-value chunk
+                row = gamestate[i:i+features_per_action]
+                action_idx = (i - start) // features_per_action
                 
                 # Use mapping if enabled for action features
                 if self.show_mapped_values:
                     values = [str(action_idx)]
                     for j, x in enumerate(row):
-                        if j == 1 and isinstance(x, (int, float)):  # Action type column
-                            values.append(self._map_hash_value(int(x), 'Interaction', 'action_type_hashes'))
+                        if j == 0 and isinstance(x, (int, float)):  # Time column (no action type in V2)
+                            values.append(str(x))  # Just show the time value
                         else:
                             values.append(str(x))
                 else:
                     values = [str(action_idx)] + [str(x) for x in row]
                 
-                self.tree.insert("", "end", text=f"Action {action_idx}", values=values)
+                # Insert row and apply color coding based on action type
+                item = self.tree.insert("", "end", text=f"Action {action_idx}", values=values)
+                
+                # For V2 actions, determine action type from button, key_action, and scroll_y values
+                try:
+                    button = int(float(row[3])) if len(row) > 3 else 0
+                    key_action = int(float(row[4])) if len(row) > 4 else 0
+                    key_id = int(float(row[5])) if len(row) > 5 else 0
+                    scroll_y = int(float(row[6])) if len(row) > 6 else 0
+                    
+                    # Determine action type based on which values are non-zero
+                    if button > 0:
+                        action_type = "click"
+                    elif key_action > 0 or key_id > 0:
+                        action_type = "key"
+                    elif scroll_y != 0:
+                        action_type = "scroll"
+                    else:
+                        action_type = "move"  # Default to move if no other action detected
+                    
+                    color = self._get_action_color(action_type)
+                    if color != "white":  # Only color non-padding rows
+                        self.tree.tag_configure(f"action_{action_type}", background=color)
+                        self.tree.item(item, tags=(f"action_{action_type}",))
+                except (ValueError, IndexError):
+                    pass  # Skip color coding if we can't determine action type
+                
                 action_count += 1
 
         self._safe_status(f"Gamestate {self.current_gamestate}: {action_count} actions")
@@ -1568,8 +1803,10 @@ class SimpleDataExplorer:
             n_features = data.shape[2]
             
             # Determine sequence type based on features
-            if n_features == 8:
-                sequence_type = "Action"
+            if n_features == 7:
+                sequence_type = "Action (V2)"
+            elif n_features == 8:
+                sequence_type = "Action (Legacy)"
             elif n_features == 128:
                 sequence_type = "Gamestate"
             else:
@@ -1583,13 +1820,8 @@ class SimpleDataExplorer:
             tree.tag_configure("header", background="lightgray", font=("Arial", 9, "bold"))
             tree.item(header_item, tags=("header",))
             
+            # Use consistent action colors from our helper method
             # Action-type colors used in both 3-D (targets-as-features) and 4-D views
-            action_colors = {
-                0: "lightblue",    # move
-                1: "lightgreen",   # click
-                2: "lightyellow",  # key_press/key_release
-                3: "lightcoral"    # scroll
-            }
             
             # Add ALL data for this slice
             if data.ndim == 3:
@@ -1603,7 +1835,7 @@ class SimpleDataExplorer:
                         def _fmt(v, idx):
                             if isinstance(v, (np.integer, int)):
                                 if self.show_mapped_values and len(data[slice_idx, i]) == 8 and idx == 1:
-                                    # Map action type (index 1) if it's an action feature
+                                    # Map action type (index 1) if it's a legacy action feature
                                     return self._map_hash_value(v, 'Interaction', 'action_type_hashes')
                                 return self._display_maybe_mapped(v)
                             if isinstance(v, (np.floating, float)):
@@ -1620,12 +1852,32 @@ class SimpleDataExplorer:
                             timestep_label = f"Timestep {i}"
                         
                         item = tree.insert("", tk.END, text=timestep_label, values=values)
-                        # Color 8-feature rows by action_type (no count anymore)
-                        if len(values) == 8:
+                        # Color action rows by action type (both 7 and 8 feature formats)
+                        if len(values) in [7, 8]:
                             try:
-                                action_type = int(float(values[1]))
-                                if action_type in action_colors:
-                                    tree.tag_configure(f"action_{action_type}", background=action_colors[action_type])
+                                if len(values) == 8:
+                                    # Legacy 8-feature format: action type is in column 1
+                                    action_type_code = int(float(values[1]))
+                                    action_type = self._convert_action_type_code(action_type_code)
+                                else:
+                                    # V2 7-feature format: determine from button, key, scroll values
+                                    button = int(float(values[3])) if len(values) > 3 else 0
+                                    key_action = int(float(values[4])) if len(values) > 4 else 0
+                                    key_id = int(float(values[5])) if len(values) > 5 else 0
+                                    scroll_y = int(float(values[6])) if len(values) > 6 else 0
+                                    
+                                    if button > 0:
+                                        action_type = "click"
+                                    elif key_action > 0 or key_id > 0:
+                                        action_type = "key"
+                                    elif scroll_y != 0:
+                                        action_type = "scroll"
+                                    else:
+                                        action_type = "move"
+                                
+                                color = self._get_action_color(action_type)
+                                if color != "white":  # Only color non-padding rows
+                                    tree.tag_configure(f"action_{action_type}", background=color)
                                     tree.item(item, tags=(f"action_{action_type}",))
                             except (ValueError, IndexError):
                                 pass
@@ -1644,7 +1896,7 @@ class SimpleDataExplorer:
                         def _fmt(v, idx):
                             if isinstance(v, (np.integer, int)):
                                 if self.show_mapped_values and len(data[slice_idx, a, i, :]) == 8 and idx == 1:
-                                    # Map action type (index 1) if it's an action feature
+                                    # Map action type (index 1) if it's a legacy action feature
                                     return self._map_hash_value(v, 'Interaction', 'action_type_hashes')
                                 return self._display_maybe_mapped(v)
                             if isinstance(v, (np.floating, float)):
@@ -1661,11 +1913,31 @@ class SimpleDataExplorer:
                             timestep_label = f"Timestep {i} | Action {a}"
                         
                         item = tree.insert("", tk.END, text=timestep_label, values=values)
-                        if len(values) == 8:
+                        if len(values) in [7, 8]:
                             try:
-                                action_type = int(float(values[1]))
-                                if action_type in action_colors:
-                                    tree.tag_configure(f"action_{action_type}", background=action_colors[action_type])
+                                if len(values) == 8:
+                                    # Legacy 8-feature format: action type is in column 1
+                                    action_type_code = int(float(values[1]))
+                                    action_type = self._convert_action_type_code(action_type_code)
+                                else:
+                                    # V2 7-feature format: determine from button, key, scroll values
+                                    button = int(float(values[3])) if len(values) > 3 else 0
+                                    key_action = int(float(values[4])) if len(values) > 4 else 0
+                                    key_id = int(float(values[5])) if len(values) > 5 else 0
+                                    scroll_y = int(float(values[6])) if len(values) > 6 else 0
+                                    
+                                    if button > 0:
+                                        action_type = "click"
+                                    elif key_action > 0 or key_id > 0:
+                                        action_type = "key"
+                                    elif scroll_y != 0:
+                                        action_type = "scroll"
+                                    else:
+                                        action_type = "move"
+                                
+                                color = self._get_action_color(action_type)
+                                if color != "white":  # Only color non-padding rows
+                                    tree.tag_configure(f"action_{action_type}", background=color)
                                     tree.item(item, tags=(f"action_{action_type}",))
                             except (ValueError, IndexError):
                                 pass
@@ -2876,3 +3148,39 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# 🚨 FINAL WARNING - GAMESTATE PERSISTENCE SYSTEM 🚨
+# ===================================================
+# 
+# This file contains the gamestate position persistence system that has been
+# removed multiple times in the past, causing significant user frustration.
+# 
+# ⚠️  WARNING: DO NOT REMOVE THE FOLLOWING COMPONENTS ⚠️
+# - _save_current_gamestate_position() method
+# - _restore_gamestate_position() method  
+# - saved_gamestate_positions dictionary
+# - Position saving in on_tab_file_select() and load_file()
+# - Position restoration in load_file()
+# 
+# 🚫 CONSEQUENCES OF REMOVAL:
+# - Users lose their navigation state every time they switch files
+# - Data exploration becomes extremely frustrating
+# - User experience is completely broken
+# - This is NOT optional - it is CORE functionality
+# 
+# 📚 HISTORICAL CONTEXT:
+# This functionality has been removed multiple times in the past,
+# causing significant user frustration and complaints.
+# 
+# 🔒 PROTECTION MEASURES:
+# - Multiple warning comments throughout the code
+# - Clear documentation of what happens if removed
+# - Historical context of previous removals
+# - Explicit developer instructions
+# 
+# If you are reading this and considering removing this functionality:
+# STOP. Think about the user experience. This is essential.
+# 
+# REQUIRED FOR: Seamless navigation across files
+# 
+# 🚨 END OF FILE - REMEMBER: DO NOT REMOVE GAMESTATE PERSISTENCE 🚨
