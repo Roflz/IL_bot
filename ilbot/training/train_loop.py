@@ -179,6 +179,8 @@ def estimate_class_weights(train_loader, targets_version="v2", enum_sizes=None):
             "kid": norm(inv(kid_counts)), "sy": norm(inv(sy_counts))}
 
 def clamp_time(t, time_div, time_clip, already_scaled=False):
+    if time_clip is None:
+        time_clip = 3.0  # Default fallback
     if already_scaled:  # V2 saved time already scaled
         return torch.clamp(t, 0.0, float(time_clip))
     return torch.clamp(t / float(time_div), 0.0, float(time_clip))
@@ -261,7 +263,7 @@ def _update_val_agg(agg: Dict, heads: Dict[str, torch.Tensor], target: torch.Ten
     agg["sy_tgt"]  += torch.bincount(sy_tgt[m],  minlength=n_sy).cpu()
 
     # --- time stats on masked rows ---
-    t_pred = fl(heads["time"])
+    t_pred = fl(heads["time_q"][...,1])  # Use median (q50) from quantiles
     t_tgt  = fl(clamp_time(target[...,0], time_div, time_clip, already_scaled=True))
     t_pred_m = t_pred[m]
     t_tgt_m  = t_tgt[m]
@@ -404,9 +406,9 @@ def _masked_metrics(heads: dict, target: torch.Tensor, targets_version="v2"):
             "acc_key_action": m_acc(ka, tka),
             "acc_key_id": m_acc(kid, tkid),
             "acc_scroll_y": m_acc(sy, tsy),
-            "mae_time": m_mae(heads["time"], target[...,0]),
-            "mae_x":    m_mae(heads["x"],    target[...,1]),
-            "mae_y":    m_mae(heads["y"],    target[...,2]),
+            "mae_time": m_mae(heads["time_q"][...,1], target[...,0]),  # Use median (q50) from quantiles
+            "mae_x":    m_mae(heads["x_mu"],    target[...,1]),
+            "mae_y":    m_mae(heads["y_mu"],    target[...,2]),
             "valid_frac": valid_frac,
         }
 

@@ -2,7 +2,7 @@
 # Usage: .\run_train.ps1 [parameters]
 
 param(
-    [string]$DataDir = "data/recording_sessions/latest/06_final_training_data",
+    [string]$DataDir = "data/recording_sessions/20250827_040359/06_final_training_data",
     [int]$Epochs = 40,
     [double]$LR = 2.5e-4,
     [double]$WeightDecay = 1e-4,
