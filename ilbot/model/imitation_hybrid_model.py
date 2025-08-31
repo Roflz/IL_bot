@@ -445,37 +445,6 @@ class ActionDecoder(nn.Module):
             return torch.expm1(t) * (self.time_div_ms / 1000.0)
         return t
 
-    @torch.no_grad()
-    def decode_v2_as_legacy8(self, heads) -> torch.Tensor:
-        """
-        Inference-only: discretize heads to the legacy (B,100,8) tensor.
-        Synthesizes type when head_version=='v2'.
-        """
-        B, A = heads["time"].shape
-        x = heads["x"].round()
-        y = heads["y"].round()
-        time = self._invert_time(heads["time"])
-        if self.head_version == "v2":
-            btn = heads["button_logits"].argmax(-1)            # 0=None,1=L,2=R,3=M
-            ka  = heads["key_action_logits"].argmax(-1)        # 0=None,1=Press,2=Release
-            kid = heads["key_id_logits"].argmax(-1)            # 0=None,1..K
-            sy  = heads["scroll_y_logits"].argmax(-1) - self.sy_none_index      # {0,1,2}->{-1,0,1}
-            # synthesize legacy type: 1=click, 2=press, 3=release, 4=scroll, else 0
-            type_ = torch.zeros_like(btn)
-            type_ = torch.where(btn > 0, torch.ones_like(type_), type_)
-            type_ = torch.where((type_==0) & (ka==1), torch.full_like(type_, 2), type_)
-            type_ = torch.where((type_==0) & (ka==2), torch.full_like(type_, 3), type_)
-            type_ = torch.where((type_==0) & (sy!=0), torch.full_like(type_, 4), type_)
-            sx = torch.zeros_like(sy)  # legacy scroll_dx = 0
-            return torch.stack([time, type_.float(), x, y,
-                                btn.float(), kid.float(), sx.float(), sy.float()], dim=-1)
-        else:
-            at = heads["action_type_logits"].argmax(-1).float()
-            btn = heads["button_logits"].argmax(-1).float()
-            key = heads["key_logits"].argmax(-1).float()
-            sx = heads["scroll_x_logits"].argmax(-1) - 1
-            sy = heads["scroll_y_logits"].argmax(-1) - 1
-            return torch.stack([time, at, x, y, btn, key, sx.float(), sy.float()], dim=-1)
 
 class ImitationHybridModel(nn.Module):
     """Complete hybrid model combining Transformer + CNN + LSTM with action sequence input"""

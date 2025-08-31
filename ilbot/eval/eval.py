@@ -38,7 +38,7 @@ def evaluate(model, val_loader, stats, args):
             action_target = batch['action_target'].to(device)
             
             # Forward pass
-            outputs = model(temporal_sequence, action_sequence, return_logits=True)
+            outputs = model(temporal_sequence, action_sequence)
             
             # Get predictions
             out_btn = outputs["button_logits"]

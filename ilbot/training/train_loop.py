@@ -444,9 +444,9 @@ def compute_il_loss_v2(heads, target, valid_mask, class_w, loss_w, time_div, tim
             loss_w["x"]    * l_x +
             loss_w["y"]    * l_y +
             loss_w["btn"]  * l_btn +
-            loss_w["key_action"]   * l_ka + 
-            loss_w["key_id"]  * l_kid + 
-            loss_w["scroll_y"]   * l_sy)
+            loss_w["ka"]   * l_ka + 
+            loss_w["kid"]  * l_kid + 
+            loss_w["sy"]   * l_sy)
 
 def _masked_metrics(heads: dict, target: torch.Tensor, targets_version="v2"):
     """Simple masked metrics to track IL progress."""
@@ -539,7 +539,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
             
             # Forward pass
             optimizer.zero_grad()
-            outputs = model(temporal_sequence, action_sequence, return_logits=True)
+            outputs = model(temporal_sequence, action_sequence)
 
             # how many total train batches this epoch
             total_train_batches = len(train_loader)
@@ -636,7 +636,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
                 action_sequence = batch['action_sequence'].to(device)
                 action_target = batch['action_target'].to(device)
                 
-                outputs = model(temporal_sequence, action_sequence, return_logits=True)
+                outputs = model(temporal_sequence, action_sequence)
 
                 # how many total VAL batches this epoch
                 n_val_batches = len(val_loader)

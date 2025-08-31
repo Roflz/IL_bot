@@ -82,9 +82,38 @@ def main():
         actions  = batch["action_sequence"].to(args.device)
         target   = batch["action_target"].to(args.device)
 
-        heads = model(temporal, actions, return_logits=True)
-        # decode for legacy (B,100,8) arrays
-        decoded = model.action_decoder.decode(heads).cpu().numpy()
+        heads = model(temporal, actions)
+        # For unified event system, we work with the heads directly
+        # Extract predictions from the unified event system outputs
+        event_pred = heads["event_logits"].argmax(-1)  # [B, A] - 0=CLICK, 1=KEY, 2=SCROLL, 3=MOVE
+        time_pred = heads["time_q"][:, :, 1]  # [B, A] - median quantile (q=0.5)
+        x_pred = heads["x_mu"]  # [B, A] - X mean
+        y_pred = heads["y_mu"]  # [B, A] - Y mean
+        
+        # Create a simple output format for compatibility
+        B, A = event_pred.shape
+        decoded = torch.zeros(B, A, 8, device=args.device)  # [B, A, 8] for compatibility
+        
+        # Map unified events to legacy format for output
+        # [time, type, x, y, button, key, scroll_dx, scroll_y]
+        decoded[:, :, 0] = time_pred  # time
+        decoded[:, :, 1] = event_pred.float()  # event type
+        decoded[:, :, 2] = x_pred  # x
+        decoded[:, :, 3] = y_pred  # y
+        
+        # Set button, key, scroll based on event type
+        button_pred = heads["button_logits"].argmax(-1)
+        key_action_pred = heads["key_action_logits"].argmax(-1)
+        key_id_pred = heads["key_id_logits"].argmax(-1)
+        scroll_y_pred = heads["scroll_y_logits"].argmax(-1) - 1  # Convert to {-1, 0, 1}
+        
+        # Only set values for the relevant event type
+        decoded[:, :, 4] = torch.where(event_pred == 0, button_pred.float(), 0)  # button for CLICK
+        decoded[:, :, 5] = torch.where(event_pred == 1, key_id_pred.float(), 0)  # key_id for KEY
+        decoded[:, :, 6] = 0  # scroll_dx always 0
+        decoded[:, :, 7] = torch.where(event_pred == 2, scroll_y_pred.float(), 0)  # scroll_y for SCROLL
+        
+        decoded = decoded.cpu().numpy()
         tgt_np  = target.cpu().numpy()
         np.save(out_dir/f"decoded_batch{i}.npy", decoded)
         np.save(out_dir/f"target_batch{i}.npy",  tgt_np)
