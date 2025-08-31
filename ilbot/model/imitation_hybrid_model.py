@@ -671,15 +671,15 @@ class ImitationHybridModel(nn.Module):
         y_coord_encoded = self.coordinate_encoder(y_coord_features)  # (batch*10*100, 16)
         
         # Categorical features: use embeddings
-        button_features_int = button_features.squeeze(-1).long().clamp(0, 3)  # 4 categories
+        button_features_int = button_features.squeeze(-1).long().clamp(0, self.enum_sizes['button'] - 1)
         button_embedded = self.button_embedding(button_features_int)  # (batch*10*100, 16)
         button_encoded = self.button_encoder(button_embedded)  # (batch*10*100, 16)
         
-        key_action_features_int = key_action_features.squeeze(-1).long().clamp(0, 2)  # 3 categories
+        key_action_features_int = key_action_features.squeeze(-1).long().clamp(0, self.enum_sizes['key_action'] - 1)
         key_action_embedded = self.key_action_embedding(key_action_features_int)  # (batch*10*100, 16)
         key_action_encoded = self.key_action_encoder(key_action_embedded)  # (batch*10*100, 16)
         
-        key_id_features_int = key_id_features.squeeze(-1).long().clamp(0, 150)  # 151 categories
+        key_id_features_int = key_id_features.squeeze(-1).long().clamp(0, self.enum_sizes['key_id'] - 1)
         key_id_embedded = self.key_id_embedding(key_id_features_int)  # (batch*10*100, 16)
         key_id_encoded = self.key_id_encoder(key_id_embedded)  # (batch*10*100, 16)
         

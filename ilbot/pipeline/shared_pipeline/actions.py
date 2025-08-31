@@ -196,8 +196,9 @@ def create_v2_actions_directly(raw_action_data: List[Dict], time_div: float = 10
             # Convert key to numeric code if it's a string
             key_value = action.get('key', 0)
             if isinstance(key_value, str):
-                key_map = {'w': 87, 'a': 65, 's': 83, 'd': 68, 'space': 32, 'enter': 13, 'escape': 27}
-                key_value = key_map.get(key_value.lower(), 0)
+                # Use the proper key mapper for consistent key encoding
+                from utils.key_mapper import KeyboardKeyMapper
+                key_value = KeyboardKeyMapper.map_key_to_number(key_value.lower())
             
             all_actions.append({
                 'type': 'key_press',
@@ -215,8 +216,9 @@ def create_v2_actions_directly(raw_action_data: List[Dict], time_div: float = 10
             # Convert key to numeric code if it's a string
             key_value = action.get('key', 0)
             if isinstance(key_value, str):
-                key_map = {'w': 87, 'a': 65, 's': 83, 'd': 68, 'space': 32, 'enter': 13, 'escape': 27}
-                key_value = key_map.get(key_value.lower(), 0)
+                # Use the proper key mapper for consistent key encoding
+                from utils.key_mapper import KeyboardKeyMapper
+                key_value = KeyboardKeyMapper.map_key_to_number(key_value.lower())
             
             all_actions.append({
                 'type': 'key_release',

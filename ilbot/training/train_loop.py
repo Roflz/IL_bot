@@ -141,23 +141,13 @@ def estimate_class_weights(train_loader, targets_version="v2", enum_sizes=None):
     """
     Build inverse-frequency class weights with dynamic lengths.
     """
-    # V2 only - handle both old and new enum formats
-    if isinstance(enum_sizes["button"], dict):
-        # Old format: {"size": X, "none_index": Y}
-        n_btn  = int(enum_sizes["button"]["size"])
-        n_ka   = int(enum_sizes["key_action"]["size"])
-        n_kid  = int(enum_sizes["key_id"]["size"])
-        n_sy   = int(enum_sizes["scroll_y"]["size"])
-        none_idx_ka = int(enum_sizes["key_action"]["none_index"])
-        none_idx_sy = int(enum_sizes["scroll_y"]["none_index"])
-    else:
-        # New format: just the integer sizes
-        n_btn  = int(enum_sizes["button"])
-        n_ka   = int(enum_sizes["key_action"])
-        n_kid  = int(enum_sizes["key_id"])
-        n_sy   = int(enum_sizes["scroll"])
-        none_idx_ka = 0  # Default none index for key_action
-        none_idx_sy = 1  # Default none index for scroll_y
+    # V2 only - new format: just the integer sizes
+    n_btn  = int(enum_sizes["button"])
+    n_ka   = int(enum_sizes["key_action"])
+    n_kid  = int(enum_sizes["key_id"])
+    n_sy   = int(enum_sizes["scroll"])
+    none_idx_ka = 0  # Default none index for key_action
+    none_idx_sy = 1  # Default none index for scroll_y
     
     btn_counts = torch.ones(n_btn); ka_counts = torch.ones(n_ka)
     kid_counts = torch.ones(n_kid); sy_counts = torch.ones(n_sy)
@@ -196,17 +186,17 @@ def clamp_time(t, time_div, time_clip, already_scaled=False):
 # ---------------------------
 # Validation metrics helpers
 # ---------------------------
-def _init_val_agg(enum_sizes: Dict[str, Dict[str, int]]) -> Dict:
+def _init_val_agg(enum_sizes: Dict[str, int]) -> Dict:
     def z(n): return torch.zeros(int(n), dtype=torch.long)
     return {
-        "btn_pred": z(enum_sizes["button"]["size"]),
-        "btn_tgt":  z(enum_sizes["button"]["size"]),
-        "ka_pred":  z(enum_sizes["key_action"]["size"]),
-        "ka_tgt":   z(enum_sizes["key_action"]["size"]),
-        "kid_pred": z(enum_sizes["key_id"]["size"]),
-        "kid_tgt":  z(enum_sizes["key_id"]["size"]),
-        "sy_pred":  z(enum_sizes["scroll_y"]["size"]),
-        "sy_tgt":   z(enum_sizes["scroll_y"]["size"]),
+        "btn_pred": z(enum_sizes["button"]),
+        "btn_tgt":  z(enum_sizes["button"]),
+        "ka_pred":  z(enum_sizes["key_action"]),
+        "ka_tgt":   z(enum_sizes["key_action"]),
+        "kid_pred": z(enum_sizes["key_id"]),
+        "kid_tgt":  z(enum_sizes["key_id"]),
+        "sy_pred":  z(enum_sizes["scroll"]),
+        "sy_tgt":   z(enum_sizes["scroll"]),
         "time_pred_sum": 0.0,
         "time_tgt_sum":  0.0,
         "time_count":    0,
@@ -228,13 +218,13 @@ def _update_val_agg(agg: Dict, heads: Dict[str, torch.Tensor], target: torch.Ten
     m = vm2.view(-1)
 
     # Sizes & none indices
-    n_btn = int(enum_sizes["button"]["size"])
-    n_ka  = int(enum_sizes["key_action"]["size"])
-    n_kid = int(enum_sizes["key_id"]["size"])
-    n_sy  = int(enum_sizes["scroll_y"]["size"])
-    btn_none = int(enum_sizes["button"]["none_index"])
-    ka_none  = int(enum_sizes["key_action"]["none_index"])
-    sy_none  = int(enum_sizes["scroll_y"]["none_index"])
+    n_btn = int(enum_sizes["button"])
+    n_ka  = int(enum_sizes["key_action"])
+    n_kid = int(enum_sizes["key_id"])
+    n_sy  = int(enum_sizes["scroll"])
+    btn_none = 0  # Default none index for button
+    ka_none  = 0  # Default none index for key_action
+    sy_none  = 1  # Default none index for scroll_y
 
     # Flatten helpers
     def fl(x): return x.view(-1)
@@ -520,7 +510,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                 total_valid = int(vm.sum().item())
                 frac = total_valid / (B * A)
 
-                ka_none = int(enum_sizes["key_action"]["none_index"])
+                ka_none = 0  # Default none index for key_action
                 ka = action_target[..., 4].long()
                 kid_rows = int((vm & (ka != ka_none)).sum().item())
 
@@ -616,7 +606,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                     total_valid = int(vm_mask.sum().item())
                     frac = total_valid / (B * A)
 
-                    ka_none = int(enum_sizes["key_action"]["none_index"])
+                    ka_none = 0  # Default none index for key_action
                     ka = action_target[..., 4].long()
                     kid_rows = int((vm_mask & (ka != ka_none)).sum().item())
 

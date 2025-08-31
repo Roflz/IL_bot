@@ -78,9 +78,12 @@ class GaussianNLLLoss(nn.Module):
             Average Gaussian NLL loss across all valid predictions
         """
         # Convert log-sigma to sigma with bounds
+        # Create tensors on the same device as log_sigma
+        sigma_min_tensor = torch.tensor(self.sigma_min, device=log_sigma.device, dtype=log_sigma.dtype)
+        sigma_max_tensor = torch.tensor(self.sigma_max, device=log_sigma.device, dtype=log_sigma.dtype)
         sigma = torch.exp(torch.clamp(log_sigma, 
-                                    min=torch.log(torch.tensor(self.sigma_min)), 
-                                    max=torch.log(torch.tensor(self.sigma_max))))
+                                    min=torch.log(sigma_min_tensor), 
+                                    max=torch.log(sigma_max_tensor)))
         
         # Gaussian NLL: 0.5 * log(2πσ²) + 0.5 * ((x - μ)² / σ²)
         # Simplified: log(σ) + 0.5 * ((x - μ) / σ)² + 0.5 * log(2π)
@@ -234,7 +237,7 @@ class UnifiedEventLoss(nn.Module):
                            scroll_y_target: torch.Tensor) -> torch.Tensor:
         """
         Derive event type from action targets.
-        
+            
         Returns:
             [B, A] tensor with event types: 0=CLICK, 1=KEY, 2=SCROLL, 3=MOVE
         """
@@ -360,7 +363,7 @@ class UnifiedEventLoss(nn.Module):
         
         if mask_flat.any():
             loss = F.cross_entropy(logits_flat[mask_flat], targets_flat[mask_flat], weight=weights)
-        else:
+    else:
             loss = torch.tensor(0.0, device=logits.device)
         
         return loss

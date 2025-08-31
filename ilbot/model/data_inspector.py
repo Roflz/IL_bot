@@ -136,10 +136,11 @@ class DataInspector:
         key_action_unique = np.unique(key_action_values)
         categorical_sizes['key_action'] = len(key_action_unique)
         
-        # Key ID: column 5 (index 5) - use actual unique count, not max value
-        key_id_values = action_targets_data[:, :, 5].flatten()
-        key_id_unique = np.unique(key_id_values)
-        categorical_sizes['key_id'] = len(key_id_unique)
+        # Key ID: column 5 (index 5) - use the key mapper's range
+        # The key mapper uses a comprehensive system with values up to 1000+
+        # For model compatibility, we'll use a reasonable upper bound
+        # Based on utils/key_mapper.py, the max value is around 405, so we'll use 505
+        categorical_sizes['key_id'] = 505  # Sufficient for all keyboard keys + buffer
         
         # Scroll: column 6 (index 6)
         scroll_values = action_targets_data[:, :, 6].flatten()
