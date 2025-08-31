@@ -174,7 +174,7 @@ def setup_model(device: torch.device,
                 hidden_dim: int = 256,
                 num_attention_heads: int = 8,
                 head_version: str = "v1",
-                enum_sizes: Optional[Dict[str, Dict[str,int]]] = None) -> ImitationHybridModel:
+                enum_sizes: Optional[Dict[str, int]] = None) -> ImitationHybridModel:
     """Create and setup the imitation learning model"""
     
     print(f"Setting up model...")
@@ -184,15 +184,22 @@ def setup_model(device: torch.device,
     print(f"  Hidden dimension: {hidden_dim}")
     print(f"  Attention heads: {num_attention_heads}")
     
+    # Create data_config dict for the model
+    data_config = {
+        'gamestate_dim': gamestate_dim,
+        'max_actions': 100,  # Fixed for this model
+        'action_features': action_dim,
+        'temporal_window': sequence_length,
+        'enum_sizes': enum_sizes or {},
+        'event_types': 4  # Fixed for this model
+    }
+    
     # Create model
     model = ImitationHybridModel(
-        gamestate_dim=gamestate_dim,
-        action_dim=action_dim,
-        sequence_length=sequence_length,
+        data_config=data_config,
         hidden_dim=hidden_dim,
-        num_attention_heads=num_attention_heads,
-        head_version=head_version,
-        enum_sizes=enum_sizes
+        num_heads=num_attention_heads,
+        num_layers=6  # Default value
     )
     
     # Move to device

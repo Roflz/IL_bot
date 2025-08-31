@@ -469,6 +469,7 @@ class ImitationHybridModel(nn.Module):
         self.max_actions = data_config['max_actions']
         self.action_features = data_config['action_features']
         self.temporal_window = data_config['temporal_window']
+        self.sequence_length = data_config['temporal_window']  # Alias for compatibility
         self.enum_sizes = data_config['enum_sizes']
         self.event_types = data_config['event_types']
         

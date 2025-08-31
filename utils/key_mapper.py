@@ -70,7 +70,47 @@ class KeyboardKeyMapper:
         """Map a key string to a unique numerical value"""
         if not key:
             return 0.0
-        
+        PS D:\repos\bot_runelite_IL> py .\test_system.py
+
+============================================================
+🧪 ILBOT SYSTEM COMPREHENSIVE TEST
+============================================================
+ℹ️  Starting system tests...
+
+============================================================
+🧪 TEST 1: Data Validation & Structure Detection
+============================================================
+❌ Data validation test failed: No module named 'utils.data_inspector'
+Traceback (most recent call last):
+  File "D:\repos\bot_runelite_IL\test_system.py", line 30, in test_1_data_validation
+    from utils.data_inspector import DataInspector
+ModuleNotFoundError: No module named 'utils.data_inspector'
+❌ Critical failure in data validation. Stopping tests.
+
+============================================================
+🧪 TEST 1: Data Validation & Structure Detection
+============================================================
+❌ Data validation test failed: No module named 'utils.data_inspector'
+Traceback (most recent call last):
+  File "D:\repos\bot_runelite_IL\test_system.py", line 30, in test_1_data_validation
+
+============================================================
+🧪 TEST 1: Data Validation & Structure Detection
+
+
+============================================================
+🧪 TEST 1: Data Validation & Structure Detection
+============================================================
+❌ Data validation test failed: No module named 'utils.data_inspector'
+Traceback (most recent call last):
+  File "D:\repos\bot_runelite_IL\test_system.py", line 30, in test_1_data_validation
+    from utils.data_inspector import DataInspector
+ModuleNotFoundError: No module named 'utils.data_inspector'
+❌ Critical failure in data validation. Stopping tests.
+PS D:\repos\bot_runelite_IL>
+
+
+
         # Check if it's a known key in our mapping
         if key in cls.KEY_MAPPING:
             return cls.KEY_MAPPING[key]

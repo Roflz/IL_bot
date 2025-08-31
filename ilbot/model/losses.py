@@ -363,7 +363,7 @@ class UnifiedEventLoss(nn.Module):
         
         if mask_flat.any():
             loss = F.cross_entropy(logits_flat[mask_flat], targets_flat[mask_flat], weight=weights)
-    else:
+        else:
             loss = torch.tensor(0.0, device=logits.device)
         
         return loss
