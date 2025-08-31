@@ -339,32 +339,8 @@ def process_fresh(session_root, gamestates_dir, actions_csv,
                 action[6]    # scroll_y (unchanged)
             ]
     
-    # Create actions_v2 for the manifest (this should match the sequence count)
-    # We'll create it from the target gamestates for each sequence
-    sequence_length = 10
-    n_sequences = len(input_sequences)
-    
-    # Create actions_v2 from the target gamestates for each sequence
-    target_gamestate_indices = []
-    for i in range(n_sequences):
-        target_idx = i + sequence_length
-        if target_idx < len(trimmed_raw_action_data):
-            target_gamestate_indices.append(target_idx)
-    
-    # Create actions_v2 from only the target gamestates
-    target_raw_action_data = [trimmed_raw_action_data[i] for i in target_gamestate_indices]
-    actions_v2, valid_mask = create_v2_actions_directly(
-        target_raw_action_data,
-        time_div=time_div,
-        time_clip=time_clip,
-        time_transform=time_transform
-    )
-    
-    # Use raw sequences as the default input sequences
-    # (input_sequences is already set above)
-    
     # Note: action_input_sequences and target_sequences are now V2 format (7 features)
-    # No need to normalize action data separately since we're using V2 actions directly
+    # No need to create separate actions_v2 since we're using V2 actions directly throughout
 
     # (optional but helpful) persist the trimmed raw actions for inspection
     try:
@@ -417,110 +393,10 @@ def process_fresh(session_root, gamestates_dir, actions_csv,
 
 
 
-    # ----- Build V2 outputs + manifest (optional) -----
-    if emit_v2:
-        print("\n🧩 Building V2 event-centric targets + manifest…")
-        # V2 actions already created directly from raw data above
-        # actions_v2 and valid_mask are already available from step 7
+    # Note: V2 action format is now the standard throughout the pipeline
+    # No need for separate V2 processing since all actions are already in V2 format
 
-        # --- Densify key_id vocab to only the values that actually appear (on valid KEY rows) ---
-        # actions_v2 layout (v2): [time_s, x, y, button, key_action, key_id, scroll_y_raw]
-        # We remap key_id to a compact 0..K-1 space based on valid rows where key_action != NONE (0).
-        m  = (valid_mask > 0)
-        ka = actions_v2[..., 4].astype(np.int64)
-        kid_raw = actions_v2[..., 5].astype(np.int64)
-        seen = np.unique(kid_raw[m & (ka != 0)])
-        # Build dense mapping {orig_id -> dense_idx}
-        kid_map = {int(v): i for i, v in enumerate(sorted(seen.tolist()))} if seen.size else {0: 0}
-        # Apply mapping (fast LUT where possible; safe fallback otherwise)
-        if seen.size:
-            lut_size = int(kid_raw.max()) + 1
-            lut = np.zeros(lut_size, dtype=np.int64)
-            for orig, new in kid_map.items():
-                if 0 <= orig < lut_size:
-                    lut[orig] = new
-            if kid_raw.max() < lut_size:
-                actions_v2[..., 5] = lut[kid_raw].astype(np.float32)
-            else:
-                vmap = np.vectorize(lambda x: kid_map.get(int(x), 0), otypes=[np.int64])
-                actions_v2[..., 5] = vmap(kid_raw).astype(np.float32)
-        else:
-            actions_v2[..., 5] = np.zeros_like(actions_v2[..., 5], dtype=np.float32)
-        # Compute the new compact vocab size from remapped data (on valid KEY rows)
-        kid_after = actions_v2[..., 5].astype(np.int64)
-        kid_mask = m & (ka != 0)
-        kid_size = int(kid_after[kid_mask].max()) + 1 if kid_mask.any() else 1
-        # Keep a reverse map for nice printing in eval (dense_idx -> original code)
-        kid_to_orig = {v: k for k, v in kid_map.items()}
 
-        # Build a minimal manifest (no hard-coded shapes)
-        gs = np.load(final_dir / "gamestate_sequences.npy")
-        ai = np.load(final_dir / "action_input_sequences.npy")
-        manifest = {
-            "targets_version": "v2",
-            # Modern enums dict used by training:
-            "enums": {
-                "button":     {"size": 4, "none_index": 0},
-                "key_action": {"size": 3, "none_index": 0},
-                "key_id":     {"size": int(kid_size)},   # ← data-driven K
-                "scroll_y":   {"size": 3, "none_index": 1}  # {-1,0,+1}→{0,1,2}, NONE at 1
-            },
-            # Legacy flat ints for any older readers:
-            "enum_sizes": {"button": 4, "key_action": 3, "key_id": int(kid_size), "scroll_y": 3},
-            "shapes": {
-                "gamestate_sequences": list(gs.shape),
-                "action_input_sequences": list(ai.shape),
-                "actions_v2": list(actions_v2.shape),
-                "valid_mask": list(valid_mask.shape),
-                "sequence_length": int(ai.shape[1]),
-                "max_actions": int(actions_v2.shape[1]),
-                "feature_spec": {
-                    "gamestate_dim": int(ai.shape[3]),
-                    "action_input_dim": int(ai.shape[2])
-                },
-                "screenshot_sequence": {
-                    "shape": [int(gs.shape[0]), int(gs.shape[1]), int(ai.shape[2]), int(ai.shape[3])],
-                    "timestamp_semantics": "absolute_or_session_relative_ms"
-                }
-            },
-            # (Optional) store mapping to recover original key codes in eval tooling
-            "vocab_maps": {
-                "key_id": {
-                    "to_index": {str(k): int(v) for k, v in kid_map.items()},
-                    "to_orig":  {str(k): int(v) for k, v in kid_to_orig.items()}
-                }
-            },
-            "time": {"transform": time_transform, "div": time_div, "clip": time_clip}
-        }
-
-        # Save arrays AFTER densifying key_id
-        np.save(final_dir / "gamestate_sequences.npy", input_sequences)
-        np.save(final_dir / "action_input_sequences.npy", action_input_sequences)
-        np.save(final_dir / "actions_v2.npy", actions_v2)
-        np.save(final_dir / "valid_mask.npy", valid_mask)
-
-        # Write manifest json next to the arrays
-        with open(final_dir / "dataset_manifest.json", "w") as f:
-            _json.dump(manifest, f, indent=2)
-
-        print("  ✓ dataset_manifest.json (no hard-coded shapes)")
-
-        # Update metadata with V2 time info
-        meta_path = final_dir / "metadata.json"
-        try:
-            meta = _json.loads((final_dir / "metadata.json").read_text(encoding="utf-8"))
-        except Exception:
-            meta = {}
-        meta.setdefault("targets_v2", {})
-        meta["targets_v2"]["layout"] = ["time", "x", "y", "click", "key_action", "key_id", "scroll_y"]
-        meta["targets_v2"]["time"] = {
-            "unit": "sec",
-            "div": float(time_div),
-            "clip": float(time_clip),
-            "transform": str(time_transform),
-        }
-        with open(meta_path, "w", encoding="utf-8") as f:
-            _json.dump(meta, f, indent=2)
 
     print("\n🎯 ORGANIZED TRAINING DATA SAVED!")
     print("============================================================")
