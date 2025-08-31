@@ -329,10 +329,11 @@ class CrossAttention(nn.Module):
 class ActionDecoder(nn.Module):
     """Unified event system decoder with exclusive event classification."""
     
-    def __init__(self, input_dim, *, max_actions: int, enum_sizes: dict):
+    def __init__(self, input_dim, *, max_actions: int, enum_sizes: dict, event_types: int):
         super().__init__()
         self.max_actions = max_actions
         self.enum_sizes = enum_sizes
+        self.event_types = event_types
         
         # Shared feature processing
         self.shared = nn.Sequential(
@@ -342,7 +343,7 @@ class ActionDecoder(nn.Module):
         )
         
         # Unified event classification head: [CLICK, KEY, SCROLL, MOVE]
-        self.event_head = nn.Linear(input_dim, 4)
+        self.event_head = nn.Linear(input_dim, event_types)
         
         # Time quantile head: [q10, q50, q90] for robust time prediction
         self.time_quantile_head = nn.Linear(input_dim, 3)
@@ -354,10 +355,10 @@ class ActionDecoder(nn.Module):
         self.y_logsig_head = nn.Linear(input_dim, 1)  # Y coordinate log(std)
         
         # Event-specific detail heads (only used when that event wins)
-        n_btn = int(enum_sizes["button"]["size"])
-        n_ka = int(enum_sizes["key_action"]["size"])
-        n_kid = int(enum_sizes["key_id"]["size"])
-        n_sy = int(enum_sizes["scroll_y"]["size"])
+        n_btn = int(enum_sizes["button"])
+        n_ka = int(enum_sizes["key_action"])
+        n_kid = int(enum_sizes["key_id"])
+        n_sy = int(enum_sizes["scroll"])
         
         self.button_head = nn.Linear(input_dim, n_btn)
         self.key_action_head = nn.Linear(input_dim, n_ka)
@@ -449,28 +450,36 @@ class ActionDecoder(nn.Module):
 class ImitationHybridModel(nn.Module):
     """Complete hybrid model combining Transformer + CNN + LSTM with action sequence input"""
     
-    def __init__(self, gamestate_dim: int, action_dim: int, sequence_length: int,
-                 hidden_dim: int = 256, num_heads: int = 8, max_actions: int = 100,
-                 enum_sizes: dict | None = None,
-                 feature_spec: dict | None = None,
-                 **kwargs):
-        # --- Backward-compat for older callers --------------------------------
-        # Some older code passed `num_attention_heads`; if present, prefer it.
-        if "num_attention_heads" in kwargs and kwargs["num_attention_heads"] is not None:
-            num_heads = int(kwargs.pop("num_attention_heads"))
+    def __init__(self, data_config: dict, hidden_dim: int = 256, num_heads: int = 8, num_layers: int = 6,
+                 feature_spec: dict | None = None, **kwargs):
+        """
+        Initialize the ImitationHybridModel with data-driven configuration.
+        
+        Args:
+            data_config: Configuration dict from DataInspector.auto_detect()
+            hidden_dim: Hidden dimension for the model
+            num_heads: Number of attention heads
+            num_layers: Number of transformer layers
+            feature_spec: Feature specification for gamestate encoding
+        """
         super().__init__()
         
-        self.gamestate_dim = gamestate_dim
-        self.action_dim = action_dim
-        self.sequence_length = sequence_length
+        # Extract configuration from data
+        self.gamestate_dim = data_config['gamestate_dim']
+        self.max_actions = data_config['max_actions']
+        self.action_features = data_config['action_features']
+        self.temporal_window = data_config['temporal_window']
+        self.enum_sizes = data_config['enum_sizes']
+        self.event_types = data_config['event_types']
+        
+        # Store model parameters
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
-        self.max_actions = max_actions
-        self.enum_sizes = enum_sizes or {"button": {"size": 4}, "key_action": {"size": 3}, "key_id": {"size": 151}, "scroll_y": {"size": 3}}
+        self.num_layers = num_layers
         
         # 1. Gamestate Feature Encoder (128 -> 256)
         self.gamestate_encoder = GamestateEncoder(
-            input_dim=gamestate_dim,
+            input_dim=self.gamestate_dim,
             hidden_dim=hidden_dim,
             num_heads=self.num_heads,
             feature_spec=feature_spec
@@ -498,41 +507,33 @@ class ImitationHybridModel(nn.Module):
             nn.Dropout(0.1)
         )
         
-        # Button encoder (categorical: 4)
-        self.button_embedding = nn.Embedding(4, hidden_dim // 16)  # 4 categories -> 16 dims
+        # Button encoder (categorical: dynamic size from data)
+        self.button_embedding = nn.Embedding(self.enum_sizes['button'], hidden_dim // 16)
         self.button_encoder = nn.Sequential(
             nn.LayerNorm(hidden_dim // 16),
             nn.ReLU(),
             nn.Dropout(0.1)
         )
         
-        # Key encoder (categorical: 151 classes including "no key")
-        self.key_embedding = nn.Embedding(151, hidden_dim // 16)  # 151 categories -> 16 dims
-        self.key_encoder = nn.Sequential(
-            nn.LayerNorm(hidden_dim // 16),
-            nn.ReLU(),
-            nn.Dropout(0.1)
-        )
-        
-        # NEW: Key action encoder (categorical: 3 classes - None, Press, Release)
-        self.key_action_embedding = nn.Embedding(3, hidden_dim // 16)  # 3 categories -> 16 dims
+        # Key action encoder (categorical: dynamic size from data)
+        self.key_action_embedding = nn.Embedding(self.enum_sizes['key_action'], hidden_dim // 16)
         self.key_action_encoder = nn.Sequential(
             nn.LayerNorm(hidden_dim // 16),
             nn.ReLU(),
             nn.Dropout(0.1)
         )
         
-        # NEW: Key ID encoder (categorical: 151 classes including "no key")
-        self.key_id_embedding = nn.Embedding(151, hidden_dim // 16)  # 151 categories -> 16 dims
+        # Key ID encoder (categorical: dynamic size from data)
+        self.key_id_embedding = nn.Embedding(self.enum_sizes['key_id'], hidden_dim // 16)
         self.key_id_encoder = nn.Sequential(
             nn.LayerNorm(hidden_dim // 16),
             nn.ReLU(),
             nn.Dropout(0.1)
         )
         
-        # Scroll encoder (categorical: -1, 0, 1) - tanh + sign for discrete values
+        # Scroll encoder (categorical: dynamic size from data)
         self.scroll_encoder = nn.Sequential(
-            nn.Linear(1, hidden_dim // 16),  # dx or dy -> 16
+            nn.Linear(1, hidden_dim // 16),
             nn.LayerNorm(hidden_dim // 16),
             nn.ReLU(),
             nn.Dropout(0.1)
@@ -566,7 +567,7 @@ class ImitationHybridModel(nn.Module):
         
         # 3. Temporal Context Encoder (LSTM) - Updated to handle 128 features
         self.temporal_encoder = TemporalEncoder(
-            input_dim=gamestate_dim,  # Now 128
+            input_dim=self.gamestate_dim,  # Now 128
             hidden_dim=hidden_dim,    # LSTM output will be doubled due to bidirectional, then projected to hidden_dim
             num_layers=2
         )
@@ -595,8 +596,9 @@ class ImitationHybridModel(nn.Module):
                 # 5. Action Decoder (Unified Event System)
         self.action_decoder = ActionDecoder(
             input_dim=hidden_dim,
-            max_actions=max_actions,
+            max_actions=self.max_actions,
             enum_sizes=self.enum_sizes,
+            event_types=self.event_types,
         )
         
         # Initialize weights
@@ -757,18 +759,27 @@ class ImitationHybridModel(nn.Module):
             'hidden_dim': self.hidden_dim
         }
 
-def create_model(config: Dict = None) -> ImitationHybridModel:
-    """Factory function to create the model with default or custom config"""
-    if config is None:
-        config = {
-            'gamestate_dim': 128,  # Updated to match your data pipeline
-            'action_dim': 7,       # V2 action features per timestep
-            'sequence_length': 10,
-            'hidden_dim': 256,
-            'num_heads': 8
+def create_model(data_config: Dict = None, model_config: Dict = None) -> ImitationHybridModel:
+    """Factory function to create the model with data-driven configuration"""
+    if data_config is None:
+        # Create default data config for testing
+        data_config = {
+            'gamestate_dim': 128,
+            'max_actions': 100,
+            'action_features': 7,
+            'temporal_window': 10,
+            'enum_sizes': {'button': 3, 'key_action': 3, 'key_id': 6, 'scroll': 3},
+            'event_types': 4
         }
     
-    model = ImitationHybridModel(**config)
+    if model_config is None:
+        model_config = {
+            'hidden_dim': 256,
+            'num_heads': 8,
+            'num_layers': 6
+        }
+    
+    model = ImitationHybridModel(data_config=data_config, **model_config)
     return model
 
 if __name__ == "__main__":

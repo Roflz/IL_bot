@@ -7,7 +7,7 @@ Implements comprehensive loss computation for event classification, time quantil
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Any
 
 
 class PinballLoss(nn.Module):
@@ -110,12 +110,17 @@ class UnifiedEventLoss(nn.Module):
     """
     
     def __init__(self, 
+                 data_config: Dict[str, Any] = None,
                  loss_weights: Dict[str, float] = None,
                  class_weights: Dict[str, torch.Tensor] = None,
                  time_quantiles: list = [0.1, 0.5, 0.9],
                  sigma_min: float = 0.01,
                  sigma_max: float = 10.0):
         super().__init__()
+        
+        # Data configuration for dynamic sizing
+        self.data_config = data_config or {}
+        self.event_types = data_config.get('event_types', 4) if data_config else 4
         
         # Default loss weights if none provided
         self.loss_weights = loss_weights or {
@@ -131,7 +136,7 @@ class UnifiedEventLoss(nn.Module):
         # Class weights for handling imbalanced distributions
         self.class_weights = class_weights or {}
         
-        # Loss components
+        # Loss components - use dynamic event types
         self.event_loss = nn.CrossEntropyLoss(reduction='none')
         self.time_loss = PinballLoss(time_quantiles)
         self.xy_loss = GaussianNLLLoss(sigma_min, sigma_max)
