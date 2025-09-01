@@ -19,6 +19,7 @@ import os
 
 from ilbot.model.imitation_hybrid_model import ImitationHybridModel
 from ilbot.model.advanced_losses import AdvancedUnifiedEventLoss
+from ilbot.utils.normalization import normalize_gamestate_features, normalize_action_input_features, normalize_action_target_features
 
 class OSRSDataset(Dataset):
     """
@@ -86,29 +87,22 @@ class OSRSDataset(Dataset):
         action_target = torch.from_numpy(self.action_targets[idx]).float()            # (A,7|8)
         valid_mask = torch.from_numpy(self.valid_mask[idx]).bool()                    # (A,)
         
-        # Normalize coordinates (columns 1 and 2 are X and Y coordinates)
-        # Screen dimensions: 1920x1080
-        screen_width = 1920.0
-        screen_height = 1080.0
-        
-        # Create a copy to avoid modifying the original data
-        action_target_normalized = action_target.clone()
-        
-        # Normalize X coordinates (column 1) to [0, 1]
-        action_target_normalized[:, 1] = action_target[:, 1] / screen_width
-        
-        # Normalize Y coordinates (column 2) to [0, 1]  
-        action_target_normalized[:, 2] = action_target[:, 2] / screen_height
+        # Normalize data using shared normalization utilities
+        temporal_sequence_normalized = normalize_gamestate_features(temporal_sequence)
+        action_sequence_normalized = normalize_action_input_features(action_sequence)
+        action_target_normalized = normalize_action_target_features(action_target)
         
         return {
-            "temporal_sequence": temporal_sequence,
-            "action_sequence": action_sequence,
-            "action_target": action_target_normalized,  # Now with normalized coordinates
+            "temporal_sequence": temporal_sequence_normalized,
+            "action_sequence": action_sequence_normalized,
+            "action_target": action_target_normalized,
             "valid_mask": valid_mask,
             "targets_version": self.targets_version,
             "manifest": self.manifest or {},
-            "screen_dimensions": (screen_width, screen_height)  # Store for denormalization
+            "screen_dimensions": (1920.0, 1080.0)  # Store for denormalization
         }
+    
+
     
     # Note: Old parsing methods removed since data is now loaded as numpy arrays
 

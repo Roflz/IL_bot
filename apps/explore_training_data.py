@@ -40,6 +40,10 @@ import os, sys, time, traceback, logging
 from pathlib import Path
 import pandas as pd
 from typing import Optional, Tuple
+
+# Add parent directory to path for imports
+sys.path.append(str(Path(__file__).parent.parent))
+from ilbot.utils.normalization import normalize_single_value
 # Optional plotting (for the Actions Graph tab)
 try:
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -165,6 +169,7 @@ class SimpleDataExplorer:
         self.total_action_slices = 0
         self.action_data = None
         self.show_mapped_values = False
+        self.show_normalized_values = False
         self._id_mappings = None
         self._rev_idx = None  # flat key->label index across all categories/subcategories
         
@@ -525,6 +530,12 @@ class SimpleDataExplorer:
         self.mapped_check = ttk.Checkbutton(nav_frame, text="Hash Mappings", variable=self.mapped_var, 
                                            command=self.on_mapped_toggle)
         self.mapped_check.pack(side=tk.LEFT, padx=5)
+        
+        # Toggle for normalized vs un-normalized display
+        self.normalized_var = tk.BooleanVar(value=False)  # Start with un-normalized values
+        self.normalized_check = ttk.Checkbutton(nav_frame, text="Show Normalized", variable=self.normalized_var, 
+                                               command=self.on_normalized_toggle)
+        self.normalized_check.pack(side=tk.LEFT, padx=5)
 
         # --- Secondary navigator for 4D arrays (action slice) ---
         ttk.Label(nav_frame, text="  Timestep:").pack(side=tk.LEFT, padx=(16, 5))
@@ -665,6 +676,19 @@ class SimpleDataExplorer:
                     values.append(self._display_maybe_mapped(v))
             else:
                 values = [self._display_maybe_mapped(v) for v in row]
+            
+            # Apply normalization display if enabled
+            if self.show_normalized_values:
+                # V2 7-feature format column names
+                col_names = ["timestamp", "x", "y", "click", "key_action", "key_id", "scroll"]
+                normalized_values = []
+                for j, val in enumerate(values):
+                    if j < len(col_names):
+                        normalized_val = self._display_maybe_normalized(val, j, col_names[j])
+                        normalized_values.append(normalized_val)
+                    else:
+                        normalized_values.append(val)
+                values = normalized_values
             
             item = tree.insert("", tk.END, text=f"Action {i}", values=values)
             # Apply consistent color coding based on action type (V2 7-feature format)
@@ -905,6 +929,31 @@ class SimpleDataExplorer:
         # Force refresh current display regardless of file type
         if self.current_file_path:
             self._log("Forcing display refresh for mapped toggle")
+            # Force a complete refresh by calling the appropriate display method directly
+            if self.current_file_type == "state_features":
+                self._log("Directly calling display_current_gamestate_features")
+                self.display_current_gamestate_features()
+            elif self.current_file_type in ("action_data", "action_tensors"):
+                self._log("Directly calling display_current_gamestate")
+                self.display_current_gamestate()
+            elif self.current_file_type in ("numpy_array", "numpy_array_4d"):
+                self._log("Directly calling _navigate_gamestate for numpy arrays")
+                self._navigate_gamestate()
+            else:
+                self._log("Using _navigate_gamestate as fallback")
+                self._navigate_gamestate()
+        else:
+            self._log("No current file path to refresh")
+    
+    def on_normalized_toggle(self):
+        """Handle toggle between normalized and un-normalized display"""
+        self._log("on_normalized_toggle", normalized=self.normalized_var.get())
+        self.show_normalized_values = self.normalized_var.get()
+        self._log(f"show_normalized_values set to: {self.show_normalized_values}")
+        
+        # Force refresh current display regardless of file type
+        if self.current_file_path:
+            self._log("Forcing display refresh for normalized toggle")
             # Force a complete refresh by calling the appropriate display method directly
             if self.current_file_type == "state_features":
                 self._log("Directly calling display_current_gamestate_features")
@@ -1840,6 +1889,33 @@ class SimpleDataExplorer:
                             return str(v)
                         values = [_fmt(val, j) for j, val in enumerate(data[slice_idx, i])]
                         
+                        # Apply normalization display if enabled
+                        if self.show_normalized_values:
+                            # Get column names for normalization context
+                            n_features = data.shape[2]
+                            if n_features == 7:
+                                col_names = ["timestamp", "x", "y", "click", "key_action", "key_id", "scroll"]
+                            elif n_features == 8:
+                                col_names = ["timestamp", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy"]
+                            elif n_features == 128:
+                                # For gamestate features, try to get feature names
+                                if hasattr(self, 'feature_mappings') and self.feature_mappings:
+                                    col_names = [mapping.get('feature_name', f'F{j}') for j, mapping in enumerate(self.feature_mappings[:n_features])]
+                                else:
+                                    col_names = [f'F{j}' for j in range(n_features)]
+                            else:
+                                col_names = [f'F{j}' for j in range(n_features)]
+                            
+                            # Apply normalization to each value
+                            normalized_values = []
+                            for j, val in enumerate(values):
+                                if j < len(col_names):
+                                    normalized_val = self._display_maybe_normalized(val, j, col_names[j])
+                                    normalized_values.append(normalized_val)
+                                else:
+                                    normalized_values.append(val)
+                            values = normalized_values
+                        
                         # Create descriptive timestep label
                         if i == 0:
                             timestep_label = f"Timestep {i} (start)"
@@ -1900,6 +1976,27 @@ class SimpleDataExplorer:
                                 return self._display_maybe_mapped(v)
                             return str(v)
                         values = [_fmt(v, j) for j, v in enumerate(data[slice_idx, a, i, :])]
+                        
+                        # Apply normalization display if enabled
+                        if self.show_normalized_values:
+                            # Get column names for normalization context
+                            n_features = data.shape[3]
+                            if n_features == 7:
+                                col_names = ["timestamp", "x", "y", "click", "key_action", "key_id", "scroll"]
+                            elif n_features == 8:
+                                col_names = ["timestamp", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy"]
+                            else:
+                                col_names = [f'F{j}' for j in range(n_features)]
+                            
+                            # Apply normalization to each value
+                            normalized_values = []
+                            for j, val in enumerate(values):
+                                if j < len(col_names):
+                                    normalized_val = self._display_maybe_normalized(val, j, col_names[j])
+                                    normalized_values.append(normalized_val)
+                                else:
+                                    normalized_values.append(val)
+                            values = normalized_values
                         
                         # Create descriptive timestep label with action slice info
                         if i == 0:
@@ -2027,11 +2124,8 @@ class SimpleDataExplorer:
             for i, feature_value in enumerate(features):
                 try:
                     if isinstance(feature_value, (int, float, np.number)):
-                        # For mask files, show integers as integers, floats as floats
-                        if feature_value == int(feature_value):
-                            formatted_value = str(int(feature_value))
-                        else:
-                            formatted_value = f"{feature_value:.3f}"
+                        # Use the new formatting function to remove trailing zeros
+                        formatted_value = self._format_number_no_trailing_zeros(feature_value, 3)
                     else:
                         formatted_value = str(feature_value)
                 except:
@@ -2113,7 +2207,7 @@ class SimpleDataExplorer:
                             self._log(f"Mapping feature {i}: {feature_value} (show_mapped_values={self.show_mapped_values})")
                             formatted_value = self._map_feature_value(feature_value, i)
                         else:
-                            formatted_value = f"{feature_value:.6f}"
+                            formatted_value = self._format_number_no_trailing_zeros(feature_value, 6)
                     else:
                         formatted_value = str(feature_value)
                 except:
@@ -2124,6 +2218,10 @@ class SimpleDataExplorer:
                     feature_name = self.feature_mappings[i].get('feature_name', f'Feature {i}')
                 else:
                     feature_name = f'Feature {i}'
+                
+                # Apply normalization display if enabled
+                if self.show_normalized_values:
+                    formatted_value = self._display_maybe_normalized(formatted_value, i, feature_name)
                 
                 self.tree.insert("", tk.END, text=feature_name, values=(i, formatted_value))
         
@@ -2341,7 +2439,14 @@ class SimpleDataExplorer:
                 show 'value (label)'; otherwise str(value)
         """
         if not self.show_mapped_values:
-            return str(value)
+            # Format the value without trailing zeros
+            try:
+                if isinstance(value, (int, float, np.number)):
+                    return self._format_number_no_trailing_zeros(value, 6)
+                else:
+                    return str(value)
+            except (ValueError, TypeError):
+                return str(value)
         try:
             self._load_id_mappings()  # ensures _rev_idx
             for k in self._normalize_key_candidates(value):
@@ -2350,8 +2455,87 @@ class SimpleDataExplorer:
                     clean = self._sanitize_label(lbl)
                     if clean.strip():
                         return clean
-            return str(value)
+            # Format the value without trailing zeros when no mapping found
+            try:
+                if isinstance(value, (int, float, np.number)):
+                    return self._format_number_no_trailing_zeros(value, 6)
+                else:
+                    return str(value)
+            except (ValueError, TypeError):
+                return str(value)
         except Exception:
+            # Format the value without trailing zeros on exception
+            try:
+                if isinstance(value, (int, float, np.number)):
+                    return self._format_number_no_trailing_zeros(value, 6)
+                else:
+                    return str(value)
+            except (ValueError, TypeError):
+                return str(value)
+    
+    def _format_number_no_trailing_zeros(self, value, max_decimals=6):
+        """
+        Format a number without trailing zeros.
+        
+        Args:
+            value: The number to format
+            max_decimals: Maximum number of decimal places to show
+            
+        Returns:
+            Formatted string without trailing zeros
+        """
+        if isinstance(value, (int, float, np.number)):
+            # If it's a whole number, show as integer
+            if value == int(value):
+                return str(int(value))
+            
+            # Format with max_decimals and remove trailing zeros
+            formatted = f"{value:.{max_decimals}f}"
+            # Remove trailing zeros and decimal point if no decimals remain
+            formatted = formatted.rstrip('0').rstrip('.')
+            return formatted
+        else:
+            return str(value)
+    
+    def _display_maybe_normalized(self, value, feature_index=None, feature_name=None):
+        """
+        Display value with optional normalization using the same methods as training.
+        - if normalized checkbox off -> str(value)
+        - else: apply normalization using shared normalization utility
+        """
+        if not self.show_normalized_values:
+            # Format the un-normalized value without trailing zeros
+            try:
+                if isinstance(value, (int, float, np.number)):
+                    return self._format_number_no_trailing_zeros(value, 6)
+                else:
+                    return str(value)
+            except (ValueError, TypeError):
+                return str(value)
+        
+        try:
+            # Convert to float for normalization
+            float_value = float(value)
+            
+            # Use the shared normalization utility that matches training
+            normalized_value = normalize_single_value(float_value, feature_index or 0, feature_name)
+            
+            # Format based on the type of normalization applied
+            if feature_name and ("timestamp" in feature_name.lower() or "time" in feature_name.lower()):
+                # Time features: show with up to 3 decimal places
+                return self._format_number_no_trailing_zeros(normalized_value, 3)
+            elif (feature_name and ("x" in feature_name.lower() or "y" in feature_name.lower()) and 
+                  ("screen" in feature_name.lower() or "world" in feature_name.lower() or "camera" in feature_name.lower())):
+                # Coordinate features: show with up to 4 decimal places
+                return self._format_number_no_trailing_zeros(normalized_value, 4)
+            elif feature_name and ("pitch" in feature_name.lower() or "yaw" in feature_name.lower()):
+                # Angle features: show with up to 4 decimal places
+                return self._format_number_no_trailing_zeros(normalized_value, 4)
+            else:
+                # Default formatting: show with up to 6 decimal places
+                return self._format_number_no_trailing_zeros(normalized_value, 6)
+                
+        except (ValueError, TypeError):
             return str(value)
 
     def _load_slice_info(self, folder_path: Path) -> Optional[dict]:
@@ -2590,58 +2774,6 @@ class SimpleDataExplorer:
             
             for key, value in data_obj.items():
                 self.tree.insert("", tk.END, values=(key, str(value)))
-
-        if folder in ("02_trimmed_data", "03_normalized_data"):
-            npy_name = "trimmed_features.npy" if folder == "02_trimmed_data" else "normalized_features.npy"
-            n = _count_from_npy(os.path.join(self.data_dir, folder, npy_name)) or 0
-            # best effort: align by timestamps if the action json exists
-            json_name = "trimmed_raw_action_data.json" if folder == "02_trimmed_data" else "normalized_action_data.json"
-            info = _range_from_json(os.path.join(self.data_dir, folder, json_name))
-            if info:
-                self._slice_cache[folder] = info
-                return info
-            # Fallback: match features back into raw
-            try:
-                fpath = os.path.join(self.data_dir, folder, npy_name)
-                if os.path.exists(fpath):
-                    arr = np.load(fpath, mmap_mode="r")
-                    sample = arr[: min(arr.shape[0], 3)]
-                    s = _match_rows_in_raw(sample)
-                    if s is not None:
-                        info = {"start_idx_raw": s, "end_idx_raw": s + n - 1, "count": n}
-                        self._slice_cache[folder] = info
-                        return info
-            except Exception as e:
-                self._log("feature match fallback failed", level="error", folder=folder, error=str(e))
-            info = {"start_idx_raw": None, "end_idx_raw": None, "count": n}
-            self._slice_cache[folder] = info
-            return info
-
-        if folder == "06_final_training_data":
-            # Reconstruct underlying count from sequences: N = B + L
-            seq = os.path.join(self.data_dir, folder, "gamestate_sequences.npy")
-            n = None
-            if os.path.exists(seq):
-                try:
-                    B = int(np.load(seq, mmap_mode="r").shape[0])
-                    n = B + self.sequence_length
-                except Exception:
-                    n = None
-            # anchor to trimmed range start if we can find it
-            trimmed = self._infer_slice_info("02_trimmed_data")
-            if trimmed and n:
-                s = trimmed["start_idx_raw"]
-                info = {"start_idx_raw": s, "end_idx_raw": s + n - 1, "count": n}
-                self._slice_cache[folder] = info
-                return info
-            info = {"start_idx_raw": None, "end_idx_raw": None, "count": n or 0}
-            self._slice_cache[folder] = info
-            return info
-
-        # Default/unknown
-        info = {"start_idx_raw": None, "end_idx_raw": None, "count": 0}
-        self._slice_cache[folder] = info
-        return info
 
     def _update_summary(self):
         """Update the summary using only slice_info.json + the currently loaded data."""
