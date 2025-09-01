@@ -381,8 +381,8 @@ def create_default_feature_mappings() -> List[Dict]:
             mappings.append(create_feature_mapping(feature_index, "time_since_interaction", None, None, None, "time_ms", "Interaction"))
         feature_index += 1
     
-    # Camera features (5 features)
-    for i in range(5):
+    # Camera features (6 features)
+    for i in range(6):
         if i == 0:
             mappings.append(create_feature_mapping(feature_index, "camera_x", None, None, None, "camera_coordinate", "Camera"))
         elif i == 1:
@@ -393,6 +393,8 @@ def create_default_feature_mappings() -> List[Dict]:
             mappings.append(create_feature_mapping(feature_index, "camera_pitch", None, None, None, "angle_degrees", "Camera"))
         elif i == 4:
             mappings.append(create_feature_mapping(feature_index, "camera_yaw", None, None, None, "angle_degrees", "Camera"))
+        elif i == 5:
+            mappings.append(create_feature_mapping(feature_index, "camera_scale", None, None, None, "camera_scale", "Camera"))
         feature_index += 1
     
     # Inventory features (28 features)

@@ -273,13 +273,16 @@ class FeatureExtractor:
         features = []
         feature_mappings = []
         
-        camera_x = state.get('camera_x', 0)
-        camera_y = state.get('camera_y', 0)
-        camera_z = state.get('camera_z', 0)
-        camera_pitch = state.get('camera_pitch', 0)
-        camera_yaw = state.get('camera_yaw', 0)
+        # Camera data is nested under 'camera' key
+        camera_data = state.get('camera', {})
+        camera_x = camera_data.get('x', 0)
+        camera_y = camera_data.get('y', 0)
+        camera_z = camera_data.get('z', 0)
+        camera_pitch = camera_data.get('pitch', 0)
+        camera_yaw = camera_data.get('yaw', 0)
+        camera_scale = camera_data.get('scale', 0)
         
-        features.extend([camera_x, camera_y, camera_z, camera_pitch, camera_yaw])
+        features.extend([camera_x, camera_y, camera_z, camera_pitch, camera_yaw, camera_scale])
         
         # Store mappings for camera features
         feature_mappings.append(
@@ -304,6 +307,11 @@ class FeatureExtractor:
         
         feature_mappings.append(
             create_feature_mapping(self.current_feature_index, "camera_yaw", None, None, None, "angle_degrees", "Camera")
+        )
+        self.current_feature_index += 1
+        
+        feature_mappings.append(
+            create_feature_mapping(self.current_feature_index, "camera_scale", None, None, None, "camera_scale", "Camera")
         )
         self.current_feature_index += 1
         
@@ -930,7 +938,7 @@ class FeatureExtractor:
                 self.current_feature_index,
                 "timestamp",
                 None, None, None,
-                "time_ms",   # keep as time_ms so offline /180 normalization applies
+                "time_ms",   # keep as time_ms so offline normalization applies
                 "System"
             )
         )

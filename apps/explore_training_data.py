@@ -430,6 +430,7 @@ class SimpleDataExplorer:
 
         ttk.Button(control_frame, text="Refresh Sessions", command=self.refresh_sessions).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Refresh Files", command=self.load_files).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Export CSV", command=self.export_current_table_to_csv).pack(side=tk.LEFT, padx=5)
         
         # ---------- TOP: file tabs (left) + summary pane (right) ----------
         top_paned = ttk.Panedwindow(self.root, orient="horizontal")
@@ -612,9 +613,8 @@ class SimpleDataExplorer:
         return data4d.swapaxes(1, 2) if data4d.shape[1] < data4d.shape[2] else data4d
 
     def _configure_numpy_tree_4d(self, tree):
-        """Columns like the print viewer: 8 feature headers; #0 label 'Action'.
-        First feature is now 'timestamp' (no action count)."""
-        cols = ("timestamp", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy")
+        """Columns for 4D arrays: 7 feature headers for V2 action format; #0 label 'Action'."""
+        cols = ("timestamp", "x", "y", "click", "key_action", "key_id", "scroll")
         tree.configure(columns=cols, displaycolumns=cols)
         tree.column("#0", width=100, stretch=tk.NO, anchor="w")
         tree.heading("#0", text="Action")
@@ -656,40 +656,33 @@ class SimpleDataExplorer:
         A = view.shape[2]
         self._log("_update_numpy_4d_view: rendering", actions=A, features=view.shape[3])
         for i in range(A):
-            row = view[batch_idx, timestep_idx, i, :]  # (8,)
+            row = view[batch_idx, timestep_idx, i, :]  # (7,) for V2 format
             # Use mapping if enabled for action features
             if self.show_mapped_values:
                 values = []
                 for j, v in enumerate(row):
-                    if len(row) == 8 and j == 1 and isinstance(v, (int, float)):  # Legacy action type column
-                        values.append(self._map_hash_value(int(v), 'Interaction', 'action_type_hashes'))
-                    else:
-                        values.append(self._display_maybe_mapped(v))
+                    # V2 format doesn't have action type column, just map values directly
+                    values.append(self._display_maybe_mapped(v))
             else:
                 values = [self._display_maybe_mapped(v) for v in row]
             
             item = tree.insert("", tk.END, text=f"Action {i}", values=values)
-            # Apply consistent color coding based on action type (both 7 and 8 feature formats)
+            # Apply consistent color coding based on action type (V2 7-feature format)
             try:
-                if len(row) == 8:
-                    # Legacy 8-feature format: action type is in column 1
-                    action_type_code = int(float(row[1]))
-                    action_type = self._convert_action_type_code(action_type_code)
+                # V2 7-feature format: determine from click, key_action, key_id, scroll values
+                click = int(float(row[3])) if len(row) > 3 else 0
+                key_action = int(float(row[4])) if len(row) > 4 else 0
+                key_id = int(float(row[5])) if len(row) > 5 else 0
+                scroll = int(float(row[6])) if len(row) > 6 else 0
+                
+                if click > 0:
+                    action_type = "click"
+                elif key_action > 0 or key_id > 0:
+                    action_type = "key"
+                elif scroll != 0:
+                    action_type = "scroll"
                 else:
-                    # V2 7-feature format: determine from button, key, scroll values
-                    button = int(float(row[3])) if len(row) > 3 else 0
-                    key_action = int(float(row[4])) if len(row) > 4 else 0
-                    key_id = int(float(row[5])) if len(row) > 5 else 0
-                    scroll_y = int(float(row[6])) if len(row) > 6 else 0
-                    
-                    if button > 0:
-                        action_type = "click"
-                    elif key_action > 0 or key_id > 0:
-                        action_type = "key"
-                    elif scroll_y != 0:
-                        action_type = "scroll"
-                    else:
-                        action_type = "move"
+                    action_type = "move"
                 
                 color = self._get_action_color(action_type)
                 if color != "white":  # Only color non-padding rows
@@ -1723,8 +1716,10 @@ class SimpleDataExplorer:
             self._log("configure_numpy_tree: 3D")
             # 3D arrays: rows=timesteps, columns=features
             n_features = data.shape[2]
-            # if 8 features, show nice names used in action arrays
-            if n_features == 8:
+            # if 7 features, show V2 action format names; if 8 features, show legacy format
+            if n_features == 7:
+                cols = ("timestamp", "x", "y", "click", "key_action", "key_id", "scroll")
+            elif n_features == 8:
                 cols = ("timestamp", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy")
             else:
                 # Try to use feature mappings for meaningful column names
@@ -1751,7 +1746,9 @@ class SimpleDataExplorer:
             self._log("configure_numpy_tree: 4D+")
             # For 4D+ arrays, show slice navigation for first two dimensions
             n_features = data.shape[-1]
-            if n_features == 8:
+            if n_features == 7:
+                cols = ("timestamp", "x", "y", "click", "key_action", "key_id", "scroll")
+            elif n_features == 8:
                 cols = ("timestamp", "type", "x", "y", "button", "key", "scroll_dx", "scroll_dy")
             else:
                 # Try to use feature mappings for meaningful column names
@@ -1860,17 +1857,17 @@ class SimpleDataExplorer:
                                     action_type_code = int(float(values[1]))
                                     action_type = self._convert_action_type_code(action_type_code)
                                 else:
-                                    # V2 7-feature format: determine from button, key, scroll values
-                                    button = int(float(values[3])) if len(values) > 3 else 0
+                                    # V2 7-feature format: determine from click, key_action, key_id, scroll values
+                                    click = int(float(values[3])) if len(values) > 3 else 0
                                     key_action = int(float(values[4])) if len(values) > 4 else 0
                                     key_id = int(float(values[5])) if len(values) > 5 else 0
-                                    scroll_y = int(float(values[6])) if len(values) > 6 else 0
+                                    scroll = int(float(values[6])) if len(values) > 6 else 0
                                     
-                                    if button > 0:
+                                    if click > 0:
                                         action_type = "click"
                                     elif key_action > 0 or key_id > 0:
                                         action_type = "key"
-                                    elif scroll_y != 0:
+                                    elif scroll != 0:
                                         action_type = "scroll"
                                     else:
                                         action_type = "move"
@@ -1920,17 +1917,17 @@ class SimpleDataExplorer:
                                     action_type_code = int(float(values[1]))
                                     action_type = self._convert_action_type_code(action_type_code)
                                 else:
-                                    # V2 7-feature format: determine from button, key, scroll values
-                                    button = int(float(values[3])) if len(values) > 3 else 0
+                                    # V2 7-feature format: determine from click, key_action, key_id, scroll values
+                                    click = int(float(values[3])) if len(values) > 3 else 0
                                     key_action = int(float(values[4])) if len(values) > 4 else 0
                                     key_id = int(float(values[5])) if len(values) > 5 else 0
-                                    scroll_y = int(float(values[6])) if len(values) > 6 else 0
+                                    scroll = int(float(values[6])) if len(values) > 6 else 0
                                     
-                                    if button > 0:
+                                    if click > 0:
                                         action_type = "click"
                                     elif key_action > 0 or key_id > 0:
                                         action_type = "key"
-                                    elif scroll_y != 0:
+                                    elif scroll != 0:
                                         action_type = "scroll"
                                     else:
                                         action_type = "move"
@@ -3136,6 +3133,96 @@ class SimpleDataExplorer:
             delattr(self, 'feature_mappings')
         
         self.load_files()
+
+    def export_current_table_to_csv(self):
+        """Export the currently displayed table data to CSV format."""
+        try:
+            # Get the current table data
+            tree = self.tree
+            if not tree.get_children():
+                self._safe_status("No data to export")
+                return
+            
+            # Get column headers
+            columns = tree["columns"]
+            if not columns:
+                # If no columns, use the first column (#0) as the only column
+                headers = ["Row"]
+            else:
+                # Get column headers from the tree
+                headers = []
+                for col in columns:
+                    header_text = tree.heading(col, "text")
+                    # Remove sort indicators if present
+                    if header_text.endswith(" ↑") or header_text.endswith(" ↓"):
+                        header_text = header_text[:-2]
+                    headers.append(header_text)
+            
+            # Collect all data rows
+            csv_data = []
+            for item in tree.get_children():
+                row_data = []
+                # Get the first column value (row label)
+                row_label = tree.item(item, "text")
+                row_data.append(row_label)
+                
+                # Get values for each column
+                for col in columns:
+                    value = tree.set(item, col)
+                    row_data.append(value)
+                
+                csv_data.append(row_data)
+            
+            # Create CSV content
+            csv_content = []
+            
+            # Add headers
+            if columns:
+                csv_content.append(",".join(f'"{header}"' for header in headers))
+            else:
+                csv_content.append('"Row"')
+            
+            # Add data rows
+            for row in csv_data:
+                # Escape any commas or quotes in the data
+                escaped_row = []
+                for cell in row:
+                    if cell is None:
+                        cell = ""
+                    cell_str = str(cell)
+                    # Escape quotes by doubling them and wrap in quotes if contains comma or quote
+                    if "," in cell_str or '"' in cell_str:
+                        cell_str = '"' + cell_str.replace('"', '""') + '"'
+                    escaped_row.append(cell_str)
+                csv_content.append(",".join(escaped_row))
+            
+            # Join all lines
+            csv_text = "\n".join(csv_content)
+            
+            # Copy to clipboard
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(csv_text)
+                self.root.update()  # Required for clipboard to work
+                self._safe_status("Table data copied to clipboard as CSV")
+                
+                # Also show a message box with the data for easy copying
+                messagebox.showinfo("CSV Export", 
+                    f"Table data has been copied to clipboard as CSV.\n\n"
+                    f"Rows: {len(csv_data)}\n"
+                    f"Columns: {len(headers)}\n\n"
+                    f"You can now paste it into a spreadsheet or text editor.")
+                
+            except Exception as e:
+                self._log(f"Failed to copy to clipboard: {e}", level="error")
+                # Fallback: show the CSV in a message box
+                messagebox.showinfo("CSV Export", 
+                    f"CSV data (first 1000 characters):\n\n{csv_text[:1000]}{'...' if len(csv_text) > 1000 else ''}")
+                
+        except Exception as e:
+            self._log(f"CSV export failed: {e}", level="error")
+            self._safe_status(f"CSV export failed: {e}")
+            messagebox.showerror("Export Error", f"Failed to export CSV: {e}")
 
 def main():
     try:

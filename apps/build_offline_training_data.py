@@ -109,9 +109,9 @@ Examples:
     parser.add_argument("--time_clip", type=float, default=10.0, help="Clip Δt seconds to at most this")
     parser.add_argument("--time_transform", choices=["none","log1p"], default="none",
         help="Transform for time target: store raw seconds or log1p(seconds)")
-    # V1 → V2 conversion needs to know how V1 time was scaled (your pipeline uses ms/180)
-    parser.add_argument("--v1_time_scale", type=float, default=180.0,
-        help="V1 time is stored in ms/this_scale (default 180). Used only when converting V1→V2.")
+    # Legacy parameter - no longer used since we removed /180 division
+    parser.add_argument("--v1_time_scale", type=float, default=1000.0,
+        help="Legacy parameter - no longer used. Time is now converted from ms to seconds.")
     
     args = parser.parse_args()
     
@@ -179,7 +179,7 @@ Examples:
                       time_div=args.time_div,
                       time_clip=args.time_clip,
                       time_transform=args.time_transform,
-                      v1_time_scale=args.v1_time_scale)
+                      v1_time_scale=1000.0)  # Legacy parameter - no longer used
         
         print("\n✅ Training data build completed successfully!")
         return 0
@@ -193,7 +193,7 @@ def process_fresh(session_root, gamestates_dir, actions_csv,
                   raw_dir, trimmed_dir, normalized_dir, mappings_dir, final_dir,
                   trim_start=0, trim_end=0,
                   emit_v2=False, time_div=1000.0, time_clip=3.0,
-                  time_transform="log1p", v1_time_scale=180.0):
+                  time_transform="log1p", v1_time_scale=1000.0):  # Legacy parameter - no longer used
     """Fresh, session-scoped build. No fallbacks; no external metadata."""
     # Load session gamestates (sorted) for use throughout this function
     gamestates = load_gamestates_sorted(str(gamestates_dir))

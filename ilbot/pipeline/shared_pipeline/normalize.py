@@ -109,13 +109,13 @@ def normalize_features(features: np.ndarray, feature_mappings_file: str = "data/
         for feature_idx in screen_coord_features:
             normalized_features[:, feature_idx] = features[:, feature_idx]
     
-    # Time features: Values are already relative ms since session start. Scale by dividing by 1000 to get seconds.
+    # Time features: Keep in ms for consistency with action deltas
     if time_features:
-        print("  Scaling time features (ms) by dividing by 1000 to get seconds...")
+        print("  Keeping time features in ms for consistency with action deltas...")
         for feature_idx in time_features:
             raw_ms = features[:, feature_idx]
-            scaled = raw_ms / 1000.0  # Convert to seconds for consistency with action time deltas
-            normalized_features[:, feature_idx] = scaled
+            # Keep timestamps in ms (no scaling)
+            normalized_features[:, feature_idx] = raw_ms
             # Log brief stats
             try:
                 feature_name = next(
@@ -126,7 +126,7 @@ def normalize_features(features: np.ndarray, feature_mappings_file: str = "data/
                 feature_name = 'unknown'
             print(f"    Feature {feature_idx}: {feature_name}")
             print(f"      Raw ms range: {np.min(raw_ms):.0f} to {np.max(raw_ms):.0f}")
-            print(f"      Scaled (/1000) range: {np.min(scaled):.6f} to {np.max(scaled):.6f}")
+            print(f"      Kept in ms: {np.min(raw_ms):.0f} to {np.max(raw_ms):.0f}")
     
     # Categorical features (no normalization)
     if categorical_features:
@@ -206,7 +206,7 @@ def normalize_input_sequences(input_sequences: np.ndarray, feature_mappings_file
 
 def normalize_action_data(raw_action_data: List[Dict], normalized_features: Optional[np.ndarray] = None) -> List[Dict]:
     """
-    Normalize action data (convert timestamps to relative and scale to 0-1000 range).
+    Normalize action data (keep timestamps in ms for consistency with action deltas).
     
     Args:
         raw_action_data: List of raw action data dictionaries
@@ -215,7 +215,7 @@ def normalize_action_data(raw_action_data: List[Dict], normalized_features: Opti
     Returns:
         List of normalized action data dictionaries
     """
-    print("Normalizing action data: timestamps already relative ms; scaling by /180 only...")
+    print("Normalizing action data: keeping timestamps in ms for consistency...")
 
     if normalized_features is None:
         print("Warning: No normalized features available, returning raw action data")
@@ -226,13 +226,13 @@ def normalize_action_data(raw_action_data: List[Dict], normalized_features: Opti
     for gamestate_idx, action_data in enumerate(raw_action_data):
         normalized_gamestate = {}
         
-        # Normalize mouse movements (divide relative ms by 180)
+        # Normalize mouse movements (keep timestamps in ms)
         normalized_movements = []
         for move in action_data.get('mouse_movements', []):
             normalized_move = move.copy()
 
-            # Divide by 180 (timestamps are already relative ms)
-            normalized_move['timestamp'] = move.get('timestamp', 0) / 180.0
+            # Keep timestamps in ms (already relative ms)
+            normalized_move['timestamp'] = move.get('timestamp', 0)
             
             # Preserve original screen coordinates (no normalization)
             # x and y remain as original pixel values
@@ -241,13 +241,13 @@ def normalize_action_data(raw_action_data: List[Dict], normalized_features: Opti
         
         normalized_gamestate['mouse_movements'] = normalized_movements
         
-        # Normalize clicks (divide relative ms by 180)
+        # Normalize clicks (keep timestamps in ms)
         normalized_clicks = []
         for click in action_data.get('clicks', []):
             normalized_click = click.copy()
 
-            # Divide by 180
-            normalized_click['timestamp'] = click.get('timestamp', 0) / 180.0
+            # Keep timestamps in ms
+            normalized_click['timestamp'] = click.get('timestamp', 0)
             
             # Preserve original screen coordinates (no normalization)
             # x and y remain as original pixel values
@@ -256,39 +256,39 @@ def normalize_action_data(raw_action_data: List[Dict], normalized_features: Opti
         
         normalized_gamestate['clicks'] = normalized_clicks
         
-        # Normalize key presses (divide relative ms by 180)
+        # Normalize key presses (keep timestamps in ms)
         normalized_key_presses = []
         for key_press in action_data.get('key_presses', []):
             normalized_key = key_press.copy()
 
-            # Divide by 180
-            normalized_key['timestamp'] = key_press.get('timestamp', 0) / 180.0
+            # Keep timestamps in ms
+            normalized_key['timestamp'] = key_press.get('timestamp', 0)
             
             # Keep key info as-is (no normalization)
             normalized_key_presses.append(normalized_key)
         
         normalized_gamestate['key_presses'] = normalized_key_presses
         
-        # Normalize key releases (divide relative ms by 180)
+        # Normalize key releases (keep timestamps in ms)
         normalized_key_releases = []
         for key_release in action_data.get('key_releases', []):
             normalized_key = key_release.copy()
 
-            # Divide by 180
-            normalized_key['timestamp'] = key_release.get('timestamp', 0) / 180.0
+            # Keep timestamps in ms
+            normalized_key['timestamp'] = key_release.get('timestamp', 0)
             
             # Keep key info as-is (no normalization)
             normalized_key_releases.append(normalized_key)
         
         normalized_gamestate['key_releases'] = normalized_key_releases
         
-        # Normalize scrolls (divide relative ms by 180)
+        # Normalize scrolls (keep timestamps in ms)
         normalized_scrolls = []
         for scroll in action_data.get('scrolls', []):
             normalized_scroll = scroll.copy()
 
-            # Divide by 180
-            normalized_scroll['timestamp'] = scroll.get('timestamp', 0) / 180.0
+            # Keep timestamps in ms
+            normalized_scroll['timestamp'] = scroll.get('timestamp', 0)
             
             # Keep scroll deltas as-is (no normalization)
             normalized_scrolls.append(normalized_scroll)
@@ -298,7 +298,7 @@ def normalize_action_data(raw_action_data: List[Dict], normalized_features: Opti
         normalized_action_data.append(normalized_gamestate)
     
     print(f"Action data normalized for {len(normalized_action_data)} gamestates")
-    print(f"  - Timestamps divided by 180 (input already relative ms)")
+    print(f"  - Timestamps kept in ms (consistent with action deltas)")
     print(f"  - Screen coordinates preserved as original pixel values")
     print(f"  - Scroll deltas preserved as original pixel values")
     print(f"  - Key information preserved as original values")
@@ -330,15 +330,15 @@ def get_normalization_summary(features: np.ndarray, normalized_features: np.ndar
     feature_groups = {
         "Player": (0, 5),
         "Interaction": (5, 9),
-        "Camera": (9, 14),
-        "Inventory": (14, 42),
-        "Bank": (42, 63),
-        "Phase Context": (63, 67),
-        "Game Objects": (67, 109),
-        "NPCs": (109, 124),
-        "Tabs": (124, 125),
-        "Skills": (125, 127),
-        "Timestamp": (127, 128)
+        "Camera": (9, 15),
+        "Inventory": (15, 43),
+        "Bank": (43, 64),
+        "Phase Context": (64, 68),
+        "Game Objects": (68, 110),
+        "NPCs": (110, 125),
+        "Tabs": (125, 126),
+        "Skills": (126, 128),
+        "Timestamp": (128, 129)
     }
     
     group_stats = {}
