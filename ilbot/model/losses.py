@@ -13,9 +13,10 @@ from typing import Dict, Tuple, Optional, Any
 class PinballLoss(nn.Module):
     """Pinball (quantile) loss for robust time prediction."""
     
-    def __init__(self, quantiles: list = [0.1, 0.5, 0.9]):
+    def __init__(self, quantiles: list = [0.1, 0.5, 0.9], burst_aware: bool = True):
         super().__init__()
         self.quantiles = torch.tensor(quantiles)
+        self.burst_aware = burst_aware
         
     def forward(self, predictions: torch.Tensor, targets: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
@@ -45,6 +46,28 @@ class PinballLoss(nn.Module):
             (1 - quantiles_expanded) * (-diff)
         )
         
+        # Apply burst-aware weighting if enabled
+        if self.burst_aware:
+            # Weight fast actions (≤0.1s) more heavily since they're more common
+            # Weight slow actions (≥1.0s) less heavily since they're rare
+            fast_threshold = 0.1
+            slow_threshold = 1.0
+            
+            # Create weights based on target values
+            fast_mask = targets <= fast_threshold
+            slow_mask = targets >= slow_threshold
+            medium_mask = (targets > fast_threshold) & (targets < slow_threshold)
+            
+            # Weighting: fast=10.0, medium=1.0, slow=0.1
+            weights = torch.ones_like(targets)
+            weights[fast_mask] = 10.0  # Heavily emphasize fast actions (94.5% of data)
+            weights[medium_mask] = 1.0  # Normal weight for medium actions
+            weights[slow_mask] = 0.1  # Minimize weight for slow actions (0.2% of data)
+            
+            # Expand weights to match predictions
+            weights_expanded = weights.unsqueeze(-1).expand(-1, -1, Q)
+            pinball_loss = pinball_loss * weights_expanded
+        
         # Apply mask if provided
         if mask is not None:
             mask_expanded = mask.unsqueeze(-1).expand(-1, -1, Q)
@@ -53,6 +76,128 @@ class PinballLoss(nn.Module):
             return pinball_loss.sum() / valid_count
         else:
             return pinball_loss.mean()
+
+
+class BurstSequenceLoss(nn.Module):
+    """Loss that encourages the model to predict burst sequences correctly."""
+    
+    def __init__(self, fast_threshold: float = 0.1, burst_weight: float = 2.0):
+        super().__init__()
+        self.fast_threshold = fast_threshold
+        self.burst_weight = burst_weight
+    
+    def forward(self, predictions: torch.Tensor, targets: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Compute burst sequence loss to encourage consecutive fast actions.
+        
+        Args:
+            predictions: [B, A, Q] - predicted quantiles for each action
+            targets: [B, A] - ground truth time values
+            mask: [B, A] - optional mask for valid actions
+            
+        Returns:
+            Burst sequence loss
+        """
+        if mask is None:
+            return torch.tensor(0.0, device=predictions.device)
+        
+        # Get median predictions (q0.5)
+        median_preds = predictions[:, :, 1]  # [B, A]
+        
+        # Apply mask
+        valid_preds = median_preds[mask]  # [N_valid]
+        valid_targets = targets[mask]  # [N_valid]
+        
+        if valid_preds.numel() < 2:
+            return torch.tensor(0.0, device=predictions.device)
+        
+        # Identify fast actions in targets
+        fast_targets = valid_targets <= self.fast_threshold
+        
+        # Penalize model for predicting slow timing when target is fast
+        fast_pred_penalty = torch.where(
+            fast_targets,
+            torch.clamp(valid_preds - self.fast_threshold, min=0.0) ** 2,
+            torch.zeros_like(valid_preds)
+        )
+        
+        # Reward model for predicting fast timing when target is fast
+        fast_pred_reward = torch.where(
+            fast_targets,
+            torch.clamp(self.fast_threshold - valid_preds, min=0.0) ** 2,
+            torch.zeros_like(valid_preds)
+        )
+        
+        # Combine penalty and reward
+        burst_loss = fast_pred_penalty - 0.5 * fast_pred_reward
+        
+        return self.burst_weight * burst_loss.mean()
+
+
+class TimingClassificationLoss(nn.Module):
+    """Loss that treats timing as classification (fast/medium/slow) instead of regression."""
+    
+    def __init__(self, fast_threshold: float = 0.1, slow_threshold: float = 1.0, 
+                 class_weights: Optional[torch.Tensor] = None):
+        super().__init__()
+        self.fast_threshold = fast_threshold
+        self.slow_threshold = slow_threshold
+        self.class_weights = class_weights
+        
+        # 3 classes: fast (0), medium (1), slow (2)
+        self.num_classes = 3
+        
+    def forward(self, predictions: torch.Tensor, targets: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Compute timing classification loss.
+        
+        Args:
+            predictions: [B, A, Q] - predicted quantiles for each action
+            targets: [B, A] - ground truth time values
+            mask: [B, A] - optional mask for valid actions
+            
+        Returns:
+            Timing classification loss
+        """
+        if mask is None:
+            return torch.tensor(0.0, device=predictions.device)
+        
+        # Get median predictions (q0.5)
+        median_preds = predictions[:, :, 1]  # [B, A]
+        
+        # Apply mask
+        valid_preds = median_preds[mask]  # [N_valid]
+        valid_targets = targets[mask]  # [N_valid]
+        
+        if valid_preds.numel() == 0:
+            return torch.tensor(0.0, device=predictions.device)
+        
+        # Convert targets to class labels
+        target_classes = torch.zeros_like(valid_targets, dtype=torch.long)
+        target_classes[valid_targets <= self.fast_threshold] = 0  # Fast
+        target_classes[(valid_targets > self.fast_threshold) & (valid_targets <= self.slow_threshold)] = 1  # Medium
+        target_classes[valid_targets > self.slow_threshold] = 2  # Slow
+        
+        # Convert predictions to class probabilities
+        # Use softmax over the timing range to create class probabilities
+        pred_classes = torch.zeros(valid_preds.shape[0], self.num_classes, device=valid_preds.device)
+        
+        # Fast class probability (higher when prediction is low)
+        pred_classes[:, 0] = torch.sigmoid(-10 * (valid_preds - self.fast_threshold))
+        
+        # Medium class probability (higher when prediction is in middle range)
+        pred_classes[:, 1] = torch.sigmoid(-10 * (valid_preds - self.fast_threshold)) * torch.sigmoid(10 * (valid_preds - self.slow_threshold))
+        
+        # Slow class probability (higher when prediction is high)
+        pred_classes[:, 2] = torch.sigmoid(10 * (valid_preds - self.slow_threshold))
+        
+        # Normalize to get proper probabilities
+        pred_classes = F.softmax(pred_classes, dim=1)
+        
+        # Compute cross-entropy loss
+        loss = F.cross_entropy(pred_classes, target_classes, weight=self.class_weights)
+        
+        return loss
 
 
 class GaussianNLLLoss(nn.Module):

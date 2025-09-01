@@ -13,7 +13,7 @@ import json
 import time
 import argparse
 from pathlib import Path
-from ilbot.training.setup import create_data_loaders, setup_model, setup_training, OSRSDataset
+from ilbot.training.setup import create_data_loaders, setup_training, OSRSDataset
 from ilbot.model.imitation_hybrid_model import ImitationHybridModel
 from torch.optim.lr_scheduler import StepLR
 import os, numpy as np
@@ -95,22 +95,41 @@ def setup_model_v2(manifest, targets_version, device, data_dir: Path | None = No
     """
     max_actions = int(manifest["max_actions"]) if manifest else 100
     head_version = targets_version
-    enum_sizes = manifest["enums"]
+    # Convert enum_sizes from nested format to simple format expected by model
+    raw_enums = manifest.get("enums", {})
+    enum_sizes = {}
+    for k, v in raw_enums.items():
+        if isinstance(v, dict):
+            enum_sizes[k] = int(v.get("size", v))
+        else:
+            enum_sizes[k] = int(v)
     # dims inferred from data (not constants)
-    seq_len, gamestate_dim = 10, 128
-    action_in_dim = 8
+    # Load actual dimensions from data files
+    gamestate_sequences = np.load(Path(data_dir) / "gamestate_sequences.npy")
+    action_input_sequences = np.load(Path(data_dir) / "action_input_sequences.npy")
+    
+    seq_len = gamestate_sequences.shape[1]  # temporal window
+    gamestate_dim = gamestate_sequences.shape[2]  # number of features
+    action_in_dim = action_input_sequences.shape[3]  # action features
     
     # derive indices & vocab from dataset artifacts
     spec = load_feature_spec(data_dir) if data_dir else {}
+    
+    # Create data_config for the model
+    data_config = {
+        'gamestate_dim': gamestate_dim,
+        'max_actions': max_actions,
+        'action_features': action_in_dim,
+        'temporal_window': seq_len,
+        'enum_sizes': enum_sizes,
+        'event_types': 4
+    }
+    
     model = ImitationHybridModel(
-        gamestate_dim=gamestate_dim,
-        action_dim=action_in_dim,
-        sequence_length=seq_len,
+        data_config=data_config,
         hidden_dim=256,
-        num_attention_heads=8,
-        max_actions=max_actions, 
-        head_version=head_version, 
-        enum_sizes=enum_sizes,
+        num_heads=8,
+        num_layers=6,
         feature_spec=spec
     )
     return model
@@ -807,13 +826,34 @@ def main():
     
     # Create dataset and data loaders
     data_dir = Path(args.data_dir)
-    train_loader, val_loader, manifest, tv = create_data_loaders_v2(data_dir, targets_version="v2", device=device)
+    
+    # Create dataset first
+    dataset = OSRSDataset(data_dir, targets_version=config.get("targets_version", "v1"))
+    
+    # Create data loaders from dataset
+    train_loader, val_loader = create_data_loaders(
+        dataset=dataset,
+        train_split=0.8,
+        batch_size=args.batch_size,
+        shuffle=True,
+        device=device
+    )
+    
+    # Load manifest
+    manifest_path = data_dir / "dataset_manifest.json"
+    if manifest_path.exists():
+        with open(manifest_path, 'r') as f:
+            manifest = json.load(f)
+    else:
+        manifest = {}
+    
+    tv = config.get("targets_version", "v1")
     enum_sizes = (manifest or {}).get("enums", {})
     time_div = manifest["time_div"] if (manifest and args.time_div is None) else (args.time_div or 1000.0)
     time_clip = manifest["time_clip"] if (manifest and args.time_clip is None) else (args.time_clip or 3.0)
     
     # Create model and setup training components
-    model = setup_model_v2(manifest=manifest or {}, targets_version="v2", device=device, data_dir=data_dir)
+    model = setup_model_v2(manifest=manifest or {}, targets_version=config.get("targets_version", "v1"), device=device, data_dir=data_dir)
     
     # Runtime safety check for feature spec
     spec = load_feature_spec(data_dir)
@@ -931,7 +971,8 @@ def run_training(config: dict):
         'hidden_dim': 256,
         'num_heads': 8,
             'num_layers': 6
-        }
+        },
+        data_dir=config["data_dir"]
     )
     
     # Extract enum_sizes for compatibility

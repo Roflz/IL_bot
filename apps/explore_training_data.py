@@ -673,7 +673,7 @@ class SimpleDataExplorer:
                 values = []
                 for j, v in enumerate(row):
                     # V2 format doesn't have action type column, just map values directly
-                    values.append(self._display_maybe_mapped(v))
+                        values.append(self._display_maybe_mapped(v))
             else:
                 values = [self._display_maybe_mapped(v) for v in row]
             
@@ -1109,10 +1109,10 @@ class SimpleDataExplorer:
         if self.current_file_path in self.saved_gamestate_positions:
             saved_pos = self.saved_gamestate_positions[self.current_file_path]
             if hasattr(self, 'total_gamestates') and 0 <= saved_pos < self.total_gamestates:
-                self.current_gamestate = saved_pos
-                self.gamestate_var.set(str(saved_pos))
+                            self.current_gamestate = saved_pos
+                            self.gamestate_var.set(str(saved_pos))
                 self._log(f"Restored gamestate position: {saved_pos} for {self.current_file_path}")
-            else:
+                        else:
                 self._log(f"Saved position {saved_pos} out of range (0-{self.total_gamestates-1})")
         else:
             self._log(f"No saved position found for {self.current_file_path}")
@@ -1166,7 +1166,7 @@ class SimpleDataExplorer:
         REQUIRED FOR: Seamless navigation across files
         """
         if not hasattr(self, 'current_gamestate') or not hasattr(self, 'current_file_path'):
-            return
+                            return
         
         # Initialize the saved positions dictionary if it doesn't exist
         if not hasattr(self, 'saved_gamestate_positions'):
@@ -2446,7 +2446,7 @@ class SimpleDataExplorer:
                 else:
                     return str(value)
             except (ValueError, TypeError):
-                return str(value)
+            return str(value)
         try:
             self._load_id_mappings()  # ensures _rev_idx
             for k in self._normalize_key_candidates(value):
@@ -2462,7 +2462,7 @@ class SimpleDataExplorer:
                 else:
                     return str(value)
             except (ValueError, TypeError):
-                return str(value)
+            return str(value)
         except Exception:
             # Format the value without trailing zeros on exception
             try:

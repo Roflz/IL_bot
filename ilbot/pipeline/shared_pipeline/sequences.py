@@ -56,6 +56,8 @@ def create_temporal_sequences(features: np.ndarray, normalized_action_data: List
             if action_idx < len(normalized_action_data):
                 # Convert actions to numpy array and pad to max_actions_per_timestep
                 actions_array = _convert_actions_to_v2_array(normalized_action_data[action_idx], max_actions_per_timestep)
+                # Convert timestamps to delta times for consistency with targets
+                actions_array = _convert_timestamps_to_deltas(actions_array)
                 action_input_sequences[i, j] = actions_array
         
         # Target: action sequence for the NEXT gamestate after the sequence (10, 11, 12, etc.)
@@ -71,6 +73,46 @@ def create_temporal_sequences(features: np.ndarray, normalized_action_data: List
     print(f"Target sequences shape: {target_sequences.shape}")
     
     return input_sequences, action_input_sequences, target_sequences
+
+
+def _convert_timestamps_to_deltas(actions_array: np.ndarray) -> np.ndarray:
+    """
+    Convert session timestamps to delta times for consistency with action targets.
+    
+    Args:
+        actions_array: Array of shape (max_actions, 7) with format [timestamp, x, y, button, key_action, key_id, scroll_y]
+        
+    Returns:
+        Array with timestamps converted to delta times (time between consecutive actions)
+    """
+    result = actions_array.copy()
+    
+    # Find all valid timestamps (non-zero)
+    valid_indices = []
+    valid_timestamps = []
+    for i in range(len(actions_array)):
+        if actions_array[i, 0] > 0:  # Valid timestamp
+            valid_indices.append(i)
+            valid_timestamps.append(actions_array[i, 0])
+    
+    if len(valid_timestamps) < 2:
+        # Not enough actions to compute deltas, keep as is
+        return result
+    
+    # Convert to delta times
+    for i in range(len(valid_indices)):
+        idx = valid_indices[i]
+        if i == 0:
+            # First action: delta is 0 (or could be time since start)
+            result[idx, 0] = 0.0
+        else:
+            # Delta time to previous action
+            prev_timestamp = valid_timestamps[i-1]
+            curr_timestamp = valid_timestamps[i]
+            delta = max(0.0, curr_timestamp - prev_timestamp)
+            result[idx, 0] = delta
+    
+    return result
 
 
 def _convert_actions_to_v2_array(action_data: Dict, max_actions: int = 100) -> np.ndarray:

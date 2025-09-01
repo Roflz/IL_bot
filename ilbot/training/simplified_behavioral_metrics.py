@@ -72,30 +72,121 @@ class SimplifiedBehavioralMetrics:
                 valid_time_targets = action_targets[valid_mask][:, 0]  # [N_valid]
                 
                 if valid_time_preds.numel() > 0 and valid_time_targets.numel() > 0:
+                    # Calculate detailed timing statistics
+                    pred_medians = valid_time_preds[:, 1]  # q0.5 predictions
+                    pred_q10 = valid_time_preds[:, 0]     # q0.1 predictions
+                    pred_q90 = valid_time_preds[:, 2]     # q0.9 predictions
+                    
                     analysis['timing'] = {
-                        'median_timing': self._safe_mean(valid_time_preds[:, 1]),  # q0.5
-                        'timing_uncertainty': self._safe_mean(valid_time_preds[:, 2] - valid_time_preds[:, 0]),  # q0.9 - q0.1
-                        'timing_consistency': self._safe_std(valid_time_preds[:, 1]),
+                        # Predicted timing statistics
+                        'mean_timing': self._safe_mean(pred_medians),
+                        'median_timing': self._safe_mean(pred_medians),  # q0.5
+                        'p10_timing': self._safe_mean(pred_q10),        # q0.1
+                        'p25_timing': self._safe_mean(valid_time_preds[:, 1] * 0.75 + valid_time_preds[:, 0] * 0.25),  # Approximate p25
+                        'p75_timing': self._safe_mean(valid_time_preds[:, 1] * 0.25 + valid_time_preds[:, 2] * 0.75),  # Approximate p75
+                        'p90_timing': self._safe_mean(pred_q90),        # q0.9
+                        'timing_uncertainty': self._safe_mean(pred_q90 - pred_q10),  # q0.9 - q0.1
+                        'timing_consistency': self._safe_std(pred_medians),
+                        
+                        # Target timing statistics
+                        'target_mean_timing': self._safe_mean(valid_time_targets),
                         'target_median_timing': self._safe_mean(valid_time_targets),
+                        'target_p10_timing': self._safe_percentile(valid_time_targets, 10),
+                        'target_p25_timing': self._safe_percentile(valid_time_targets, 25),
+                        'target_p75_timing': self._safe_percentile(valid_time_targets, 75),
+                        'target_p90_timing': self._safe_percentile(valid_time_targets, 90),
                         'target_timing_consistency': self._safe_std(valid_time_targets),
                     }
                 else:
                     analysis['timing'] = {
+                        'mean_timing': 0.0,
                         'median_timing': 0.0,
+                        'p10_timing': 0.0,
+                        'p25_timing': 0.0,
+                        'p75_timing': 0.0,
+                        'p90_timing': 0.0,
                         'timing_uncertainty': 0.0,
                         'timing_consistency': 0.0,
+                        'target_mean_timing': 0.0,
                         'target_median_timing': 0.0,
+                        'target_p10_timing': 0.0,
+                        'target_p25_timing': 0.0,
+                        'target_p75_timing': 0.0,
+                        'target_p90_timing': 0.0,
                         'target_timing_consistency': 0.0,
                     }
                 
-                print(f"⏱️  Timing Analysis:")
+                print(f"⏱️  Timing Analysis (Time Deltas Between Actions):")
                 print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
                 print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
                 print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+                print(f"  │ Mean Timing (s)         │ {analysis['timing']['mean_timing']:>10.2f} │ {analysis['timing']['target_mean_timing']:>10.2f} │ {abs(analysis['timing']['mean_timing'] - analysis['timing']['target_mean_timing']):>10.2f} │")
                 print(f"  │ Median Timing (s)       │ {analysis['timing']['median_timing']:>10.2f} │ {analysis['timing']['target_median_timing']:>10.2f} │ {abs(analysis['timing']['median_timing'] - analysis['timing']['target_median_timing']):>10.2f} │")
+                print(f"  │ P10 Timing (s)          │ {analysis['timing']['p10_timing']:>10.2f} │ {analysis['timing']['target_p10_timing']:>10.2f} │ {abs(analysis['timing']['p10_timing'] - analysis['timing']['target_p10_timing']):>10.2f} │")
+                print(f"  │ P25 Timing (s)          │ {analysis['timing']['p25_timing']:>10.2f} │ {analysis['timing']['target_p25_timing']:>10.2f} │ {abs(analysis['timing']['p25_timing'] - analysis['timing']['target_p25_timing']):>10.2f} │")
+                print(f"  │ P75 Timing (s)          │ {analysis['timing']['p75_timing']:>10.2f} │ {analysis['timing']['target_p75_timing']:>10.2f} │ {abs(analysis['timing']['p75_timing'] - analysis['timing']['target_p75_timing']):>10.2f} │")
+                print(f"  │ P90 Timing (s)          │ {analysis['timing']['p90_timing']:>10.2f} │ {analysis['timing']['target_p90_timing']:>10.2f} │ {abs(analysis['timing']['p90_timing'] - analysis['timing']['target_p90_timing']):>10.2f} │")
                 print(f"  │ Uncertainty (s)         │ {analysis['timing']['timing_uncertainty']:>10.2f} │ {'N/A':>10} │ {'N/A':>10} │")
                 print(f"  │ Consistency (std dev)   │ {analysis['timing']['timing_consistency']:>10.2f} │ {analysis['timing']['target_timing_consistency']:>10.2f} │ {abs(analysis['timing']['timing_consistency'] - analysis['timing']['target_timing_consistency']):>10.2f} │")
                 print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+                
+                # Calculate actions per gamestate metrics
+                batch_size = action_targets.shape[0]
+                actions_per_gamestate_target = valid_mask.sum(dim=1).cpu().numpy()  # [B] - actions per gamestate
+                
+                # Calculate predicted actions per gamestate based on actual model timing predictions
+                # Get the median timing predictions for each action
+                time_preds = model_outputs['time_q']  # [B, A, 3]
+                median_timing_preds = time_preds[:, :, 1]  # [B, A] - q0.5 predictions
+                
+                # For each gamestate, count how many actions would fit in 600ms
+                actions_per_gamestate_pred = []
+                for i in range(batch_size):
+                    # Get valid timing predictions for this gamestate
+                    valid_timings = median_timing_preds[i][valid_mask[i]]  # [N_valid]
+                    
+                    if len(valid_timings) == 0:
+                        actions_per_gamestate_pred.append(0)
+                        continue
+                    
+                    # Calculate cumulative time and count actions that fit in 600ms
+                    cumulative_time = 0.0
+                    action_count = 0
+                    for timing in valid_timings:
+                        if cumulative_time + timing <= 0.6:  # 600ms window
+                            cumulative_time += timing
+                            action_count += 1
+                        else:
+                            break
+                    
+                    actions_per_gamestate_pred.append(action_count)
+                
+                actions_per_gamestate_pred = np.array(actions_per_gamestate_pred)
+                
+                # Calculate per-gamestate statistics
+                target_actions_per_gamestate_mean = np.mean(actions_per_gamestate_target)
+                target_actions_per_gamestate_std = np.std(actions_per_gamestate_target)
+                pred_actions_per_gamestate_mean = np.mean(actions_per_gamestate_pred)
+                pred_actions_per_gamestate_std = np.std(actions_per_gamestate_pred)
+                
+                print(f"\n🎯 Actions per Gamestate Analysis (600ms windows):")
+                print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+                print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
+                print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+                print(f"  │ Mean Actions/Gamestate  │ {pred_actions_per_gamestate_mean:>10.1f} │ {target_actions_per_gamestate_mean:>10.1f} │ {abs(pred_actions_per_gamestate_mean - target_actions_per_gamestate_mean):>10.1f} │")
+                print(f"  │ Median Actions/Gamestate│ {np.median(actions_per_gamestate_pred):>10.0f} │ {np.median(actions_per_gamestate_target):>10.0f} │ {abs(np.median(actions_per_gamestate_pred) - np.median(actions_per_gamestate_target)):>10.0f} │")
+                print(f"  │ P10 Actions/Gamestate   │ {np.percentile(actions_per_gamestate_pred, 10):>10.0f} │ {np.percentile(actions_per_gamestate_target, 10):>10.0f} │ {abs(np.percentile(actions_per_gamestate_pred, 10) - np.percentile(actions_per_gamestate_target, 10)):>10.0f} │")
+                print(f"  │ P25 Actions/Gamestate   │ {np.percentile(actions_per_gamestate_pred, 25):>10.0f} │ {np.percentile(actions_per_gamestate_target, 25):>10.0f} │ {abs(np.percentile(actions_per_gamestate_pred, 25) - np.percentile(actions_per_gamestate_target, 25)):>10.0f} │")
+                print(f"  │ P75 Actions/Gamestate   │ {np.percentile(actions_per_gamestate_pred, 75):>10.0f} │ {np.percentile(actions_per_gamestate_target, 75):>10.0f} │ {abs(np.percentile(actions_per_gamestate_pred, 75) - np.percentile(actions_per_gamestate_target, 75)):>10.0f} │")
+                print(f"  │ P90 Actions/Gamestate   │ {np.percentile(actions_per_gamestate_pred, 90):>10.0f} │ {np.percentile(actions_per_gamestate_target, 90):>10.0f} │ {abs(np.percentile(actions_per_gamestate_pred, 90) - np.percentile(actions_per_gamestate_target, 90)):>10.0f} │")
+                print(f"  │ Std Dev Actions/Gamestate│ {pred_actions_per_gamestate_std:>10.1f} │ {target_actions_per_gamestate_std:>10.1f} │ {abs(pred_actions_per_gamestate_std - target_actions_per_gamestate_std):>10.1f} │")
+                print(f"  │ Min Actions/Gamestate   │ {np.min(actions_per_gamestate_pred):>10.0f} │ {np.min(actions_per_gamestate_target):>10.0f} │ {abs(np.min(actions_per_gamestate_pred) - np.min(actions_per_gamestate_target)):>10.0f} │")
+                print(f"  │ Max Actions/Gamestate   │ {np.max(actions_per_gamestate_pred):>10.0f} │ {np.max(actions_per_gamestate_target):>10.0f} │ {abs(np.max(actions_per_gamestate_pred) - np.max(actions_per_gamestate_target)):>10.0f} │")
+                print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+                
+                # Burst analysis - analyze action timing patterns
+                if valid_time_targets.numel() > 0:
+                    self._analyze_action_bursts(valid_time_targets, analysis, epoch)
             
             # Basic mouse position analysis
             if 'x_mu' in model_outputs and 'y_mu' in model_outputs:
@@ -272,7 +363,12 @@ class SimplifiedBehavioralMetrics:
             # Basic gamestate analysis
             if gamestates.numel() > 0:
                 # Player position analysis (assume first 2 features are x, y)
-                player_positions = gamestates[:, :, :2]
+                # Note: gamestates are normalized, so we need to denormalize for display
+                player_positions_normalized = gamestates[:, :, :2]
+                
+                # Denormalize player positions (multiply by world_scale = 10000)
+                world_scale = 10000.0
+                player_positions = player_positions_normalized * world_scale
                 
                 px_min, px_max = self._safe_min_max(player_positions[:, :, 0])
                 py_min, py_max = self._safe_min_max(player_positions[:, :, 1])
@@ -316,6 +412,9 @@ class SimplifiedBehavioralMetrics:
                 print(f"  │ Valid Actions           │ {analysis['data_quality']['valid_actions']:>10} │ {analysis['data_quality']['total_actions']:>10} │ {valid_ratio:>10.1%} │")
                 print(f"  │ Padding Actions         │ {analysis['data_quality']['total_actions'] - analysis['data_quality']['valid_actions']:>10} │ {analysis['data_quality']['total_actions']:>10} │ {1-valid_ratio:>10.1%} │")
                 print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+            
+            # Create actions per gamestate visualization
+            self._create_actions_per_gamestate_visualization(action_targets, valid_mask, analysis, epoch)
             
             # Store analysis
             analysis['epoch'] = epoch
@@ -398,3 +497,258 @@ class SimplifiedBehavioralMetrics:
                 insights.append("✅ Bot shows balanced event predictions")
         
         return insights
+    
+    def _safe_mean(self, tensor: torch.Tensor) -> float:
+        """Safely compute mean of tensor, handling empty tensors"""
+        if tensor.numel() == 0:
+            return 0.0
+        return float(tensor.mean().item())
+    
+    def _safe_std(self, tensor: torch.Tensor) -> float:
+        """Safely compute std of tensor, handling empty tensors"""
+        if tensor.numel() == 0:
+            return 0.0
+        return float(tensor.std().item())
+    
+    def _safe_min_max(self, tensor: torch.Tensor) -> Tuple[float, float]:
+        """Safely compute min/max of tensor, handling empty tensors"""
+        if tensor.numel() == 0:
+            return 0.0, 0.0
+        return float(tensor.min().item()), float(tensor.max().item())
+    
+    def _safe_percentile(self, tensor: torch.Tensor, percentile: float) -> float:
+        """Safely compute percentile of tensor, handling empty tensors"""
+        if tensor.numel() == 0:
+            return 0.0
+        # Convert percentile to quantile (0-1 range)
+        quantile = percentile / 100.0
+        return float(torch.quantile(tensor, quantile).item())
+    
+    def _analyze_action_bursts(self, time_targets: torch.Tensor, analysis: Dict, epoch: int):
+        """Analyze action burst patterns in timing data"""
+        try:
+            # Convert to numpy for easier analysis
+            times = time_targets.cpu().numpy()
+            
+            # Define burst thresholds
+            fast_threshold = 0.1  # Actions within 0.1s are considered "fast"
+            pause_threshold = 1.0  # Actions with >1s gap are considered "pauses"
+            
+            # Analyze burst patterns
+            fast_actions = times[times <= fast_threshold]
+            pause_actions = times[times >= pause_threshold]
+            medium_actions = times[(times > fast_threshold) & (times < pause_threshold)]
+            
+            # Count burst sequences (consecutive fast actions)
+            burst_sequences = []
+            current_burst = []
+            
+            for i, time in enumerate(times):
+                if time <= fast_threshold:
+                    current_burst.append(time)
+                else:
+                    if len(current_burst) > 0:
+                        burst_sequences.append(current_burst)
+                        current_burst = []
+            
+            # Don't forget the last burst
+            if len(current_burst) > 0:
+                burst_sequences.append(current_burst)
+            
+            # Calculate burst statistics
+            burst_lengths = [len(burst) for burst in burst_sequences]
+            burst_durations = [sum(burst) for burst in burst_sequences]
+            
+            analysis['bursts'] = {
+                'total_actions': len(times),
+                'fast_actions': len(fast_actions),
+                'medium_actions': len(medium_actions),
+                'pause_actions': len(pause_actions),
+                'fast_percentage': len(fast_actions) / len(times) * 100,
+                'pause_percentage': len(pause_actions) / len(times) * 100,
+                'num_bursts': len(burst_sequences),
+                'avg_burst_length': np.mean(burst_lengths) if burst_lengths else 0,
+                'max_burst_length': max(burst_lengths) if burst_lengths else 0,
+                'avg_burst_duration': np.mean(burst_durations) if burst_durations else 0,
+                'fast_timing_mean': np.mean(fast_actions) if len(fast_actions) > 0 else 0,
+                'pause_timing_mean': np.mean(pause_actions) if len(pause_actions) > 0 else 0,
+            }
+            
+            # Display burst analysis
+            print(f"\n💥 Action Burst Analysis:")
+            print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+            print(f"  │ Metric                  │ Count        │ Percentage   │ Avg Timing   │")
+            print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+            print(f"  │ Fast Actions (≤0.1s)    │ {analysis['bursts']['fast_actions']:>10} │ {analysis['bursts']['fast_percentage']:>10.1f}% │ {analysis['bursts']['fast_timing_mean']:>10.3f}s │")
+            print(f"  │ Medium Actions (0.1-1s) │ {analysis['bursts']['medium_actions']:>10} │ {100-analysis['bursts']['fast_percentage']-analysis['bursts']['pause_percentage']:>10.1f}% │ {'N/A':>10} │")
+            print(f"  │ Pause Actions (≥1s)     │ {analysis['bursts']['pause_actions']:>10} │ {analysis['bursts']['pause_percentage']:>10.1f}% │ {analysis['bursts']['pause_timing_mean']:>10.3f}s │")
+            print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+            
+            print(f"\n🎯 Burst Sequences:")
+            print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+            print(f"  │ Metric                  │ Count        │ Average      │ Maximum      │")
+            print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+            print(f"  │ Number of Bursts        │ {analysis['bursts']['num_bursts']:>10} │ {'N/A':>10} │ {'N/A':>10} │")
+            print(f"  │ Actions per Burst       │ {'N/A':>10} │ {analysis['bursts']['avg_burst_length']:>10.1f} │ {analysis['bursts']['max_burst_length']:>10} │")
+            print(f"  │ Burst Duration (s)      │ {'N/A':>10} │ {analysis['bursts']['avg_burst_duration']:>10.3f} │ {'N/A':>10} │")
+            print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+            
+            # Show some example burst sequences
+            if burst_sequences:
+                print(f"\n📋 Example Burst Sequences (first 5):")
+                for i, burst in enumerate(burst_sequences[:5]):
+                    burst_times = [f"{t:.3f}s" for t in burst]
+                    print(f"  Burst {i+1}: {len(burst)} actions in {sum(burst):.3f}s - {', '.join(burst_times)}")
+            
+            # Create temporal action visualization
+            self._create_temporal_visualization(time_targets, analysis, epoch)
+            
+            # Create actions per gamestate visualization
+            self._create_actions_per_gamestate_visualization(action_targets, valid_mask, analysis, epoch)
+                
+        except Exception as e:
+            print(f"⚠️  Burst analysis failed: {e}")
+            analysis['bursts'] = {
+                'total_actions': 0,
+                'fast_actions': 0,
+                'medium_actions': 0,
+                'pause_actions': 0,
+                'fast_percentage': 0,
+                'pause_percentage': 0,
+                'num_bursts': 0,
+                'avg_burst_length': 0,
+                'max_burst_length': 0,
+                'avg_burst_duration': 0,
+                'fast_timing_mean': 0,
+                'pause_timing_mean': 0,
+            }
+    
+    def _create_temporal_visualization(self, time_targets: torch.Tensor, analysis: Dict, epoch: int):
+        """Create a temporal visualization showing actions per gamestate (600ms windows)"""
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # The model predicts actions for each gamestate (every 600ms)
+            # We need to count how many actions are predicted vs actual per gamestate
+            
+            target_times = time_targets.cpu().numpy()
+            
+            # Create the plot
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+            
+            # Plot 1: Timing distribution histogram
+            ax1.hist(target_times, bins=50, alpha=0.7, color='blue', label='Target Timing Distribution')
+            ax1.set_xlabel('Time Delta (s)')
+            ax1.set_ylabel('Count')
+            ax1.set_title(f'Epoch {epoch}: Action Timing Distribution')
+            ax1.set_xlim(0, 0.5)  # Focus on the fast actions
+            ax1.grid(True, alpha=0.3)
+            ax1.legend()
+            
+            # Plot 2: Cumulative time series showing burst patterns
+            cumulative_times = np.cumsum(target_times)
+            ax2.plot(cumulative_times, target_times, 'b-', alpha=0.7, linewidth=1, label='Target Timing')
+            ax2.set_xlabel('Cumulative Time (s)')
+            ax2.set_ylabel('Action Interval (s)')
+            ax2.set_title('Action Timing Over Time (Burst Pattern)')
+            ax2.grid(True, alpha=0.3)
+            ax2.legend()
+            
+            # Highlight fast actions
+            fast_mask = target_times <= 0.1
+            if np.any(fast_mask):
+                fast_cumulative = cumulative_times[fast_mask]
+                fast_times = target_times[fast_mask]
+                ax2.scatter(fast_cumulative, fast_times, c='red', s=20, alpha=0.6, label='Fast Actions (≤0.1s)')
+            
+            plt.tight_layout()
+            
+            # Save the plot
+            plot_path = os.path.join(self.save_dir, f"epoch_{epoch:03d}_timing_analysis.png")
+            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            print(f"📊 Timing analysis saved: {plot_path}")
+            
+            # Print summary statistics
+            print(f"\n📈 Timing Analysis Summary:")
+            print(f"  Total actions: {len(target_times)}")
+            print(f"  Total session time: {cumulative_times[-1]:.2f}s")
+            print(f"  Actions per second: {len(target_times) / cumulative_times[-1]:.1f}")
+            print(f"  Fast actions (≤0.1s): {np.sum(fast_mask)} ({np.sum(fast_mask)/len(target_times)*100:.1f}%)")
+            print(f"  Medium actions (0.1-1s): {np.sum((target_times > 0.1) & (target_times <= 1.0))} ({np.sum((target_times > 0.1) & (target_times <= 1.0))/len(target_times)*100:.1f}%)")
+            print(f"  Slow actions (>1s): {np.sum(target_times > 1.0)} ({np.sum(target_times > 1.0)/len(target_times)*100:.1f}%)")
+            print(f"  Mean timing: {np.mean(target_times):.3f}s ± {np.std(target_times):.3f}s")
+            
+        except ImportError:
+            print("⚠️  matplotlib not available for temporal visualization")
+        except Exception as e:
+            print(f"⚠️  Temporal visualization failed: {e}")
+    
+    def _create_actions_per_gamestate_visualization(self, action_targets: torch.Tensor, valid_mask: torch.Tensor, 
+                                                   analysis: Dict, epoch: int):
+        """Create visualization showing actions per gamestate (600ms windows)"""
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # action_targets shape: [B, A, 7] where B=batch_size, A=max_actions_per_timestep
+            # valid_mask shape: [B, A] - indicates which actions are valid
+            
+            # Count valid actions per gamestate (per batch item)
+            batch_size = action_targets.shape[0]
+            actions_per_gamestate = valid_mask.sum(dim=1).cpu().numpy()  # [B] - actions per gamestate
+            
+            # Get prediction counts (we need to estimate this from the model outputs)
+            # For now, let's use the mean prediction timing to estimate actions per gamestate
+            pred_actions_per_gamestate = None
+            if 'timing' in analysis and 'mean_timing' in analysis['timing']:
+                # Estimate: if model predicts 0.447s average timing, how many actions in 600ms?
+                pred_mean_timing = analysis['timing']['mean_timing']
+                actions_in_600ms = 0.6 / pred_mean_timing  # 600ms / predicted_timing
+                pred_actions_per_gamestate = np.full(batch_size, actions_in_600ms)
+            
+            # Create the plot
+            fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+            
+            # X-axis: gamestate index (every 600ms)
+            gamestate_indices = np.arange(batch_size)
+            
+            # Plot target actions per gamestate
+            ax.scatter(gamestate_indices, actions_per_gamestate, alpha=0.7, color='blue', 
+                      label='Target Actions per Gamestate', s=30)
+            
+            # Plot predicted actions per gamestate (if available)
+            if pred_actions_per_gamestate is not None:
+                ax.scatter(gamestate_indices, pred_actions_per_gamestate, alpha=0.7, color='red', 
+                          label='Predicted Actions per Gamestate', s=30)
+            
+            ax.set_xlabel('Gamestate Index (every 600ms)')
+            ax.set_ylabel('Number of Actions')
+            ax.set_title(f'Epoch {epoch}: Actions per Gamestate (600ms windows)')
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+            
+            plt.tight_layout()
+            
+            # Save the plot
+            plot_path = os.path.join(self.save_dir, f"epoch_{epoch:03d}_actions_per_gamestate.png")
+            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            print(f"📊 Actions per gamestate visualization saved: {plot_path}")
+            
+            # Print summary statistics
+            print(f"\n📈 Actions per Gamestate Summary:")
+            print(f"  Total gamestates: {batch_size}")
+            print(f"  Target actions per gamestate: {np.mean(actions_per_gamestate):.1f} ± {np.std(actions_per_gamestate):.1f}")
+            print(f"  Target actions range: {np.min(actions_per_gamestate)} - {np.max(actions_per_gamestate)}")
+            if pred_actions_per_gamestate is not None:
+                print(f"  Predicted actions per gamestate: {np.mean(pred_actions_per_gamestate):.1f} ± {np.std(pred_actions_per_gamestate):.1f}")
+                print(f"  Predicted actions range: {np.min(pred_actions_per_gamestate):.1f} - {np.max(pred_actions_per_gamestate):.1f}")
+            
+        except ImportError:
+            print("⚠️  matplotlib not available for actions per gamestate visualization")
+        except Exception as e:
+            print(f"⚠️  Actions per gamestate visualization failed: {e}")

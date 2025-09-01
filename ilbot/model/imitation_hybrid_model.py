@@ -99,13 +99,7 @@ class GamestateEncoder(nn.Module):
             nn.Dropout(0.1)
         )
         
-        # Fallback MLP for when no feature_spec is provided (treats all features as continuous)
-        self._fallback_mlp = nn.Sequential(
-            nn.Linear(128, hidden_dim),  # 128 is the default gamestate_dim, output full hidden_dim
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1)
-        )
+
 
         # Boolean features
         self._bool_mlp = nn.Sequential(
@@ -218,12 +212,9 @@ class GamestateEncoder(nn.Module):
             tim = self._time_mlp(tim)
             chunks.append(tim)
 
-        # If no chunks were added (no feature_spec provided), treat all features as continuous
+        # Ensure we always have proper feature specification
         if len(chunks) == 0:
-            # Treat all features as continuous using fallback MLP
-            cont = x.float()
-            cont = self._fallback_mlp(cont)
-            chunks.append(cont)
+            raise ValueError("No feature specification provided. The model requires a proper feature_spec to determine how to process gamestate features.")
 
         h = torch.cat(chunks, dim=-1) if len(chunks) > 1 else chunks[0]
         x_encoded = torch.relu(self.fuse(h))
@@ -423,8 +414,8 @@ class ActionDecoder(nn.Module):
         key_id_logits = torch.stack(key_id_logits, dim=1)         # [B, A, n_kid]
         scroll_y_logits = torch.stack(scroll_y_logits, dim=1)     # [B, A, n_sy]
         
-        # Apply time positivity constraint
-        time_q = F.softplus(time_q_raw) + 0.1  # Small bias to avoid 0
+        # Apply time positivity constraint with smaller bias for fast actions
+        time_q = F.softplus(time_q_raw) + 0.001  # Much smaller bias to allow fast actions
         
         # Apply sigmoid to coordinate predictions to ensure [0, 1] range
         x_mu_normalized = torch.sigmoid(x_mu)  # [B, A] - normalized X coordinates
@@ -764,7 +755,7 @@ class ImitationHybridModel(nn.Module):
             'hidden_dim': self.hidden_dim
         }
 
-def create_model(data_config: Dict = None, model_config: Dict = None) -> ImitationHybridModel:
+def create_model(data_config: Dict = None, model_config: Dict = None, data_dir: str = None) -> ImitationHybridModel:
     """Factory function to create the model with data-driven configuration"""
     if data_config is None:
         # Create default data config for testing
@@ -784,7 +775,19 @@ def create_model(data_config: Dict = None, model_config: Dict = None) -> Imitati
             'num_layers': 6
         }
     
-    model = ImitationHybridModel(data_config=data_config, **model_config)
+    # Load feature specification if data_dir is provided
+    feature_spec = {}
+    if data_dir:
+        try:
+            from pathlib import Path
+            from ilbot.utils.feature_spec import load_feature_spec
+            feature_spec = load_feature_spec(Path(data_dir))
+            # Successfully loaded feature spec
+        except Exception as e:
+            print(f"WARNING: Could not load feature spec: {e}")
+            feature_spec = {}
+    
+    model = ImitationHybridModel(data_config=data_config, feature_spec=feature_spec, **model_config)
     return model
 
 if __name__ == "__main__":

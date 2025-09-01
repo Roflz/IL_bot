@@ -390,6 +390,86 @@ def process_fresh(session_root, gamestates_dir, actions_csv,
     
     np.save(final_dir / "action_targets.npy", action_targets)
     print(f"    ✓ action_targets.npy: {action_targets.shape}")
+    
+    # Create dataset_manifest.json for training
+    print("Creating dataset_manifest.json...")
+    
+    # Load feature mappings to get proper feature groups
+    feature_mappings_path = mappings_dir / "feature_mappings.json"
+    if feature_mappings_path.exists():
+        with open(feature_mappings_path, 'r') as f:
+            feature_mappings = _json.load(f)
+        
+        # Build feature groups from feature mappings
+        feature_groups = {
+            "continuous": [],
+            "categorical": [],
+            "boolean": [],
+            "counts": [],
+            "angles": [],
+            "time": []
+        }
+        
+        for mapping in feature_mappings:
+            idx = int(mapping["feature_index"])
+            data_type = str(mapping.get("data_type", "")).lower()
+            feature_name = str(mapping.get("feature_name", "")).lower()
+            
+            if data_type in {"boolean", "bool"}:
+                feature_groups["boolean"].append(idx)
+            elif "angle" in data_type or "angle" in feature_name:
+                feature_groups["angles"].append(idx)
+            elif "time" in data_type or "timestamp" in feature_name:
+                feature_groups["time"].append(idx)
+            elif data_type in {"count", "skill_level", "skill_xp"} or "count" in feature_name or feature_name.endswith("_xp"):
+                feature_groups["counts"].append(idx)
+            elif data_type.endswith("_id") or data_type in {"item_id", "object_id", "npc_id", "tab_id", "animation_id", "key_id", "hashed_string", "phase_type"} or feature_name.endswith("_id") or feature_name in {"action_type", "item_name", "target", "phase_type"}:
+                feature_groups["categorical"].append(idx)
+            else:
+                feature_groups["continuous"].append(idx)
+    else:
+        # Fallback: all features as continuous
+        feature_groups = {
+            "continuous": list(range(normalized_features.shape[1])),
+            "categorical": [],
+            "boolean": [],
+            "counts": [],
+            "angles": [],
+            "time": []
+        }
+    
+    dataset_manifest = {
+        "description": "Training data manifest for OSRS Imitation Learning",
+        "targets_version": "v1",
+        "gamestate_dim": int(normalized_features.shape[1]),
+        "max_actions": int(action_targets.shape[1]),
+        "action_features": int(action_targets.shape[2]),
+        "temporal_window": int(input_sequences.shape[1]),
+        "enums": {
+            "button": {
+                "size": 3,
+                "none_index": 0
+            },
+            "key_action": {
+                "size": 3,
+                "none_index": 0
+            },
+            "key_id": {
+                "size": 505,
+                "none_index": 0
+            },
+            "scroll": {
+                "size": 3,
+                "none_index": 1
+            }
+        },
+        "event_types": 4,
+        "feature_groups": feature_groups
+    }
+    
+    # Write dataset_manifest.json
+    (final_dir / "dataset_manifest.json").write_text(_json.dumps(dataset_manifest, indent=2))
+    print(f"    ✓ dataset_manifest.json: {normalized_features.shape[1]} features, {action_targets.shape[1]} max actions")
 
 
 
