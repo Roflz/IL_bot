@@ -18,7 +18,7 @@ from typing import Dict, List, Tuple, Optional, Union, Any
 import os
 
 from ilbot.model.imitation_hybrid_model import ImitationHybridModel
-from ilbot.model.losses import UnifiedEventLoss
+from ilbot.model.advanced_losses import AdvancedUnifiedEventLoss
 
 class OSRSDataset(Dataset):
     """
@@ -218,13 +218,13 @@ def setup_training(model: ImitationHybridModel,
                   val_loader: DataLoader,
                   device: torch.device,
                   learning_rate: float = 3e-4,
-                  weight_decay: float = 1e-4) -> Tuple[UnifiedEventLoss, optim.Optimizer]:
+                  weight_decay: float = 1e-4) -> Tuple[AdvancedUnifiedEventLoss, optim.Optimizer]:
     """Setup loss function and optimizer"""
     
     print(f"Setting up training components...")
     
     # Loss function
-    criterion = UnifiedEventLoss()
+    criterion = AdvancedUnifiedEventLoss()
     print(f"  Loss function: {criterion.__class__.__name__}")
     
     # Optimizer

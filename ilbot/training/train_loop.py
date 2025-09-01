@@ -20,7 +20,7 @@ import os, numpy as np
 from collections import Counter, defaultdict
 from datetime import datetime
 from ilbot.utils.feature_spec import load_feature_spec
-from .behavioral_metrics import BehavioralMetrics
+from .simplified_behavioral_metrics import SimplifiedBehavioralMetrics
 
 # Add new imports for the updated run_training function
 from ilbot.training.setup import OSRSDataset, create_data_loaders
@@ -334,14 +334,14 @@ import torch.nn.functional as F
 
 def compute_unified_event_loss(predictions, targets, valid_mask, loss_fn, enum_sizes):
     """
-    Compute unified event system loss using the new UnifiedEventLoss.
+    Compute advanced unified event system loss using the new AdvancedUnifiedEventLoss.
     
     Args:
         predictions: Model outputs from unified event system
         targets: [B, A, 7] V2 action targets [time, x, y, button, key_action, key_id, scroll_y]
         valid_mask: [B, A] Boolean mask for valid actions
-        loss_fn: UnifiedEventLoss instance
-        enum_sizes: Dictionary with categorical sizes for auxiliary losses
+        loss_fn: AdvancedUnifiedEventLoss instance
+        enum_sizes: Dictionary with categorical sizes for auxiliary losses (not used by AdvancedUnifiedEventLoss)
     
     Returns:
         total_loss: Combined weighted loss
@@ -353,8 +353,8 @@ def compute_unified_event_loss(predictions, targets, valid_mask, loss_fn, enum_s
         valid_mask = valid_mask.view(targets.shape[0], targets.shape[1])
     valid_mask = valid_mask.bool()
     
-    # Compute loss using UnifiedEventLoss
-    total_loss, loss_components = loss_fn(predictions, targets, valid_mask, enum_sizes)
+    # Compute loss using AdvancedUnifiedEventLoss (enum_sizes not needed)
+    total_loss, loss_components = loss_fn(predictions, targets, valid_mask)
     
     return total_loss, loss_components
 
@@ -400,8 +400,8 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
     ckpt_dir = os.path.join("checkpoints", datetime.now().strftime("%Y%m%d_%H%M%S"))
     os.makedirs(ckpt_dir, exist_ok=True)
     
-    # Initialize behavioral intelligence metrics
-    behavioral_metrics = BehavioralMetrics(save_dir=os.path.join(ckpt_dir, "behavioral_analysis"))
+    # Initialize enhanced behavioral intelligence metrics
+    behavioral_metrics = SimplifiedBehavioralMetrics(save_dir=os.path.join(ckpt_dir, "behavioral_analysis"))
     
 
     for epoch in range(num_epochs):
@@ -451,8 +451,16 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
 
             
             if isinstance(outputs, dict):
-                # V2 only - use unified event loss
+                # V2 only - use advanced unified event loss
                 valid_mask = batch['valid_mask'].to(device)
+                
+                # Debug: Print what we're passing to the loss function
+                if batch_idx == 0:  # Only print for first batch
+                    print(f"🔧 Debug - Loss function type: {type(loss_fn).__name__}")
+                    print(f"🔧 Debug - Outputs keys: {list(outputs.keys())}")
+                    print(f"🔧 Debug - Event logits shape: {outputs['event_logits'].shape if 'event_logits' in outputs else 'N/A'}")
+                    print(f"🔧 Debug - Valid mask sum: {valid_mask.sum().item()}")
+                
                 loss, loss_components = compute_unified_event_loss(outputs, action_target, valid_mask, loss_fn, enum_sizes)
             else:
                 # Back-compat with legacy tensor output + custom criterion
@@ -466,9 +474,9 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
             train_loss += loss.item()
             train_batches += 1
             
-                    # Progress update (cleaner format)
-        if (batch_idx + 1) % 5 == 0:
-            print(f"  Batch {batch_idx + 1}/{len(train_loader)}, Loss: {loss.item():.1f}")
+            # Progress update (cleaner format)
+            if (batch_idx + 1) % 5 == 0:
+                print(f"  Batch {batch_idx + 1}/{len(train_loader)}, Loss: {loss.item():.1f}")
 
 
         avg_train_loss = train_loss / train_batches
@@ -517,7 +525,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
 
 
                 if isinstance(outputs, dict):
-                    # V2 only - use unified event loss
+                    # V2 only - use advanced unified event loss
                     valid_mask = batch['valid_mask'].to(device)
                     vloss, loss_components = compute_unified_event_loss(outputs, action_target, valid_mask, loss_fn, enum_sizes)
 
@@ -684,7 +692,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
         filled_length = int(bar_length * progress)
         bar = '█' * filled_length + '░' * (bar_length - filled_length)
         print(f"  📈 Progress: [{bar}] {progress:.0%}")
-        
+
         # Scheduler step (if any)
         if scheduler is not None:
             scheduler.step()
@@ -725,7 +733,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
     print(f"  📈 Final Validation Loss: {val_losses[-1]:.1f}")
     print(f"  🎯 Total Epochs: {len(train_losses)}")
     print("\n🔍 Generating Behavioral Intelligence Summary...")
-    behavioral_metrics.generate_training_summary()
+    behavioral_metrics.generate_training_summary(epoch)
     
     return train_losses, val_losses
 
@@ -969,8 +977,8 @@ def run_training(config: dict):
     model = create_model(
         data_config=data_config,
         model_config={
-            'hidden_dim': 256,
-            'num_heads': 8,
+        'hidden_dim': 256,
+        'num_heads': 8,
             'num_layers': 6
         }
     )
@@ -990,14 +998,14 @@ def run_training(config: dict):
     device = torch.device(config.get("device", "cuda"))
     model = model.to(device)
 
-    # 4) Create unified event loss function
-    from ilbot.model.losses import UnifiedEventLoss
+    # 4) Create advanced unified event loss function
+    from ilbot.model.advanced_losses import AdvancedUnifiedEventLoss
     
     # Use the same data_config for the loss function
     # data_config is already created above from DataInspector
     
-    loss_fn = UnifiedEventLoss(data_config=data_config)
-    print(f"Created UnifiedEventLoss with data config: {data_config}")
+    loss_fn = AdvancedUnifiedEventLoss(data_config=data_config)
+    print(f"Created AdvancedUnifiedEventLoss with data config: {data_config}")
     
     # Set global class weights based on the entire dataset
     print("🎯 Computing global class weights from dataset...")
@@ -1009,18 +1017,20 @@ def run_training(config: dict):
         action_targets = batch["action_target"]
         valid_masks = batch["valid_mask"]
         
-        # Derive event targets
-        button_target = action_targets[..., 3]  # Button column
-        key_action_target = action_targets[..., 4]  # Key action column
-        scroll_y_target = action_targets[..., 6]  # Scroll column
-        
-        event_targets = loss_fn._derive_event_target(button_target, key_action_target, scroll_y_target)
+        # Derive event targets using the full action_targets tensor
+        event_targets = loss_fn._derive_event_target(action_targets)
         
         all_event_targets.append(event_targets)
         all_valid_masks.append(valid_masks)
     
     # Set global weights
     loss_fn.set_global_event_weights(all_event_targets, all_valid_masks)
+    
+    # Debug: Print loss function info
+    print(f"🔧 Loss function type: {type(loss_fn).__name__}")
+    print(f"🔧 Loss function has focal loss: {hasattr(loss_fn, 'focal_loss')}")
+    print(f"🔧 Loss function has label smoothing: {hasattr(loss_fn, 'label_smoothing_loss')}")
+    print(f"🔧 Event class weights set: {loss_fn.event_class_weights is not None}")
     
     # 5) train loop
     # V2-only training with unified event system
