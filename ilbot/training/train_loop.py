@@ -89,29 +89,6 @@ def load_manifest(data_dir: Path):
     p = data_dir / "dataset_manifest.json"
     return json.load(open(p,"r",encoding="utf-8")) if p.exists() else None
 
-def create_data_loaders_v2(data_dir: Path, targets_version: str = "v2", device=None):
-    man = load_manifest(data_dir)
-    tv = "v2"  # hard-lock to V2
-    # load arrays
-    gs = np.load(data_dir/"gamestate_sequences.npy")      # (N,T,G)
-    ai = np.load(data_dir/"action_input_sequences.npy")   # (N,T,A,Fin)
-    # V2 only
-    _ = np.load(data_dir/"actions_v2.npy")                # (N,A,7)
-    _ = np.load(data_dir/"valid_mask.npy")                # (N,A)
-    
-    # OSRSDataset expects a data_dir; let it discover file paths itself.
-    dataset = OSRSDataset(data_dir=data_dir, targets_version="v2")
-    # split to train/val; batch size logic unchanged…
-    train_loader, val_loader = create_data_loaders(
-        dataset=dataset,
-        train_split=0.8,
-        batch_size=32,
-        disable_cuda_batch_opt=False,
-        shuffle=True,
-        device=device
-    )
-    return train_loader, val_loader, man, tv
-
 def setup_model_v2(manifest, targets_version, device, data_dir: Path | None = None):
     """
     Build the hybrid model for V2 targets.
@@ -935,37 +912,11 @@ def run_training(config: dict):
     # Create data loaders using the auto-detected configuration
     from ilbot.training.setup import create_data_loaders
     
-    # Create a proper dataset that loads the actual data
-    class UnifiedEventDataset:
-        def __init__(self, data_dir, data_config):
-            self.data_dir = Path(data_dir)
-            self.data_config = data_config
-            
-            # Load the actual data files
-            self.gamestate_sequences = np.load(self.data_dir / "gamestate_sequences.npy")
-            self.action_input_sequences = np.load(self.data_dir / "action_input_sequences.npy")
-            self.action_targets = np.load(self.data_dir / "action_targets.npy")
-            
-            # Create valid mask (non-zero rows are valid)
-            self.valid_mask = (np.abs(self.action_targets).sum(axis=-1) > 0)
-            
-            # Set dataset properties
-            self.B, self.T, self.G = self.gamestate_sequences.shape
-            _, _, self.A, self.Fin = self.action_input_sequences.shape
-            self.n_sequences = self.B
-        
-        def __len__(self):
-            return self.n_sequences
-        
-        def __getitem__(self, idx):
-            return {
-                "temporal_sequence": torch.from_numpy(self.gamestate_sequences[idx]).float(),
-                "action_sequence": torch.from_numpy(self.action_input_sequences[idx]).float(),
-                "action_target": torch.from_numpy(self.action_targets[idx]).float(),
-                "valid_mask": torch.from_numpy(self.valid_mask[idx]).bool()
-            }
-    
-    ds = UnifiedEventDataset(config["data_dir"], data_config)
+    # Use the existing OSRSDataset class instead of duplicating functionality
+    ds = OSRSDataset(
+        data_dir=config["data_dir"],
+        targets_version=config.get("targets_version", "v1")
+    )
     train_loader, val_loader = create_data_loaders(
         dataset=ds,
         batch_size=config.get("batch_size", 32),

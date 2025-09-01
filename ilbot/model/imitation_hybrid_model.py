@@ -426,12 +426,16 @@ class ActionDecoder(nn.Module):
         # Apply time positivity constraint
         time_q = F.softplus(time_q_raw) + 0.1  # Small bias to avoid 0
         
+        # Apply sigmoid to coordinate predictions to ensure [0, 1] range
+        x_mu_normalized = torch.sigmoid(x_mu)  # [B, A] - normalized X coordinates
+        y_mu_normalized = torch.sigmoid(y_mu)  # [B, A] - normalized Y coordinates
+        
         return {
             "event_logits": event_logits,           # [B, A, 4]
             "time_q": time_q,                       # [B, A, 3]
-            "x_mu": x_mu,                          # [B, A]
+            "x_mu": x_mu_normalized,               # [B, A] - normalized [0, 1]
             "x_logsig": x_logsig,                  # [B, A]
-            "y_mu": y_mu,                          # [B, A]
+            "y_mu": y_mu_normalized,               # [B, A] - normalized [0, 1]
             "y_logsig": y_logsig,                  # [B, A]
             "button_logits": button_logits,        # [B, A, n_btn]
             "key_action_logits": key_action_logits, # [B, A, n_ka]

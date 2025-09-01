@@ -68,23 +68,34 @@ class SimplifiedBehavioralMetrics:
                 # Apply valid mask to get only valid predictions
                 valid_time_preds = time_preds[valid_mask]  # [N_valid, 3]
                 
-                if valid_time_preds.numel() > 0:
+                # Get target timing data (column 0 is time delta)
+                valid_time_targets = action_targets[valid_mask][:, 0]  # [N_valid]
+                
+                if valid_time_preds.numel() > 0 and valid_time_targets.numel() > 0:
                     analysis['timing'] = {
                         'median_timing': self._safe_mean(valid_time_preds[:, 1]),  # q0.5
                         'timing_uncertainty': self._safe_mean(valid_time_preds[:, 2] - valid_time_preds[:, 0]),  # q0.9 - q0.1
                         'timing_consistency': self._safe_std(valid_time_preds[:, 1]),
+                        'target_median_timing': self._safe_mean(valid_time_targets),
+                        'target_timing_consistency': self._safe_std(valid_time_targets),
                     }
                 else:
                     analysis['timing'] = {
                         'median_timing': 0.0,
                         'timing_uncertainty': 0.0,
                         'timing_consistency': 0.0,
+                        'target_median_timing': 0.0,
+                        'target_timing_consistency': 0.0,
                     }
                 
                 print(f"⏱️  Timing Analysis:")
-                print(f"  • Median timing: {analysis['timing']['median_timing']:.2f}s (q0.5 quantile)")
-                print(f"  • Timing uncertainty: {analysis['timing']['timing_uncertainty']:.2f}s (q0.9 - q0.1 range)")
-                print(f"  • Timing consistency: {analysis['timing']['timing_consistency']:.2f}s (std dev across predictions)")
+                print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+                print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
+                print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+                print(f"  │ Median Timing (s)       │ {analysis['timing']['median_timing']:>10.2f} │ {analysis['timing']['target_median_timing']:>10.2f} │ {abs(analysis['timing']['median_timing'] - analysis['timing']['target_median_timing']):>10.2f} │")
+                print(f"  │ Uncertainty (s)         │ {analysis['timing']['timing_uncertainty']:>10.2f} │ {'N/A':>10} │ {'N/A':>10} │")
+                print(f"  │ Consistency (std dev)   │ {analysis['timing']['timing_consistency']:>10.2f} │ {analysis['timing']['target_timing_consistency']:>10.2f} │ {abs(analysis['timing']['timing_consistency'] - analysis['timing']['target_timing_consistency']):>10.2f} │")
+                print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
             
             # Basic mouse position analysis
             if 'x_mu' in model_outputs and 'y_mu' in model_outputs:
@@ -95,9 +106,15 @@ class SimplifiedBehavioralMetrics:
                 valid_x_pred = x_pred[valid_mask]  # [N_valid]
                 valid_y_pred = y_pred[valid_mask]  # [N_valid]
                 
-                if valid_x_pred.numel() > 0 and valid_y_pred.numel() > 0:
+                # Get target mouse position data (columns 1 and 2 are X and Y coordinates)
+                valid_x_targets = action_targets[valid_mask][:, 1]  # [N_valid]
+                valid_y_targets = action_targets[valid_mask][:, 2]  # [N_valid]
+                
+                if valid_x_pred.numel() > 0 and valid_y_pred.numel() > 0 and valid_x_targets.numel() > 0 and valid_y_targets.numel() > 0:
                     x_min, x_max = self._safe_min_max(valid_x_pred)
                     y_min, y_max = self._safe_min_max(valid_y_pred)
+                    x_target_min, x_target_max = self._safe_min_max(valid_x_targets)
+                    y_target_min, y_target_max = self._safe_min_max(valid_y_targets)
                     
                     analysis['mouse'] = {
                         'x_range': [x_min, x_max],
@@ -106,6 +123,12 @@ class SimplifiedBehavioralMetrics:
                         'y_mean': self._safe_mean(valid_y_pred),
                         'x_std': self._safe_std(valid_x_pred),
                         'y_std': self._safe_std(valid_y_pred),
+                        'x_target_range': [x_target_min, x_target_max],
+                        'y_target_range': [y_target_min, y_target_max],
+                        'x_target_mean': self._safe_mean(valid_x_targets),
+                        'y_target_mean': self._safe_mean(valid_y_targets),
+                        'x_target_std': self._safe_std(valid_x_targets),
+                        'y_target_std': self._safe_std(valid_y_targets),
                     }
                     
                     if 'x_logsig' in model_outputs and 'y_logsig' in model_outputs:
@@ -124,23 +147,67 @@ class SimplifiedBehavioralMetrics:
                         'y_std': 0.0,
                         'x_uncertainty': 0.0,
                         'y_uncertainty': 0.0,
+                        'x_target_range': [0.0, 0.0],
+                        'y_target_range': [0.0, 0.0],
+                        'x_target_mean': 0.0,
+                        'y_target_mean': 0.0,
+                        'x_target_std': 0.0,
+                        'y_target_std': 0.0,
                     }
                 
                 print(f"\n🖱️  Mouse Position Analysis:")
-                print(f"  • X range: {analysis['mouse']['x_range'][0]:.0f} to {analysis['mouse']['x_range'][1]:.0f} (min/max across valid predictions)")
-                print(f"  • Y range: {analysis['mouse']['y_range'][0]:.0f} to {analysis['mouse']['y_range'][1]:.0f} (min/max across valid predictions)")
-                print(f"  • Mean position: ({analysis['mouse']['x_mean']:.0f}, {analysis['mouse']['y_mean']:.0f}) (average across valid predictions)")
-                print(f"  • Position spread: X={analysis['mouse']['x_std']:.1f}, Y={analysis['mouse']['y_std']:.1f} (std dev across valid predictions)")
+                
+                # Denormalize coordinates for display (assuming 1920x1080 screen)
+                screen_width, screen_height = 1920.0, 1080.0
+                
+                # Predicted coordinates
+                x_screen_min = analysis['mouse']['x_range'][0] * screen_width
+                x_screen_max = analysis['mouse']['x_range'][1] * screen_width
+                y_screen_min = analysis['mouse']['y_range'][0] * screen_height
+                y_screen_max = analysis['mouse']['y_range'][1] * screen_height
+                x_screen_mean = analysis['mouse']['x_mean'] * screen_width
+                y_screen_mean = analysis['mouse']['y_mean'] * screen_height
+                x_screen_std = analysis['mouse']['x_std'] * screen_width
+                y_screen_std = analysis['mouse']['y_std'] * screen_height
+                
+                # Target coordinates
+                x_target_screen_min = analysis['mouse']['x_target_range'][0] * screen_width
+                x_target_screen_max = analysis['mouse']['x_target_range'][1] * screen_width
+                y_target_screen_min = analysis['mouse']['y_target_range'][0] * screen_height
+                y_target_screen_max = analysis['mouse']['y_target_range'][1] * screen_height
+                x_target_screen_mean = analysis['mouse']['x_target_mean'] * screen_width
+                y_target_screen_mean = analysis['mouse']['y_target_mean'] * screen_height
+                x_target_screen_std = analysis['mouse']['x_target_std'] * screen_width
+                y_target_screen_std = analysis['mouse']['y_target_std'] * screen_height
+                
+                print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+                print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
+                print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+                print(f"  │ X Mean (pixels)         │ {x_screen_mean:>10.0f} │ {x_target_screen_mean:>10.0f} │ {abs(x_screen_mean - x_target_screen_mean):>10.1f} │")
+                print(f"  │ Y Mean (pixels)         │ {y_screen_mean:>10.0f} │ {y_target_screen_mean:>10.0f} │ {abs(y_screen_mean - y_target_screen_mean):>10.1f} │")
+                print(f"  │ X Range (pixels)        │ {x_screen_max-x_screen_min:>10.0f} │ {x_target_screen_max-x_target_screen_min:>10.0f} │ {abs((x_screen_max-x_screen_min) - (x_target_screen_max-x_target_screen_min)):>10.0f} │")
+                print(f"  │ Y Range (pixels)        │ {y_screen_max-y_screen_min:>10.0f} │ {y_target_screen_max-y_target_screen_min:>10.0f} │ {abs((y_screen_max-y_screen_min) - (y_target_screen_max-y_target_screen_min)):>10.0f} │")
+                print(f"  │ X Spread (std dev)      │ {x_screen_std:>10.1f} │ {x_target_screen_std:>10.1f} │ {abs(x_screen_std - x_target_screen_std):>10.1f} │")
+                print(f"  │ Y Spread (std dev)      │ {y_screen_std:>10.1f} │ {y_target_screen_std:>10.1f} │ {abs(y_screen_std - y_target_screen_std):>10.1f} │")
                 if 'x_uncertainty' in analysis['mouse']:
-                    print(f"  • Position uncertainty: X={analysis['mouse']['x_uncertainty']:.1f}, Y={analysis['mouse']['y_uncertainty']:.1f} (predicted std dev from model)")
+                    x_uncertainty_screen = analysis['mouse']['x_uncertainty'] * screen_width
+                    y_uncertainty_screen = analysis['mouse']['y_uncertainty'] * screen_height
+                    print(f"  │ X Uncertainty (pixels)  │ {x_uncertainty_screen:>10.1f} │ {'N/A':>10} │ {'N/A':>10} │")
+                    print(f"  │ Y Uncertainty (pixels)  │ {y_uncertainty_screen:>10.1f} │ {'N/A':>10} │ {'N/A':>10} │")
+                print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
                 
                 # Add warning if mouse predictions seem off
                 x_range = analysis['mouse']['x_range'][1] - analysis['mouse']['x_range'][0]
                 y_range = analysis['mouse']['y_range'][1] - analysis['mouse']['y_range'][0]
-                if x_range < 10 or y_range < 10:
-                    print(f"  ⚠️  WARNING: Mouse predictions have very little variation (X range: {x_range:.1f}, Y range: {y_range:.1f})")
-                    print(f"      Expected: X ~188-1708, Y ~7-860 (actual data ranges)")
-                    print(f"      This suggests the model isn't learning proper mouse coordinate scales")
+                x_range_screen = (analysis['mouse']['x_range'][1] - analysis['mouse']['x_range'][0]) * screen_width
+                y_range_screen = (analysis['mouse']['y_range'][1] - analysis['mouse']['y_range'][0]) * screen_height
+                
+                if x_range < 0.01 or y_range < 0.01:  # Very small variation in normalized coordinates
+                    print(f"  ⚠️  WARNING: Mouse predictions have very little variation")
+                    print(f"      X range: {x_range_screen:.0f} pixels (normalized: {x_range:.3f})")
+                    print(f"      Y range: {y_range_screen:.0f} pixels (normalized: {y_range:.3f})")
+                    print(f"      Expected: X ~200-1700 pixels, Y ~100-900 pixels (screen coordinate ranges)")
+                    print(f"      This suggests the model isn't learning diverse mouse positions")
             
             # Basic event distribution analysis
             if 'event_logits' in model_outputs:
@@ -149,8 +216,25 @@ class SimplifiedBehavioralMetrics:
                 # Apply valid mask and average event probabilities across valid predictions only
                 valid_event_probs = event_probs[valid_mask]  # [N_valid, 4]
                 
+                # Derive actual event types from action targets
+                valid_actions = action_targets[valid_mask]  # [N_valid, 7]
+                # action_targets format: [time, x, y, button, key_action, key_id, scroll]
+                click_actions = (valid_actions[:, 3] > 0).float()  # button > 0
+                key_actions = (valid_actions[:, 4] > 0).float()    # key_action > 0
+                scroll_actions = (valid_actions[:, 6] != 0).float()  # scroll != 0
+                move_actions = ((valid_actions[:, 3] == 0) & (valid_actions[:, 4] == 0) & (valid_actions[:, 6] == 0)).float()
+                
                 if valid_event_probs.numel() > 0:
                     mean_event_probs = valid_event_probs.mean(dim=0)  # Average across valid actions
+                    
+                    # Calculate target event distribution
+                    total_valid = valid_actions.shape[0]
+                    target_event_dist = {
+                        'CLICK': float(click_actions.sum().item() / total_valid) if total_valid > 0 else 0.0,
+                        'KEY': float(key_actions.sum().item() / total_valid) if total_valid > 0 else 0.0,
+                        'SCROLL': float(scroll_actions.sum().item() / total_valid) if total_valid > 0 else 0.0,
+                        'MOVE': float(move_actions.sum().item() / total_valid) if total_valid > 0 else 0.0,
+                    }
                     
                     analysis['events'] = {
                         'CLICK': float(mean_event_probs[0].item()),
@@ -158,6 +242,7 @@ class SimplifiedBehavioralMetrics:
                         'SCROLL': float(mean_event_probs[2].item()),
                         'MOVE': float(mean_event_probs[3].item()),
                     }
+                    analysis['target_events'] = target_event_dist
                 else:
                     analysis['events'] = {
                         'CLICK': 0.0,
@@ -165,10 +250,24 @@ class SimplifiedBehavioralMetrics:
                         'SCROLL': 0.0,
                         'MOVE': 0.0,
                     }
+                    analysis['target_events'] = {
+                        'CLICK': 0.0,
+                        'KEY': 0.0,
+                        'SCROLL': 0.0,
+                        'MOVE': 0.0,
+                    }
                 
                 print(f"\n🎯 Event Distribution:")
-                for event_type, prob in analysis['events'].items():
-                    print(f"  • {event_type}: {prob:.1%} (softmax probability)")
+                print(f"  ┌─────────────┬──────────────┬──────────────┬──────────────┐")
+                print(f"  │ Event Type  │ Predicted    │ Target       │ Difference   │")
+                print(f"  ├─────────────┼──────────────┼──────────────┼──────────────┤")
+                event_names = ['CLICK', 'KEY', 'SCROLL', 'MOVE']
+                for i, event_type in enumerate(event_names):
+                    pred_prob = analysis['events'][event_type]
+                    target_prob = analysis['target_events'][event_type]
+                    accuracy = abs(pred_prob - target_prob)
+                    print(f"  │ {event_type:<11} │ {pred_prob:>10.1%} │ {target_prob:>10.1%} │ {accuracy:>10.1%} │")
+                print(f"  └─────────────┴──────────────┴──────────────┴──────────────┘")
             
             # Basic gamestate analysis
             if gamestates.numel() > 0:
@@ -192,8 +291,14 @@ class SimplifiedBehavioralMetrics:
                 }
                 
                 print(f"\n🚶 Player Position Analysis:")
-                print(f"  • Position range: X={px_min:.0f} to {px_max:.0f}, Y={py_min:.0f} to {py_max:.0f} (min/max across all timesteps)")
-                print(f"  • Mean position: ({analysis['player']['position_mean']['x']:.0f}, {analysis['player']['position_mean']['y']:.0f}) (average across all timesteps)")
+                print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+                print(f"  │ Metric                  │ X Value      │ Y Value      │ Range        │")
+                print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+                print(f"  │ Mean Position           │ {analysis['player']['position_mean']['x']:>10.0f} │ {analysis['player']['position_mean']['y']:>10.0f} │ {'N/A':>10} │")
+                print(f"  │ Min Position            │ {px_min:>10.0f} │ {py_min:>10.0f} │ {'N/A':>10} │")
+                print(f"  │ Max Position            │ {px_max:>10.0f} │ {py_max:>10.0f} │ {'N/A':>10} │")
+                print(f"  │ Position Range          │ {px_max-px_min:>10.0f} │ {py_max-py_min:>10.0f} │ {'N/A':>10} │")
+                print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
             
             # Valid mask analysis
             if valid_mask.numel() > 0:
@@ -205,7 +310,12 @@ class SimplifiedBehavioralMetrics:
                 }
                 
                 print(f"\n📊 Data Quality:")
-                print(f"  • Valid actions: {analysis['data_quality']['valid_actions']}/{analysis['data_quality']['total_actions']} ({valid_ratio:.1%}) (non-padding action rows)")
+                print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+                print(f"  │ Metric                  │ Count        │ Total        │ Percentage   │")
+                print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+                print(f"  │ Valid Actions           │ {analysis['data_quality']['valid_actions']:>10} │ {analysis['data_quality']['total_actions']:>10} │ {valid_ratio:>10.1%} │")
+                print(f"  │ Padding Actions         │ {analysis['data_quality']['total_actions'] - analysis['data_quality']['valid_actions']:>10} │ {analysis['data_quality']['total_actions']:>10} │ {1-valid_ratio:>10.1%} │")
+                print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
             
             # Store analysis
             analysis['epoch'] = epoch

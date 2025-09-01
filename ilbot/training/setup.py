@@ -80,13 +80,34 @@ class OSRSDataset(Dataset):
     def __len__(self): return self.n_sequences
 
     def __getitem__(self, idx):
+        # Load raw data
+        temporal_sequence = torch.from_numpy(self.gamestate_sequences[idx]).float()   # (T,G)
+        action_sequence = torch.from_numpy(self.action_input_sequences[idx]).float()  # (T,A,Fin)
+        action_target = torch.from_numpy(self.action_targets[idx]).float()            # (A,7|8)
+        valid_mask = torch.from_numpy(self.valid_mask[idx]).bool()                    # (A,)
+        
+        # Normalize coordinates (columns 1 and 2 are X and Y coordinates)
+        # Screen dimensions: 1920x1080
+        screen_width = 1920.0
+        screen_height = 1080.0
+        
+        # Create a copy to avoid modifying the original data
+        action_target_normalized = action_target.clone()
+        
+        # Normalize X coordinates (column 1) to [0, 1]
+        action_target_normalized[:, 1] = action_target[:, 1] / screen_width
+        
+        # Normalize Y coordinates (column 2) to [0, 1]  
+        action_target_normalized[:, 2] = action_target[:, 2] / screen_height
+        
         return {
-            "temporal_sequence": torch.from_numpy(self.gamestate_sequences[idx]).float(),   # (T,G)
-            "action_sequence":   torch.from_numpy(self.action_input_sequences[idx]).float(),# (T,A,Fin)
-            "action_target":     torch.from_numpy(self.action_targets[idx]).float(),        # (A,7|8)
-            "valid_mask":        torch.from_numpy(self.valid_mask[idx]).bool(),             # (A,)
-            "targets_version":   self.targets_version,
-            "manifest":          self.manifest or {}
+            "temporal_sequence": temporal_sequence,
+            "action_sequence": action_sequence,
+            "action_target": action_target_normalized,  # Now with normalized coordinates
+            "valid_mask": valid_mask,
+            "targets_version": self.targets_version,
+            "manifest": self.manifest or {},
+            "screen_dimensions": (screen_width, screen_height)  # Store for denormalization
         }
     
     # Note: Old parsing methods removed since data is now loaded as numpy arrays
