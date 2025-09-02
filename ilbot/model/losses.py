@@ -180,16 +180,19 @@ class TimingClassificationLoss(nn.Module):
         
         # Convert predictions to class probabilities
         # Use softmax over the timing range to create class probabilities
-        pred_classes = torch.zeros(valid_preds.shape[0], self.num_classes, device=valid_preds.device)
+        # Create each column separately to avoid inplace operations
         
         # Fast class probability (higher when prediction is low)
-        pred_classes[:, 0] = torch.sigmoid(-10 * (valid_preds - self.fast_threshold))
+        fast_prob = torch.sigmoid(-10 * (valid_preds - self.fast_threshold))
         
         # Medium class probability (higher when prediction is in middle range)
-        pred_classes[:, 1] = torch.sigmoid(-10 * (valid_preds - self.fast_threshold)) * torch.sigmoid(10 * (valid_preds - self.slow_threshold))
+        medium_prob = torch.sigmoid(-10 * (valid_preds - self.fast_threshold)) * torch.sigmoid(10 * (valid_preds - self.slow_threshold))
         
         # Slow class probability (higher when prediction is high)
-        pred_classes[:, 2] = torch.sigmoid(10 * (valid_preds - self.slow_threshold))
+        slow_prob = torch.sigmoid(10 * (valid_preds - self.slow_threshold))
+        
+        # Stack all probabilities together
+        pred_classes = torch.stack([fast_prob, medium_prob, slow_prob], dim=1)
         
         # Normalize to get proper probabilities
         pred_classes = F.softmax(pred_classes, dim=1)
@@ -278,7 +281,8 @@ class UnifiedEventLoss(nn.Module):
             'button': 1.0,     # Button classification
             'key_action': 1.0, # Key action classification
             'key_id': 1.0,     # Key ID classification
-            'scroll': 1.0      # Scroll classification
+            'scroll': 1.0,     # Scroll classification
+            'sequence_length': 2.0  # Sequence length prediction (higher weight to encourage learning)
         }
         
         # Class weights for handling imbalanced distributions
@@ -371,13 +375,37 @@ class UnifiedEventLoss(nn.Module):
         )
         losses['xy'] = xy_loss
         
-        # 4. Auxiliary Losses (only for relevant event types)
+        # 4. Sequence Length Loss (NEW: encourage model to predict correct number of actions)
+        if 'sequence_length' in predictions:
+            # Target: count of valid actions per gamestate
+            target_length = valid_mask.sum(dim=1).float()  # [B] - number of valid actions per gamestate
+            
+            # Normalize target length to [0, 1] range (divide by max_actions)
+            max_actions = valid_mask.shape[1]  # Should be 100
+            target_length_normalized = target_length / max_actions  # [B] - [0, 1]
+            
+            # Model prediction is already in [0, 1] range (sigmoid output)
+            pred_length_normalized = predictions['sequence_length']  # [B] - [0, 1]
+            
+            # Use MSE loss for sequence length prediction
+            sequence_length_loss = F.mse_loss(pred_length_normalized, target_length_normalized)
+            losses['sequence_length'] = sequence_length_loss
+            
+            # Debug: print sequence length predictions occasionally
+            if torch.rand(1).item() < 0.01:  # 1% of the time
+                print(f"🔍 Sequence Length Loss Debug:")
+                print(f"  - Target lengths (normalized): {target_length_normalized[:3].cpu().numpy()}")
+                print(f"  - Predicted lengths (normalized): {pred_length_normalized[:3].cpu().numpy()}")
+                print(f"  - Target lengths (raw): {target_length[:3].cpu().numpy()}")
+                print(f"  - Max actions: {max_actions}")
+        
+        # 5. Auxiliary Losses (only for relevant event types)
         aux_losses = self._compute_auxiliary_losses(
             predictions, targets, valid_mask, event_target, enum_sizes
         )
         losses.update(aux_losses)
         
-        # 5. Compute total weighted loss
+        # 6. Compute total weighted loss
         total_loss = sum(
             self.loss_weights.get(name, 1.0) * loss
             for name, loss in losses.items()

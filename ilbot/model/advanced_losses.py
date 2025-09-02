@@ -102,7 +102,8 @@ class AdvancedUnifiedEventLoss(nn.Module):
                  label_smoothing: float = 0.1,
                  uncertainty_weight: float = 0.1,
                  temporal_weight: float = 0.05,
-                 coherence_weight: float = 0.03):
+                 coherence_weight: float = 0.03,
+                 time_quantiles: list = [0.1, 0.5, 0.9]):
         super().__init__()
         
         self.data_config = data_config
@@ -112,6 +113,10 @@ class AdvancedUnifiedEventLoss(nn.Module):
         # Advanced loss components
         self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
         self.label_smoothing_loss = LabelSmoothingLoss(classes=self.event_types, smoothing=label_smoothing)
+        
+        # CRITICAL FIX: Add timing loss using PinballLoss
+        from .losses import PinballLoss
+        self.time_loss = PinballLoss(quantiles=time_quantiles, burst_aware=True)
         
         # Weights for different loss components
         self.uncertainty_weight = uncertainty_weight
@@ -167,26 +172,38 @@ class AdvancedUnifiedEventLoss(nn.Module):
         )
         losses['coordinates'] = coord_loss
         
-        # 3. Temporal Consistency Loss
+        # 3. CRITICAL FIX: Timing Prediction Loss (was missing!)
+        timing_loss = self._compute_timing_prediction_loss(
+            predictions, targets, valid_mask
+        )
+        losses['timing'] = timing_loss
+        
+        # 4. Temporal Consistency Loss
         temporal_loss = self._compute_temporal_consistency_loss(
             predictions, targets, valid_mask
         )
         losses['temporal'] = temporal_loss
         
-        # 4. Action Sequence Coherence Loss
+        # 5. CRITICAL FIX: Sequence Length Loss (was missing!)
+        sequence_length_loss = self._compute_sequence_length_loss(
+            predictions, targets, valid_mask
+        )
+        losses['sequence_length'] = sequence_length_loss
+        
+        # 6. Action Sequence Coherence Loss
         coherence_loss = self._compute_action_coherence_loss(
             predictions, targets, valid_mask
         )
         losses['coherence'] = coherence_loss
         
-        # 5. Distribution Regularization
+        # 7. Distribution Regularization
         if self.target_distribution is not None:
             dist_reg_loss = self._compute_distribution_regularization(
                 predictions['event_logits'], valid_mask
             )
             losses['distribution_reg'] = dist_reg_loss
         
-        # 6. Uncertainty Regularization
+        # 8. Uncertainty Regularization
         uncertainty_reg_loss = self._compute_uncertainty_regularization(
             predictions, valid_mask
         )
@@ -282,6 +299,31 @@ class AdvancedUnifiedEventLoss(nn.Module):
         
         return coord_loss
     
+    def _compute_timing_prediction_loss(self,
+                                      predictions: Dict[str, torch.Tensor],
+                                      targets: torch.Tensor,
+                                      valid_mask: torch.Tensor) -> torch.Tensor:
+        """
+        CRITICAL FIX: Compute timing prediction loss using PinballLoss
+        This was completely missing, causing the model to never learn timing!
+        """
+        if 'time_q' not in predictions:
+            return torch.tensor(0.0, device=targets.device)
+        
+        # Extract timing predictions and targets
+        time_predictions = predictions['time_q']  # [B, A, 3] - quantiles
+        time_targets = targets[..., 0]  # [B, A] - timing targets (column 0)
+        
+        # CRITICAL FIX: PinballLoss expects [B, A, Q] format, not flattened
+        # We need to pass the full tensors and let PinballLoss handle the masking internally
+        if time_predictions.numel() == 0:
+            return torch.tensor(0.0, device=time_predictions.device)
+        
+        # Use PinballLoss for quantile regression - pass the valid mask
+        timing_loss = self.time_loss(time_predictions, time_targets, valid_mask)
+        
+        return timing_loss
+    
     def _compute_temporal_consistency_loss(self,
                                          predictions: Dict[str, torch.Tensor],
                                          targets: torch.Tensor,
@@ -310,6 +352,28 @@ class AdvancedUnifiedEventLoss(nn.Module):
         timing_penalty = torch.mean(torch.clamp(time_diffs - 5.0, min=0.0) ** 2)
         
         return self.temporal_weight * timing_penalty
+    
+    def _compute_sequence_length_loss(self,
+                                    predictions: Dict[str, torch.Tensor],
+                                    targets: torch.Tensor,
+                                    valid_mask: torch.Tensor) -> torch.Tensor:
+        """
+        CRITICAL FIX: Compute sequence length prediction loss
+        This was completely missing, causing the model to never learn how many actions to predict!
+        """
+        if 'sequence_length' not in predictions:
+            return torch.tensor(0.0, device=targets.device)
+        
+        # Get predicted sequence lengths
+        predicted_lengths = predictions['sequence_length']  # [B] - predicted number of actions per gamestate
+        
+        # Calculate actual sequence lengths from valid mask
+        actual_lengths = valid_mask.sum(dim=1).float()  # [B] - actual number of valid actions per gamestate
+        
+        # Use MSE loss for sequence length prediction
+        sequence_length_loss = F.mse_loss(predicted_lengths, actual_lengths)
+        
+        return sequence_length_loss
     
     def _compute_action_coherence_loss(self,
                                      predictions: Dict[str, torch.Tensor],
@@ -418,8 +482,8 @@ class AdvancedUnifiedEventLoss(nn.Module):
             y_inf_penalty = torch.isinf(y_uncertainty).float().sum()
             
             # Penalize extremely small uncertainty (overconfidence)
-            x_overconf_penalty = torch.mean(torch.clamp(1.0 - x_uncertainty, min=0.0))
-            y_overconf_penalty = torch.mean(torch.clamp(1.0 - y_uncertainty, min=0.0))
+            x_overconf_penalty = torch.mean(torch.clamp(1.0 - x_uncertainty, min=0.0) ** 2)
+            y_overconf_penalty = torch.mean(torch.clamp(1.0 - y_uncertainty, min=0.0) ** 2)
             
             uncertainty_penalty += x_inf_penalty + y_inf_penalty + x_overconf_penalty + y_overconf_penalty
         

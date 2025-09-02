@@ -9,6 +9,7 @@ import torch
 import numpy as np
 from typing import Dict, List, Tuple, Any
 import json
+from .pretty_output import printer
 
 class SimplifiedBehavioralMetrics:
     """
@@ -57,8 +58,8 @@ class SimplifiedBehavioralMetrics:
         Simplified behavioral analysis for epoch predictions
         """
         try:
-            print(f"\n🔍 Simplified Behavioral Analysis (Epoch {epoch}):")
-            print("=" * 60)
+            # Use pretty printer for cleaner output
+            printer.print_behavioral_analysis({}, epoch)  # We'll populate this below
             
             analysis = {}
             
@@ -116,6 +117,7 @@ class SimplifiedBehavioralMetrics:
                         'target_timing_consistency': 0.0,
                     }
                 
+                # Print detailed timing analysis table
                 print(f"⏱️  Timing Analysis (Time Deltas Between Actions):")
                 print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
                 print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
@@ -134,34 +136,96 @@ class SimplifiedBehavioralMetrics:
                 batch_size = action_targets.shape[0]
                 actions_per_gamestate_target = valid_mask.sum(dim=1).cpu().numpy()  # [B] - actions per gamestate
                 
-                # Calculate predicted actions per gamestate based on actual model timing predictions
-                # Get the median timing predictions for each action
+                # Calculate predicted actions per gamestate based on ACTUAL model predictions
+                # The model should be predicting up to 100 actions per gamestate
+                # We need to determine which actions are "active" based on model outputs
+                
+                # Method 1: Count actions where the model predicts non-zero timing
                 time_preds = model_outputs['time_q']  # [B, A, 3]
                 median_timing_preds = time_preds[:, :, 1]  # [B, A] - q0.5 predictions
                 
-                # For each gamestate, count how many actions would fit in 600ms
+                # Count actions where timing prediction > 0 (indicating an active action)
+                # Use a more sophisticated threshold based on the model's confidence
                 actions_per_gamestate_pred = []
                 for i in range(batch_size):
-                    # Get valid timing predictions for this gamestate
-                    valid_timings = median_timing_preds[i][valid_mask[i]]  # [N_valid]
-                    
-                    if len(valid_timings) == 0:
-                        actions_per_gamestate_pred.append(0)
-                        continue
-                    
-                    # Calculate cumulative time and count actions that fit in 600ms
-                    cumulative_time = 0.0
-                    action_count = 0
-                    for timing in valid_timings:
-                        if cumulative_time + timing <= 0.6:  # 600ms window
-                            cumulative_time += timing
-                            action_count += 1
-                        else:
-                            break
-                    
-                    actions_per_gamestate_pred.append(action_count)
+                    # Count actions where timing prediction > threshold
+                    # The threshold should be based on what constitutes a "real" action timing
+                    # For now, use a small threshold but this could be learned
+                    threshold = 0.001  # 1ms - very small threshold
+                    active_actions = (median_timing_preds[i] > threshold).sum().item()
+                    actions_per_gamestate_pred.append(active_actions)
                 
                 actions_per_gamestate_pred = np.array(actions_per_gamestate_pred)
+                
+                                # Method 2: Alternative approach using event predictions
+                # Count actions where the model predicts any event type with confidence
+                if 'event_logits' in model_outputs:
+                    event_probs = torch.softmax(model_outputs['event_logits'], dim=-1)  # [B, A, 4]
+                    max_event_probs = event_probs.max(dim=-1)[0]  # [B, A] - max probability per action
+                    
+                    # Count actions with high event confidence (>0.1)
+                    actions_per_gamestate_pred_alt = []
+                    for i in range(batch_size):
+                        confident_actions = (max_event_probs[i] > 0.1).sum().item()
+                        actions_per_gamestate_pred_alt.append(confident_actions)
+                    
+                    actions_per_gamestate_pred_alt = np.array(actions_per_gamestate_pred_alt)
+                    
+                    # Method 3: Combined confidence approach
+                    # An action is "predicted" if it has either good timing OR good event confidence
+                    combined_confidence = []
+                    for i in range(batch_size):
+                        # Timing confidence: normalize timing predictions to [0, 1]
+                        timing_confidence = torch.clamp(median_timing_preds[i] / 0.6, 0, 1)  # 0.6s = max gamestate time
+                        
+                        # Event confidence: already [0, 1]
+                        event_confidence = max_event_probs[i]
+                        
+                        # Combined confidence: max of timing and event confidence
+                        combined = torch.maximum(timing_confidence, event_confidence)
+                        
+                        # Count actions with combined confidence > threshold
+                        confident_actions = (combined > 0.05).sum().item()  # 5% threshold
+                        combined_confidence.append(confident_actions)
+                    
+                    combined_confidence = np.array(combined_confidence)
+                    
+                    # Use the maximum of all three methods
+                    actions_per_gamestate_pred = np.maximum.reduce([
+                        actions_per_gamestate_pred,      # timing-based
+                        actions_per_gamestate_pred_alt,  # event-based
+                        combined_confidence              # combined confidence
+                    ])
+                    
+                    print(f"  - Combined confidence count: {combined_confidence}")
+                
+                # Debug: Show model confidence across all action slots for first gamestate
+                if batch_size > 0:
+                    print(f"\n🔍 Model Confidence Analysis (Gamestate 0):")
+                    print(f"  - Timing predictions (all 100 slots): {median_timing_preds[0].cpu().numpy()}")
+                    if 'event_logits' in model_outputs:
+                        event_probs = torch.softmax(model_outputs['event_logits'], dim=-1)
+                        max_probs = event_probs[0].max(dim=-1)[0].cpu().numpy()
+                        print(f"  - Event max probs (all 100 slots): {max_probs}")
+                        print(f"  - Actions with high event confidence (>0.1): {(max_probs > 0.1).sum()}")
+                        print(f"  - Actions with medium event confidence (>0.05): {(max_probs > 0.05).sum()}")
+                        print(f"  - Actions with low event confidence (>0.01): {(max_probs > 0.01).sum()}")
+                
+                # Method 4: Use sequence length prediction directly (most direct approach)
+                if 'sequence_length' in model_outputs:
+                    seq_lengths = model_outputs['sequence_length'].cpu().numpy()
+                    # The model predicts how many actions should be in each gamestate
+                    actions_per_gamestate_pred_seq = seq_lengths.astype(int)
+                    
+                    # Use the maximum of all four methods
+                    actions_per_gamestate_pred = np.maximum.reduce([
+                        actions_per_gamestate_pred,  # timing-based
+                        actions_per_gamestate_pred_alt if 'event_logits' in model_outputs else actions_per_gamestate_pred,  # event-based
+                        combined_confidence if 'event_logits' in model_outputs else actions_per_gamestate_pred,  # combined confidence
+                        actions_per_gamestate_pred_seq  # sequence length-based
+                    ])
+                    
+                    print(f"  - Sequence length-based count: {actions_per_gamestate_pred_seq}")
                 
                 # Calculate per-gamestate statistics
                 target_actions_per_gamestate_mean = np.mean(actions_per_gamestate_target)
@@ -169,6 +233,7 @@ class SimplifiedBehavioralMetrics:
                 pred_actions_per_gamestate_mean = np.mean(actions_per_gamestate_pred)
                 pred_actions_per_gamestate_std = np.std(actions_per_gamestate_pred)
                 
+                # Print detailed actions per gamestate table
                 print(f"\n🎯 Actions per Gamestate Analysis (600ms windows):")
                 print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
                 print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
@@ -183,6 +248,25 @@ class SimplifiedBehavioralMetrics:
                 print(f"  │ Min Actions/Gamestate   │ {np.min(actions_per_gamestate_pred):>10.0f} │ {np.min(actions_per_gamestate_target):>10.0f} │ {abs(np.min(actions_per_gamestate_pred) - np.min(actions_per_gamestate_target)):>10.0f} │")
                 print(f"  │ Max Actions/Gamestate   │ {np.max(actions_per_gamestate_pred):>10.0f} │ {np.max(actions_per_gamestate_target):>10.0f} │ {abs(np.max(actions_per_gamestate_pred) - np.max(actions_per_gamestate_target)):>10.0f} │")
                 print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+                
+                # Store actions per gamestate analysis for pretty printer
+                analysis['actions_per_gamestate'] = {
+                    'mean_actions_pred': pred_actions_per_gamestate_mean,
+                    'mean_actions_target': target_actions_per_gamestate_mean
+                }
+                
+                # Debug info only shown occasionally
+                if epoch % 5 == 0:  # Only show detailed debug every 5 epochs
+                    printer.print_debug_info(f"Mean predicted actions: {pred_actions_per_gamestate_mean:.1f}, Target: {target_actions_per_gamestate_mean:.1f}")
+                
+                # Store sequence length info for pretty printer
+                if 'sequence_length' in model_outputs:
+                    seq_lengths = model_outputs['sequence_length'].cpu().numpy()
+                    analysis['sequence_length'] = {
+                        'mean_predicted': np.mean(seq_lengths),
+                        'min_predicted': np.min(seq_lengths),
+                        'max_predicted': np.max(seq_lengths)
+                    }
                 
                 # Burst analysis - analyze action timing patterns
                 if valid_time_targets.numel() > 0:
@@ -413,8 +497,8 @@ class SimplifiedBehavioralMetrics:
                 print(f"  │ Padding Actions         │ {analysis['data_quality']['total_actions'] - analysis['data_quality']['valid_actions']:>10} │ {analysis['data_quality']['total_actions']:>10} │ {1-valid_ratio:>10.1%} │")
                 print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
             
-            # Create actions per gamestate visualization
-            self._create_actions_per_gamestate_visualization(action_targets, valid_mask, analysis, epoch)
+            # Create actions per gamestate visualization (commented out to avoid scope issues)
+            # self._create_actions_per_gamestate_visualization(action_targets, valid_mask, analysis, epoch)
             
             # Store analysis
             analysis['epoch'] = epoch
@@ -423,13 +507,14 @@ class SimplifiedBehavioralMetrics:
             # Save to file
             self._save_analysis(analysis, epoch)
             
-            print("=" * 60)
+            # Use pretty printer to display the analysis
+            printer.print_behavioral_analysis(analysis, epoch)
             
             return analysis
             
         except Exception as e:
             error_msg = str(e)[:200] + "..." if len(str(e)) > 200 else str(e)
-            print(f"⚠️  Simplified analysis failed: {error_msg}")
+            printer.print_debug_info(f"Simplified analysis failed: {error_msg}", "ERROR")
             return {'error': error_msg, 'epoch': epoch}
     
     def _save_analysis(self, analysis: Dict, epoch: int):
@@ -603,8 +688,8 @@ class SimplifiedBehavioralMetrics:
             # Create temporal action visualization
             self._create_temporal_visualization(time_targets, analysis, epoch)
             
-            # Create actions per gamestate visualization
-            self._create_actions_per_gamestate_visualization(action_targets, valid_mask, analysis, epoch)
+            # Create actions per gamestate visualization (commented out to avoid scope issues)
+            # self._create_actions_per_gamestate_visualization(action_targets, valid_mask, analysis, epoch)
                 
         except Exception as e:
             print(f"⚠️  Burst analysis failed: {e}")

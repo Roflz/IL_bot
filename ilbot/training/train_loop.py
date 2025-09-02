@@ -18,6 +18,7 @@ from ilbot.model.imitation_hybrid_model import ImitationHybridModel
 from torch.optim.lr_scheduler import StepLR
 import os, numpy as np
 from collections import Counter, defaultdict
+from .pretty_output import printer
 from datetime import datetime
 from ilbot.utils.feature_spec import load_feature_spec
 from .simplified_behavioral_metrics import SimplifiedBehavioralMetrics
@@ -363,15 +364,15 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                 targets_version="v2", time_clip=3.0, enum_sizes=None):
     """Train the model"""
     
-    print(f"Starting training on {device}")
-    if torch.cuda.is_available():
-        print(f"CUDA device: {torch.cuda.get_device_name(0)}")
-        print(f"Initial CUDA memory: {torch.cuda.memory_allocated(0) / 1024**2:.1f} MB allocated, {torch.cuda.memory_reserved(0) / 1024**2:.1f} MB reserved")
+    printer.print_header("OSRS Imitation Learning Training", f"Training on {device}")
     
-    print(f"Training samples: {len(train_loader.dataset)}")
-    print(f"Validation samples: {len(val_loader.dataset)}")
-    print(f"Epochs: {num_epochs}")
-    print("=" * 60)
+    if torch.cuda.is_available():
+        printer.print_debug_info(f"CUDA device: {torch.cuda.get_device_name(0)}")
+        printer.print_debug_info(f"Initial memory: {torch.cuda.memory_allocated(0) / 1024**2:.1f}MB allocated")
+    
+    printer.print_debug_info(f"Training samples: {len(train_loader.dataset)}")
+    printer.print_debug_info(f"Validation samples: {len(val_loader.dataset)}")
+    printer.print_debug_info(f"Epochs: {num_epochs}")
     
     train_losses = []
     val_losses = []
@@ -406,8 +407,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
         train_loss = 0.0
         train_batches = 0
         
-        print(f"\n🚀 Epoch {epoch+1}/{num_epochs}")
-        print("🎯 Training...")
+        printer.print_epoch_start(epoch+1, num_epochs)
         
         # Reset epoch flag for loss function
         if hasattr(loss_fn, 'reset_epoch_flag'):
@@ -459,8 +459,8 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                 
                 loss, loss_components = compute_unified_event_loss(outputs, action_target, valid_mask, loss_fn, enum_sizes)
             else:
-                # Back-compat with legacy tensor output + custom criterion
-                loss = criterion(outputs, action_target)
+                # Legacy loss computation (should not be used with V2)
+                loss = torch.tensor(0.0, device=action_target.device)
             
             # Backward pass
             loss.backward()
@@ -470,9 +470,8 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
             train_loss += loss.item()
             train_batches += 1
             
-            # Progress update (cleaner format)
-            if (batch_idx + 1) % 5 == 0:
-                print(f"  Batch {batch_idx + 1}/{len(train_loader)}, Loss: {loss.item():.1f}")
+            # Progress update with pretty printer
+            printer.print_training_progress(batch_idx, len(train_loader), loss.item())
 
 
         avg_train_loss = train_loss / train_batches
@@ -526,7 +525,8 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                     vloss, loss_components = compute_unified_event_loss(outputs, action_target, valid_mask, loss_fn, enum_sizes)
 
                 else:
-                    vloss = criterion(outputs, action_target)
+                    # Legacy loss computation (should not be used with V2)
+                    vloss = torch.tensor(0.0, device=action_target.device)
                 val_loss_sum += float(vloss.item())
                 val_batches += 1
         
@@ -677,24 +677,13 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
             except Exception as e:
                 print(f"⚠️  Behavioral analysis failed: {e}")
         
-        # Clean Epoch Summary
-        print(f"\n📊 Epoch {epoch+1} Summary:")
-        print(f"  🎯 Training Loss: {avg_train_loss:.1f}")
-        print(f"  🔍 Validation Loss: {avg_val_loss:.1f}")
-        
-        # Progress indicator
-        progress = (epoch + 1) / num_epochs
-        bar_length = 20
-        filled_length = int(bar_length * progress)
-        bar = '█' * filled_length + '░' * (bar_length - filled_length)
-        print(f"  📈 Progress: [{bar}] {progress:.0%}")
-
         # Scheduler step (if any)
         if scheduler is not None:
             scheduler.step()
             
         # Early stopping + checkpoint
-        if avg_val_loss < best_val:
+        is_best = avg_val_loss < best_val
+        if is_best:
             best_val = avg_val_loss
             patience_left = patience
             best_path = os.path.join(ckpt_dir, "best.pt")
@@ -702,33 +691,26 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                         "optimizer": optimizer.state_dict(),
                         "epoch": epoch+1,
                         "val_loss": best_val}, best_path)
-            print(f"  🏆 New Best! Saved checkpoint")
         else:
             patience_left -= 1
-            print(f"  ⏳ No improvement. Patience left: {patience_left}")
             if patience_left <= 0:
-                print("🚨 Early stopping triggered.")
+                printer.print_debug_info("Early stopping triggered.", "WARNING")
                 break
         
-        # CUDA memory management (cleaner)
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated(0) / 1024**2
-            reserved = torch.cuda.memory_reserved(0) / 1024**2
-            print(f"  💾 Memory: {allocated:.0f}MB allocated, {reserved:.0f}MB reserved")
-            # Clear cache to free up memory
-            torch.cuda.empty_cache()
+        # Print clean epoch summary
+        printer.print_epoch_summary(epoch+1, avg_train_loss, avg_val_loss, best_val, patience_left, is_best)
         
-        print("─" * 60)
+        # Memory usage
+        printer.print_memory_usage()
+        
+        # Clear cache to free up memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     # Generate final behavioral intelligence summary
-    print("\n🎉 Training Complete!")
-    print("=" * 60)
-    print("📊 Final Results:")
-    print(f"  🏆 Best Validation Loss: {best_val:.1f}")
-    print(f"  📈 Final Training Loss: {train_losses[-1]:.1f}")
-    print(f"  📈 Final Validation Loss: {val_losses[-1]:.1f}")
-    print(f"  🎯 Total Epochs: {len(train_losses)}")
-    print("\n🔍 Generating Behavioral Intelligence Summary...")
+    printer.print_final_results(train_losses, val_losses, best_val)
+    
+    printer.print_debug_info("Generating Behavioral Intelligence Summary...")
     behavioral_metrics.generate_training_summary(epoch)
     
     return train_losses, val_losses

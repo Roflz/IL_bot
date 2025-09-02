@@ -317,8 +317,16 @@ class CrossAttention(nn.Module):
         cross_features = self.attention(gamestate_features, screenshot_features, screenshot_features)
         return cross_features
 
-class ActionDecoder(nn.Module):
-    """Unified event system decoder with exclusive event classification."""
+class ActionSequenceDecoder(nn.Module):
+    """
+    New decoder that can predict variable-length action sequences.
+    
+    Key improvements:
+    1. Each action slot gets different predictions (no more .expand())
+    2. Sequence length prediction (how many actions in this gamestate?)
+    3. Attention-based sequence modeling
+    4. Proper masking for variable-length sequences
+    """
     
     def __init__(self, input_dim, *, max_actions: int, enum_sizes: dict, event_types: int):
         super().__init__()
@@ -326,113 +334,261 @@ class ActionDecoder(nn.Module):
         self.enum_sizes = enum_sizes
         self.event_types = event_types
         
-        # Shared feature processing
-        self.shared = nn.Sequential(
-            nn.Linear(input_dim, input_dim),
-            nn.GELU(),
-            nn.Linear(input_dim, input_dim),
+        # 1. Sequence length predictor (how many actions in this gamestate?)
+        self.sequence_length_head = nn.Sequential(
+            nn.Linear(input_dim, input_dim // 2),
+            nn.ReLU(),
+            nn.Linear(input_dim // 2, 1),
+            nn.Sigmoid()  # Output: [0, 1] -> multiply by max_actions
         )
         
-        # Unified event classification head: [CLICK, KEY, SCROLL, MOVE]
-        self.event_head = nn.Linear(input_dim, event_types)
+        # Initialize sequence length head to output reasonable values
+        # We want it to start predicting around 1-5 actions per gamestate initially
+        # This means sigmoid output should be around 0.01-0.05 (1-5/100)
+        with torch.no_grad():
+            # Set the final linear layer bias to output ~0.03 (3 actions per gamestate)
+            # The last layer is nn.Linear, not nn.Sigmoid
+            self.sequence_length_head[-2].bias.data.fill_(-3.5)  # sigmoid(-3.5) ≈ 0.03
         
-        # Time quantile head: [q10, q50, q90] for robust time prediction
+        # 2. Action position embeddings (learn different representations for each action slot)
+        self.action_position_embeddings = nn.Embedding(max_actions, input_dim // 4)
+        
+        # 3. Cross-attention for each action slot to attend to different parts of context
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=input_dim,
+            num_heads=8,
+            dropout=0.1,
+            batch_first=True
+        )
+        
+        # 4. Action-specific processing for each slot
+        self.action_processors = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(input_dim, input_dim),
+                nn.LayerNorm(input_dim),
+                nn.ReLU(),
+                nn.Dropout(0.1)
+            ) for _ in range(max_actions)
+        ])
+        
+        # 5. Output heads (same as before, but now each action slot is processed individually)
+        self.event_head = nn.Linear(input_dim, event_types)
         self.time_quantile_head = nn.Linear(input_dim, 3)
         
-        # Heteroscedastic XY heads: mean + uncertainty for cursor positions
-        self.x_mu_head = nn.Linear(input_dim, 1)      # X coordinate mean
-        self.x_logsig_head = nn.Linear(input_dim, 1)  # X coordinate log(std)
-        self.y_mu_head = nn.Linear(input_dim, 1)      # Y coordinate mean
-        self.y_logsig_head = nn.Linear(input_dim, 1)  # Y coordinate log(std)
+        # Coordinate heads
+        self.x_mu_head = nn.Linear(input_dim, 1)
+        self.x_logsig_head = nn.Linear(input_dim, 1)
+        self.y_mu_head = nn.Linear(input_dim, 1)
+        self.y_logsig_head = nn.Linear(input_dim, 1)
         
-        # Event-specific detail heads (only used when that event wins)
-        n_btn = int(enum_sizes["button"])
-        n_ka = int(enum_sizes["key_action"])
-        n_kid = int(enum_sizes["key_id"])
-        n_sy = int(enum_sizes["scroll"])
-        
-        self.button_head = nn.Linear(input_dim, n_btn)
-        self.key_action_head = nn.Linear(input_dim, n_ka)
-        self.key_id_head = nn.Linear(input_dim, n_kid)
-        self.scroll_y_head = nn.Linear(input_dim, n_sy)
+        # Event-specific heads
+        self.button_head = nn.Linear(input_dim, self.enum_sizes['button'])
+        self.key_action_head = nn.Linear(input_dim, self.enum_sizes['key_action'])
+        self.key_id_head = nn.Linear(input_dim, self.enum_sizes['key_id'])
+        self.scroll_y_head = nn.Linear(input_dim, self.enum_sizes['scroll'])
     
-    def forward(self, x):
+    def forward(self, context: torch.Tensor, action_history: Optional[torch.Tensor] = None, valid_mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """
-        Forward pass producing unified event system outputs.
+        Forward pass for action sequence prediction.
         
-        Returns:
-            dict with keys:
-            - event_logits: [B, A, 4] - logits for [CLICK, KEY, SCROLL, MOVE]
-            - time_q: [B, A, 3] - time quantiles [q10, q50, q90]
-            - x_mu, x_logsig: [B, A] - X coordinate mean + log(std)
-            - y_mu, y_logsig: [B, A] - Y coordinate mean + log(std)
-            - button_logits: [B, A, 4] - button classification (conditional)
-            - key_action_logits: [B, A, 3] - key action classification (conditional)
-            - key_id_logits: [B, A, vocab_size] - key ID classification (conditional)
-            - scroll_y_logits: [B, A, 3] - scroll direction (conditional)
-        """
-        s = self.shared(x)
-        B, A = x.size(0), x.size(1)
-        
-        # Process each action position individually
-        event_logits = []
-        time_q_raw = []
-        x_mu_list = []
-        x_logsig_list = []
-        y_mu_list = []
-        y_logsig_list = []
-        button_logits = []
-        key_action_logits = []
-        key_id_logits = []
-        scroll_y_logits = []
-        
-        for i in range(A):
-            # Get features for this action position
-            action_features = s[:, i, :]  # [B, F]
+        Args:
+            context: [B, input_dim] - fused context from gamestate + action history + temporal
+            action_history: [B, T, A, F] - optional action history for temporal context (T=10, A=100, F=7)
+            valid_mask: [B, max_actions] - optional mask indicating which actions are valid vs padded
             
-            # Process through each head
-            event_logits.append(self.event_head(action_features))           # [B, 4]
-            time_q_raw.append(self.time_quantile_head(action_features))     # [B, 3]
-            x_mu_list.append(self.x_mu_head(action_features))              # [B, 1]
-            x_logsig_list.append(self.x_logsig_head(action_features))      # [B, 1]
-            y_mu_list.append(self.y_mu_head(action_features))              # [B, 1]
-            y_logsig_list.append(self.y_logsig_head(action_features))      # [B, 1]
-            button_logits.append(self.button_head(action_features))         # [B, n_btn]
-            key_action_logits.append(self.key_action_head(action_features)) # [B, n_ka]
-            key_id_logits.append(self.key_id_head(action_features))         # [B, n_kid]
-            scroll_y_logits.append(self.scroll_y_head(action_features))     # [B, n_sy]
+        Returns:
+            Dict with action predictions for each slot
+        """
+        batch_size = context.size(0)
         
-        # Stack all outputs along action dimension
-        event_logits = torch.stack(event_logits, dim=1)           # [B, A, 4]
-        time_q_raw = torch.stack(time_q_raw, dim=1)              # [B, A, 3]
-        x_mu = torch.stack(x_mu_list, dim=1).squeeze(-1)        # [B, A]
-        x_logsig = torch.stack(x_logsig_list, dim=1).squeeze(-1) # [B, A]
-        y_mu = torch.stack(y_mu_list, dim=1).squeeze(-1)        # [B, A]
-        y_logsig = torch.stack(y_logsig_list, dim=1).squeeze(-1) # [B, A]
-        button_logits = torch.stack(button_logits, dim=1)         # [B, A, n_btn]
-        key_action_logits = torch.stack(key_action_logits, dim=1) # [B, A, n_ka]
-        key_id_logits = torch.stack(key_id_logits, dim=1)         # [B, A, n_kid]
-        scroll_y_logits = torch.stack(scroll_y_logits, dim=1)     # [B, A, n_sy]
+        # 1. Predict sequence length (how many actions in this gamestate?)
+        sequence_length_logits = self.sequence_length_head(context)  # [B, 1] - sigmoid output [0,1]
+        predicted_length = (sequence_length_logits * self.max_actions).round().long()  # [B, 1]
         
-        # Apply time positivity constraint with smaller bias for fast actions
-        time_q = F.softplus(time_q_raw) + 0.001  # Much smaller bias to allow fast actions
+        # Debug: Print sequence length predictions during training
+        if self.training and torch.rand(1).item() < 0.01:  # 1% of the time during training
+            print(f"🔍 Sequence Length Debug:")
+            print(f"  - Sigmoid output (0-1): {sequence_length_logits[:3].detach().cpu().numpy()}")
+            print(f"  - Predicted length: {predicted_length[:3].detach().cpu().numpy()}")
+            print(f"  - Max actions: {self.max_actions}")
+        
+        # 2. Process action history for temporal context and delta understanding
+        temporal_context = context
+        if action_history is not None:
+            # action_history: [B, T, A, F] where T=10, A=100, F=7
+            # Extract the most recent action history (last timestep)
+            recent_actions = action_history[:, -1, :, :]  # [B, A, F]
+            
+            # Extract timing information for delta understanding
+            # Column 0 is timestamp (delta time from previous action within this gamestate)
+            action_timings = recent_actions[:, :, 0]  # [B, A] - timing deltas
+            
+            # Create per-gamestate cumulative timing context (0ms to 600ms max)
+            # For each action slot, compute cumulative time from start of THIS gamestate
+            cumulative_times = torch.cumsum(action_timings, dim=1)  # [B, A]
+            
+            # Ensure cumulative times don't exceed gamestate duration (600ms = 0.6s)
+            # This prevents actions from spanning multiple gamestates
+            cumulative_times = torch.clamp(cumulative_times, 0.0, 0.6)
+            
+            # Create timing context for each action slot
+            timing_context = torch.zeros(batch_size, self.max_actions, 2).to(context.device)  # [B, A, 2]
+            timing_context[:, :, 0] = action_timings  # Delta time (relative to previous action)
+            timing_context[:, :, 1] = cumulative_times  # Cumulative time (0ms to 600ms within gamestate)
+            
+            # Process action history through a simple MLP to get temporal context
+            # Flatten action history: [B, A, F] -> [B, A*F]
+            action_history_flat = recent_actions.view(batch_size, -1)  # [B, A*F]
+            
+            # Project to context dimension
+            action_history_proj = nn.Linear(action_history_flat.size(-1), context.size(-1) // 4).to(context.device)
+            action_history_encoded = action_history_proj(action_history_flat)  # [B, input_dim//4]
+            
+            # Process timing context
+            timing_flat = timing_context.view(batch_size, -1)  # [B, A*2]
+            timing_proj = nn.Linear(timing_flat.size(-1), context.size(-1) // 8).to(context.device)
+            timing_encoded = timing_proj(timing_flat)  # [B, input_dim//8]
+            
+            # Combine with main context
+            temporal_context = torch.cat([context, action_history_encoded, timing_encoded], dim=-1)  # [B, input_dim + input_dim//4 + input_dim//8]
+            
+            # Project back to original context dimension
+            context_proj = nn.Linear(temporal_context.size(-1), context.size(-1)).to(context.device)
+            temporal_context = context_proj(temporal_context)  # [B, input_dim]
+        
+        # 3. Create action position embeddings for each slot with boundary awareness
+        action_positions = torch.arange(self.max_actions, device=context.device)  # [max_actions]
+        position_embeddings = self.action_position_embeddings(action_positions)  # [max_actions, input_dim//4]
+        
+        # Add boundary awareness: mark the last action slot as a boundary
+        boundary_info = torch.zeros(batch_size, self.max_actions, 1).to(context.device)  # [B, A, 1]
+        if valid_mask is not None:
+            # Mark the last valid action in each sequence as a boundary
+            for b in range(batch_size):
+                valid_indices = torch.where(valid_mask[b])[0]
+                if len(valid_indices) > 0:
+                    last_valid_idx = valid_indices[-1].item()
+                    boundary_info[b, last_valid_idx, 0] = 1.0  # Mark as boundary
+        else:
+            # If no valid mask, mark the last slot as boundary
+            boundary_info[:, -1, 0] = 1.0
+        
+        # 4. Expand temporal context and combine with position embeddings and boundary info
+        context_expanded = temporal_context.unsqueeze(1).expand(-1, self.max_actions, -1)  # [B, max_actions, input_dim]
+        position_emb_expanded = position_embeddings.unsqueeze(0).expand(batch_size, -1, -1)  # [B, max_actions, input_dim//4]
+        
+        # Pad position embeddings to match context dimension
+        position_emb_padded = F.pad(position_emb_expanded, (0, temporal_context.size(-1) - position_emb_expanded.size(-1)))
+        
+        # Add boundary information to context
+        boundary_expanded = boundary_info.expand(-1, -1, temporal_context.size(-1))  # [B, max_actions, input_dim]
+        
+        # 5. Combine context with position information and boundary awareness
+        combined_context = context_expanded + position_emb_padded + boundary_expanded  # [B, max_actions, input_dim]
+        
+        # 6. Cross-attention: let each action slot attend to different parts of the context
+        # Query: each action slot, Key/Value: the combined context
+        
+        # Create attention mask for padding awareness
+        attention_mask = None
+        if valid_mask is not None:
+            # Create attention mask: [B, max_actions, max_actions]
+            # Mask out padded slots so they don't attend to anything
+            attention_mask = valid_mask.unsqueeze(1).expand(-1, self.max_actions, -1)  # [B, max_actions, max_actions]
+            # Also mask out padded slots from being attended to
+            attention_mask = attention_mask & valid_mask.unsqueeze(2).expand(-1, -1, self.max_actions)
+            
+            # Convert to the format expected by MultiheadAttention
+            # MultiheadAttention expects [B*num_heads, seq_len, seq_len] for 3D mask
+            num_heads = self.cross_attention.num_heads
+            attention_mask = attention_mask.unsqueeze(1).expand(-1, num_heads, -1, -1)  # [B, num_heads, max_actions, max_actions]
+            attention_mask = attention_mask.reshape(-1, self.max_actions, self.max_actions)  # [B*num_heads, max_actions, max_actions]
+        
+        attended_context, _ = self.cross_attention(
+            query=combined_context,  # [B, max_actions, input_dim]
+            key=combined_context,    # [B, max_actions, input_dim]
+            value=combined_context,  # [B, max_actions, input_dim]
+            attn_mask=attention_mask  # [B, max_actions, max_actions] - NEW: padding awareness
+        )
+        
+        # 7. Process each action slot individually
+        action_features = []
+        for i in range(self.max_actions):
+            slot_context = attended_context[:, i, :]  # [B, input_dim]
+            processed = self.action_processors[i](slot_context)  # [B, input_dim]
+            action_features.append(processed)
+        
+        # Stack all action features: [B, max_actions, input_dim]
+        action_features = torch.stack(action_features, dim=1)
+        
+        # 8. Generate predictions for each action slot
+        outputs = {}
+        
+        # Event classification
+        outputs['event_logits'] = self.event_head(action_features)  # [B, max_actions, event_types]
+        
+        # Time quantiles
+        time_q_raw = self.time_quantile_head(action_features)  # [B, max_actions, 3]
+        outputs['time_q'] = F.softplus(time_q_raw) + 0.001  # Ensure positivity
+        
+        # Coordinates
+        x_mu = self.x_mu_head(action_features).squeeze(-1)  # [B, max_actions]
+        x_logsig = self.x_logsig_head(action_features).squeeze(-1)  # [B, max_actions]
+        y_mu = self.y_mu_head(action_features).squeeze(-1)  # [B, max_actions]
+        y_logsig = self.y_logsig_head(action_features).squeeze(-1)  # [B, max_actions]
         
         # Apply sigmoid to coordinate predictions to ensure [0, 1] range
-        x_mu_normalized = torch.sigmoid(x_mu)  # [B, A] - normalized X coordinates
-        y_mu_normalized = torch.sigmoid(y_mu)  # [B, A] - normalized Y coordinates
+        outputs['x_mu'] = torch.sigmoid(x_mu.clone())  # [B, max_actions] - normalized [0, 1]
+        outputs['x_logsig'] = x_logsig  # [B, max_actions]
+        outputs['y_mu'] = torch.sigmoid(y_mu.clone())  # [B, max_actions] - normalized [0, 1]
+        outputs['y_logsig'] = y_logsig  # [B, max_actions]
         
-        return {
-            "event_logits": event_logits,           # [B, A, 4]
-            "time_q": time_q,                       # [B, A, 3]
-            "x_mu": x_mu_normalized,               # [B, A] - normalized [0, 1]
-            "x_logsig": x_logsig,                  # [B, A]
-            "y_mu": y_mu_normalized,               # [B, A] - normalized [0, 1]
-            "y_logsig": y_logsig,                  # [B, A]
-            "button_logits": button_logits,        # [B, A, n_btn]
-            "key_action_logits": key_action_logits, # [B, A, n_ka]
-            "key_id_logits": key_id_logits,        # [B, A, n_kid]
-            "scroll_y_logits": scroll_y_logits,    # [B, A, n_sy]
-        }
+        # Event-specific details
+        outputs['button_logits'] = self.button_head(action_features)  # [B, max_actions, button_types]
+        outputs['key_action_logits'] = self.key_action_head(action_features)  # [B, max_actions, key_action_types]
+        outputs['key_id_logits'] = self.key_id_head(action_features)  # [B, max_actions, key_id_types]
+        outputs['scroll_y_logits'] = self.scroll_y_head(action_features)  # [B, max_actions, scroll_types]
+        
+        # Add sequence length prediction
+        outputs['sequence_length'] = predicted_length.squeeze(-1)  # [B]
+        
+        # 9. Apply padding mask to outputs (ensure padded slots produce neutral predictions)
+        if valid_mask is not None:
+            # Create mask for invalid slots
+            invalid_mask = ~valid_mask  # [B, max_actions]
+            
+            # Mask out invalid slots in all outputs
+            for key, value in outputs.items():
+                if key == 'sequence_length':
+                    continue  # Don't mask sequence length prediction
+                
+                if value.dim() == 2:  # [B, max_actions]
+                    # For 2D outputs, create new tensor with masked values
+                    if key in ['x_mu', 'y_mu']:
+                        masked_value = value.clone()
+                        masked_value[invalid_mask] = 0.5  # Neutral position (center of screen)
+                        outputs[key] = masked_value
+                    elif key in ['x_logsig', 'y_logsig']:
+                        masked_value = value.clone()
+                        masked_value[invalid_mask] = -2.0  # High uncertainty
+                        outputs[key] = masked_value
+                    else:
+                        masked_value = value.clone()
+                        masked_value[invalid_mask] = 0.0  # Neutral value
+                        outputs[key] = masked_value
+                elif value.dim() == 3:  # [B, max_actions, features]
+                    # For 3D outputs, handle differently based on content
+                    if key == 'time_q':
+                        # Don't mask time predictions - let the model learn to predict 0 for invalid slots
+                        # This allows the model to learn which slots should have actions
+                        pass
+                    else:
+                        # For logits, set invalid slots to very negative values
+                        masked_value = value.clone()
+                        masked_value[invalid_mask] = -1e9  # Very negative logits (no prediction)
+                        outputs[key] = masked_value
+        
+        return outputs
 
     @torch.no_grad()
     def _invert_time(self, t: torch.Tensor) -> torch.Tensor:
@@ -589,8 +745,8 @@ class ImitationHybridModel(nn.Module):
             nn.Dropout(0.2)
         )
         
-                # 5. Action Decoder (Unified Event System)
-        self.action_decoder = ActionDecoder(
+                # 5. Action Sequence Decoder (New architecture for variable-length sequences)
+        self.action_decoder = ActionSequenceDecoder(
             input_dim=hidden_dim,
             max_actions=self.max_actions,
             enum_sizes=self.enum_sizes,
@@ -618,13 +774,14 @@ class ImitationHybridModel(nn.Module):
                     elif 'bias' in name:
                         nn.init.zeros_(param)
     
-    def forward(self, temporal_sequence: torch.Tensor, action_sequence: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, temporal_sequence: torch.Tensor, action_sequence: torch.Tensor, valid_mask: Optional[torch.Tensor] = None) -> dict[str, torch.Tensor]:
         """
         Forward pass for the unified event system model.
         
         Args:
             temporal_sequence: (B, T, D) - Batch of temporal gamestate sequences
             action_sequence: (B, T, A, F) - Batch of action sequences (F=7 for V2 actions)
+            valid_mask: (B, A) - Optional mask indicating which actions are valid vs padded
         
         Returns:
             dict of unified event system outputs
@@ -733,12 +890,9 @@ class ImitationHybridModel(nn.Module):
         
         fused_output = self.fusion_layer(fused_features)
         
-        # Expand fused output to cover all action positions
-        # fused_output: [B, hidden_dim] -> [B, max_actions, hidden_dim]
-        fused_output = fused_output.unsqueeze(1).expand(-1, self.max_actions, -1)
-        
-        # 5. Return unified event system outputs
-        return self.action_decoder(fused_output)  # dict of heads
+        # 5. Return action sequence predictions using new decoder
+        # The new decoder takes [B, hidden_dim] context and produces [B, max_actions, ...] outputs
+        return self.action_decoder(fused_output, action_sequence, valid_mask)  # dict of heads
     
 
     
@@ -755,7 +909,7 @@ class ImitationHybridModel(nn.Module):
             'hidden_dim': self.hidden_dim
         }
 
-def create_model(data_config: Dict = None, model_config: Dict = None, data_dir: str = None) -> ImitationHybridModel:
+def create_model(data_config: Dict = None, model_config: Dict = None, data_dir: str = None, feature_spec: Dict = None) -> ImitationHybridModel:
     """Factory function to create the model with data-driven configuration"""
     if data_config is None:
         # Create default data config for testing
@@ -775,17 +929,18 @@ def create_model(data_config: Dict = None, model_config: Dict = None, data_dir: 
             'num_layers': 6
         }
     
-    # Load feature specification if data_dir is provided
-    feature_spec = {}
-    if data_dir:
-        try:
-            from pathlib import Path
-            from ilbot.utils.feature_spec import load_feature_spec
-            feature_spec = load_feature_spec(Path(data_dir))
-            # Successfully loaded feature spec
-        except Exception as e:
-            print(f"WARNING: Could not load feature spec: {e}")
-            feature_spec = {}
+    # Load feature specification if data_dir is provided or use provided feature_spec
+    if feature_spec is None:
+        feature_spec = {}
+        if data_dir:
+            try:
+                from pathlib import Path
+                from ilbot.utils.feature_spec import load_feature_spec
+                feature_spec = load_feature_spec(Path(data_dir))
+                # Successfully loaded feature spec
+            except Exception as e:
+                print(f"WARNING: Could not load feature spec: {e}")
+                feature_spec = {}
     
     model = ImitationHybridModel(data_config=data_config, feature_spec=feature_spec, **model_config)
     return model
