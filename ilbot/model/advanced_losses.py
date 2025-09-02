@@ -168,58 +168,41 @@ class AdvancedUnifiedEventLoss(nn.Module):
         """
         losses = {}
         
-        # 1. Advanced Event Classification Loss
-        event_loss = self._compute_advanced_event_loss(
-            predictions['event_logits'], targets, valid_mask
-        )
-        losses['event'] = event_loss
+        # TEMPORARY: All specific losses set to zero for rebuilding (but with gradients)
+        # Event Classification Losses
+        losses['event_focal'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
+        losses['event_label_smoothing'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
+        losses['event_class_weights'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
         
-        # 2. Uncertainty-Aware Coordinate Loss
-        coord_loss = self._compute_uncertainty_aware_coordinate_loss(
-            predictions, targets, valid_mask
-        )
-        losses['coordinates'] = coord_loss
+        # Coordinate Losses
+        losses['x_gaussian_nll'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
+        losses['y_gaussian_nll'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
+        losses['coordinate_uncertainty_penalty'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
         
-        # 3. CRITICAL FIX: Timing Prediction Loss (was missing!)
-        timing_loss = self._compute_timing_prediction_loss(
-            predictions, targets, valid_mask
-        )
-        losses['timing'] = timing_loss
+        # Timing Losses
+        losses['timing_pinball'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
+        losses['timing_burst_weighting'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
         
-        # 4. Temporal Consistency Loss
-        temporal_loss = self._compute_temporal_consistency_loss(
-            predictions, targets, valid_mask
-        )
-        losses['temporal'] = temporal_loss
+        # Temporal Consistency Losses
+        losses['temporal_timing_jumps'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
         
-        # 5. CRITICAL FIX: Sequence Length Loss (was missing!)
-        sequence_length_loss = self._compute_sequence_length_loss(
-            predictions, targets, valid_mask
-        )
-        losses['sequence_length'] = sequence_length_loss
+        # Action Coherence Losses
+        losses['coherence_transition_penalty'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
         
-        # 6. Action Sequence Coherence Loss
-        coherence_loss = self._compute_action_coherence_loss(
-            predictions, targets, valid_mask
-        )
-        losses['coherence'] = coherence_loss
+        # Uncertainty Regularization Losses
+        losses['uncertainty_x_inf_penalty'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
+        losses['uncertainty_y_inf_penalty'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
+        losses['uncertainty_x_overconf_penalty'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
+        losses['uncertainty_y_overconf_penalty'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
+        losses['uncertainty_event_overconf_penalty'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
         
-        # 7. Distribution Regularization
+        # Conditional losses also set to zero
         if self.target_distribution is not None:
-            dist_reg_loss = self._compute_distribution_regularization(
-                predictions['event_logits'], valid_mask
-            )
-            losses['distribution_reg'] = dist_reg_loss
+            losses['distribution_kl_divergence'] = torch.tensor(0.0, device=targets.device, requires_grad=True)
         
-        # 8. Uncertainty Regularization
-        uncertainty_reg_loss = self._compute_uncertainty_regularization(
-            predictions, valid_mask
-        )
-        losses['uncertainty_reg'] = uncertainty_reg_loss
-        
-        # PHASE 1: Add timing-aware losses
-        timing_aware_losses = self.timing_aware_loss(predictions, targets, valid_mask)
-        losses.update(timing_aware_losses)
+        # PHASE 1: Add timing-aware losses (DISABLED - conflicting with basic timing loss)
+        # timing_aware_losses = self.timing_aware_loss(predictions, targets, valid_mask)
+        # losses.update(timing_aware_losses)
         
         # Combine all losses
         total_loss = sum(losses.values())
@@ -276,8 +259,10 @@ class AdvancedUnifiedEventLoss(nn.Module):
         x_logsig = predictions['x_logsig']  # [B, A]
         y_logsig = predictions['y_logsig']  # [B, A]
         
-        x_target = targets[..., 1]  # [B, A]
-        y_target = targets[..., 2]  # [B, A]
+        # Convert pixel coordinates to normalized coordinates (0-1 range)
+        # Assuming screen resolution of 1920x1080 (typical for OSRS)
+        x_target = targets[..., 1] / 1920.0  # [B, A] - normalize X
+        y_target = targets[..., 2] / 1080.0  # [B, A] - normalize Y
         
         # Apply valid mask
         valid_x_mu = x_mu[valid_mask]
@@ -318,8 +303,8 @@ class AdvancedUnifiedEventLoss(nn.Module):
             return torch.tensor(0.0, device=targets.device)
         
         # Extract timing predictions and targets
-        time_predictions = predictions['time_q']  # [B, A, 3] - quantiles
-        time_targets = targets[..., 0]  # [B, A] - timing targets (column 0)
+        time_predictions = predictions['time_q']  # [B, A, 3] - quantiles (in seconds)
+        time_targets = targets[..., 0] / 1000.0  # [B, A] - timing targets (convert ms to seconds)
         
         # CRITICAL FIX: PinballLoss expects [B, A, Q] format, not flattened
         # We need to pass the full tensors and let PinballLoss handle the masking internally

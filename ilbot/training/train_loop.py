@@ -341,6 +341,48 @@ def clamp_time(t, time_div, time_clip, already_scaled=False):
 
 import torch
 import torch.nn.functional as F
+from typing import Dict
+
+def _print_combined_loss_components_table(epoch: int, train_components: Dict[str, float], val_components: Dict[str, float]):
+    """Print a combined table of training and validation loss components"""
+    if not train_components and not val_components:
+        return
+    
+    print(f"\n📊 Loss Components Comparison (Epoch {epoch}):")
+    print(f"  ┌─────────────────────────────────────┬──────────────┬──────────────┬──────────────┬──────────────┐")
+    print(f"  │ Loss Component                      │ Train Value  │ Train %      │ Val Value    │ Val %        │")
+    print(f"  ├─────────────────────────────────────┼──────────────┼──────────────┼──────────────┼──────────────┤")
+    
+    # Get all unique component names
+    all_components = set(train_components.keys()) | set(val_components.keys())
+    
+    # Calculate totals
+    train_total = sum(train_components.values()) if train_components else 0
+    val_total = sum(val_components.values()) if val_components else 0
+    
+    # Sort components by training value (descending), fallback to validation value
+    sorted_components = sorted(all_components, key=lambda x: (
+        train_components.get(x, 0), 
+        val_components.get(x, 0)
+    ), reverse=True)
+    
+    for component_name in sorted_components:
+        train_value = train_components.get(component_name, 0)
+        val_value = val_components.get(component_name, 0)
+        
+        # Calculate percentage based on absolute total to handle negative totals
+        train_total_abs = sum(abs(v) for v in train_components.values()) if train_components else 0
+        val_total_abs = sum(abs(v) for v in val_components.values()) if val_components else 0
+        
+        train_percentage = (train_value / train_total_abs * 100) if train_total_abs > 0 else 0
+        val_percentage = (val_value / val_total_abs * 100) if val_total_abs > 0 else 0
+        
+        print(f"  │ {component_name:<35} │ {train_value:>12.6f} │ {train_percentage:>11.1f}% │ {val_value:>12.6f} │ {val_percentage:>11.1f}% │")
+    
+    print(f"  ├─────────────────────────────────────┼──────────────┼──────────────┼──────────────┼──────────────┤")
+    print(f"  │ {'Total':<35} │ {train_total:>12.6f} │ {'100.0':>11}% │ {val_total:>12.6f} │ {'100.0':>11}% │")
+    print(f"  └─────────────────────────────────────┴──────────────┴──────────────┴──────────────┴──────────────┘")
+
 
 def compute_unified_event_loss(predictions, targets, valid_mask, loss_fn, enum_sizes):
     """
@@ -389,6 +431,8 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
     
     train_losses = []
     val_losses = []
+    train_loss_components = []  # Store loss components for each epoch
+    val_loss_components = []    # Store loss components for each epoch
     
     if use_class_weights:
         print("Estimating class weights on train set (masked)…")
@@ -482,6 +526,11 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
 
                 
                 loss, loss_components = compute_unified_event_loss(outputs, action_target, valid_mask, loss_fn, enum_sizes)
+                
+                # Store loss components for this batch
+                if not hasattr(train_model, 'batch_loss_components'):
+                    train_model.batch_loss_components = []
+                train_model.batch_loss_components.append(loss_components)
             else:
                 # Legacy loss computation (should not be used with V2)
                 loss = torch.tensor(0.0, device=action_target.device)
@@ -501,9 +550,24 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
         avg_train_loss = train_loss / train_batches
         train_losses.append(avg_train_loss)
         
+        # Average loss components for this epoch
+        if hasattr(train_model, 'batch_loss_components') and train_model.batch_loss_components:
+            epoch_train_components = {}
+            for component_name in train_model.batch_loss_components[0].keys():
+                component_values = [batch_components[component_name] for batch_components in train_model.batch_loss_components]
+                epoch_train_components[component_name] = sum(component_values) / len(component_values)
+            train_loss_components.append(epoch_train_components)
+            # Clear batch components for next epoch
+            train_model.batch_loss_components = []
+        else:
+            train_loss_components.append({})
+        
         # Clean Epoch Summary
         print(f"\n📊 Epoch {epoch+1} Summary:")
         print(f"  🎯 Training Loss: {avg_train_loss:.1f}")
+        
+        # Store training components for combined table
+        current_train_components = train_loss_components[-1] if train_loss_components and train_loss_components[-1] else {}
         
         # Validation
         print("Validating...")
@@ -567,6 +631,11 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                     # V2 only - use advanced unified event loss
                     valid_mask = batch['valid_mask'].to(device)
                     vloss, loss_components = compute_unified_event_loss(outputs, action_target, valid_mask, loss_fn, enum_sizes)
+                    
+                    # Store validation loss components for this batch
+                    if not hasattr(train_model, 'val_batch_loss_components'):
+                        train_model.val_batch_loss_components = []
+                    train_model.val_batch_loss_components.append(loss_components)
 
                 else:
                     # Legacy loss computation (should not be used with V2)
@@ -576,6 +645,22 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
         
         avg_val_loss = val_loss_sum / max(val_batches, 1)
         val_losses.append(avg_val_loss)
+        
+        # Average validation loss components for this epoch
+        if hasattr(train_model, 'val_batch_loss_components') and train_model.val_batch_loss_components:
+            epoch_val_components = {}
+            for component_name in train_model.val_batch_loss_components[0].keys():
+                component_values = [batch_components[component_name] for batch_components in train_model.val_batch_loss_components]
+                epoch_val_components[component_name] = sum(component_values) / len(component_values)
+            val_loss_components.append(epoch_val_components)
+            # Clear validation batch components for next epoch
+            train_model.val_batch_loss_components = []
+        else:
+            val_loss_components.append({})
+        
+        # Print combined loss components table
+        current_val_components = val_loss_components[-1] if val_loss_components and val_loss_components[-1] else {}
+        _print_combined_loss_components_table(epoch + 1, current_train_components, current_val_components)
         
         # Determine checkpoint saving logic
         is_best = avg_val_loss < best_val
@@ -633,6 +718,11 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
     printer.print_final_results(train_losses, val_losses, best_val)
     
     printer.print_debug_info("Generating Behavioral Intelligence Summary...")
+    
+    # Print final loss components table
+    if train_loss_components and val_loss_components:
+        print(f"\n🎯 Final Training Loss Components Summary:")
+        _print_combined_loss_components_table("Final", train_loss_components[-1], val_loss_components[-1])
     
     behavioral_metrics.generate_training_summary(
         epoch=epoch,

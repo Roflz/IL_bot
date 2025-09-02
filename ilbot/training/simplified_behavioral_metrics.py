@@ -255,8 +255,8 @@ class SimplifiedBehavioralMetrics:
             valid_targets = targets[valid_mask]
             
             if len(valid_targets) > 0:
-                # Target timing (column 0)
-                target_timing = valid_targets[:, 0]
+                # Target timing (column 0) - convert ms to seconds
+                target_timing = valid_targets[:, 0] / 1000.0
                 all_target_timing.append(target_timing)
                 
                 # Predicted timing
@@ -747,8 +747,8 @@ class SimplifiedBehavioralMetrics:
             valid_targets = targets[valid_mask]
             
             if len(valid_targets) > 0:
-                # Target timing (column 0)
-                target_timing = valid_targets[:, 0]
+                # Target timing (column 0) - convert ms to seconds
+                target_timing = valid_targets[:, 0] / 1000.0
                 all_target_timing.append(target_timing)
                 
                 # Predicted timing

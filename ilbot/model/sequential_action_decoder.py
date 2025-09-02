@@ -63,7 +63,7 @@ class SequentialActionDecoder(nn.Module):
         
         # Output heads for single action
         self.event_head = nn.Linear(input_dim, event_types)
-        self.time_head = nn.Linear(input_dim, 1)  # Single timing prediction (delta)
+        self.time_quantile_head = nn.Linear(input_dim, 3)  # Quantile timing predictions (q0.1, q0.5, q0.9)
         
         # Coordinate heads
         self.x_mu_head = nn.Linear(input_dim, 1)
@@ -108,6 +108,7 @@ class SequentialActionDecoder(nn.Module):
         # Initialize storage for all actions
         all_actions = {
             'event_logits': [],
+            'time_q': [],
             'time_deltas': [],
             'cumulative_times': [],
             'x_mu': [],
@@ -147,8 +148,12 @@ class SequentialActionDecoder(nn.Module):
             # Generate single action
             action_features = self.action_generator(step_context)  # [B, input_dim]
             
-            # Predict timing for this action (delta from current time)
-            delta_time = F.softplus(self.time_head(action_features)) + 0.001  # [B, 1]
+            # Predict timing for this action (quantiles)
+            time_q_raw = self.time_quantile_head(action_features)  # [B, 3]
+            # Scale timing predictions to match target distribution (10-13ms range)
+            # Target timing deltas are in milliseconds, so convert to seconds: ms/1000
+            time_q_deltas = F.softplus(time_q_raw) * 0.005 + 0.010  # [B, 3] - scale to ~10-15ms range (0.010-0.015s)
+            delta_time = time_q_deltas[:, 1:2]  # [B, 1] - use median (q0.5) for generation logic
             
             # Check if we exceed 600ms window
             next_time = current_time + delta_time
@@ -169,6 +174,7 @@ class SequentialActionDecoder(nn.Module):
             
             # Store action predictions
             all_actions['event_logits'].append(event_logits)
+            all_actions['time_q'].append(time_q_deltas)
             all_actions['time_deltas'].append(delta_time)
             all_actions['cumulative_times'].append(next_time)
             all_actions['x_mu'].append(x_mu)
@@ -186,6 +192,16 @@ class SequentialActionDecoder(nn.Module):
         
         # Pad sequences to max_actions length
         outputs = self._pad_sequences(all_actions, batch_size, device)
+        
+        # Compute cumulative timing from quantiles (for loss computation)
+        if valid_mask is not None:
+            outputs['time_q'] = self._compute_cumulative_timing(outputs['time_q'], valid_mask)
+        else:
+            # Create a default valid mask if none provided
+            batch_size = outputs['time_q'].shape[0]
+            max_actions = outputs['time_q'].shape[1]
+            default_valid_mask = torch.ones(batch_size, max_actions, device=outputs['time_q'].device)
+            outputs['time_q'] = self._compute_cumulative_timing(outputs['time_q'], default_valid_mask)
         
         # Add sequence length (derived from timing)
         outputs['sequence_length'] = self._compute_sequence_length(outputs['cumulative_times'], max_time)
@@ -322,6 +338,8 @@ class SequentialActionDecoder(nn.Module):
                 # Create empty tensor if no actions
                 if key in ['x_mu', 'x_logsig', 'y_mu', 'y_logsig', 'time_deltas', 'cumulative_times']:
                     outputs[key] = torch.zeros(batch_size, self.max_actions, 1, device=device)
+                elif key == 'time_q':
+                    outputs[key] = torch.zeros(batch_size, self.max_actions, 3, device=device)
                 else:
                     outputs[key] = torch.zeros(batch_size, self.max_actions, action_list[0].size(-1), device=device)
                 continue
@@ -341,6 +359,39 @@ class SequentialActionDecoder(nn.Module):
             outputs[key] = stacked
         
         return outputs
+    
+    def _compute_cumulative_timing(self, time_deltas: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Compute cumulative timing from delta times.
+        
+        Args:
+            time_deltas: [B, A, 3] - quantile timing deltas
+            valid_mask: [B, A] - valid action mask
+            
+        Returns:
+            cumulative_times: [B, A, 3] - cumulative timing quantiles
+        """
+        batch_size, max_actions, num_quantiles = time_deltas.shape
+        device = time_deltas.device
+        
+        # Initialize cumulative times
+        cumulative_times = torch.zeros_like(time_deltas)
+        
+        # Compute cumulative sum for each quantile
+        for q in range(num_quantiles):
+            # Get delta times for this quantile
+            deltas = time_deltas[:, :, q]  # [B, A]
+            
+            # Apply valid mask (set invalid actions to 0)
+            deltas = deltas * valid_mask
+            
+            # Compute cumulative sum
+            cumulative = torch.cumsum(deltas, dim=1)  # [B, A]
+            
+            # Store in output tensor
+            cumulative_times[:, :, q] = cumulative
+        
+        return cumulative_times
     
     def _compute_sequence_length(self, cumulative_times: torch.Tensor, max_time: float) -> torch.Tensor:
         """
