@@ -15,6 +15,7 @@ import argparse
 from pathlib import Path
 from ilbot.training.setup import create_data_loaders, setup_training, OSRSDataset
 from ilbot.model.imitation_hybrid_model import ImitationHybridModel
+from ilbot.model.sequential_imitation_model import SequentialImitationModel
 from torch.optim.lr_scheduler import StepLR
 import os, numpy as np
 from collections import Counter, defaultdict
@@ -90,7 +91,7 @@ def load_manifest(data_dir: Path):
     p = data_dir / "dataset_manifest.json"
     return json.load(open(p,"r",encoding="utf-8")) if p.exists() else None
 
-def setup_model_v2(manifest, targets_version, device, data_dir: Path | None = None):
+def setup_model_v2(manifest, targets_version, device, data_dir: Path | None = None, use_sequential=False):
     """
     Build the hybrid model for V2 targets.
     """
@@ -126,13 +127,25 @@ def setup_model_v2(manifest, targets_version, device, data_dir: Path | None = No
         'event_types': 4
     }
     
-    model = ImitationHybridModel(
-        data_config=data_config,
-        hidden_dim=256,
-        num_heads=8,
-        num_layers=6,
-        feature_spec=spec
-    )
+    if use_sequential:
+        model = SequentialImitationModel(
+            data_config=data_config,
+            hidden_dim=256,
+            num_heads=8,
+            num_layers=6,
+            feature_spec=spec
+        )
+        printer.print_debug_info("Using SequentialImitationModel with SequentialActionDecoder", "SUCCESS")
+    else:
+        model = ImitationHybridModel(
+            data_config=data_config,
+            hidden_dim=256,
+            num_heads=8,
+            num_layers=6,
+            feature_spec=spec
+        )
+        printer.print_debug_info("Using ImitationHybridModel with ActionSequenceDecoder", "INFO")
+    
     return model
 
 def estimate_class_weights(train_loader, targets_version="v2", enum_sizes=None):
@@ -361,7 +374,7 @@ def compute_unified_event_loss(predictions, targets, valid_mask, loss_fn, enum_s
 def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                 num_epochs=10, device='cpu', scheduler=None,
                 use_class_weights=True, loss_w=None, time_div=1.0,
-                targets_version="v2", time_clip=3.0, enum_sizes=None):
+                targets_version="v2", time_clip=3.0, enum_sizes=None, data_dir=None):
     """Train the model"""
     
     printer.print_header("OSRS Imitation Learning Training", f"Training on {device}")
@@ -394,8 +407,24 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
     best_val = float("inf")
     patience = 6
     patience_left = patience
-    ckpt_dir = os.path.join("checkpoints", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    # Create checkpoint directory in the session directory with run number
+    if data_dir:
+        session_dir = os.path.dirname(data_dir)  # Get the session directory (e.g., data/recording_sessions/20250831_113719)
+        checkpoints_base_dir = os.path.join(session_dir, "checkpoints")
+        
+        # Find the next run number
+        run_number = 1
+        while True:
+            ckpt_dir = os.path.join(checkpoints_base_dir, f"run_{run_number:02d}")
+            if not os.path.exists(ckpt_dir):
+                break
+            run_number += 1
+    else:
+        # Fallback to old behavior if data_dir not provided
+        ckpt_dir = os.path.join("checkpoints", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    
     os.makedirs(ckpt_dir, exist_ok=True)
+    print(f"📁 Checkpoint directory: {ckpt_dir}")
     
     # Initialize enhanced behavioral intelligence metrics
     behavioral_metrics = SimplifiedBehavioralMetrics(save_dir=os.path.join(ckpt_dir, "behavioral_analysis"))
@@ -450,12 +479,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                 # V2 only - use advanced unified event loss
                 valid_mask = batch['valid_mask'].to(device)
                 
-                # Debug: Print what we're passing to the loss function
-                if batch_idx == 0:  # Only print for first batch
-                    print(f"🔧 Debug - Loss function type: {type(loss_fn).__name__}")
-                    print(f"🔧 Debug - Outputs keys: {list(outputs.keys())}")
-                    print(f"🔧 Debug - Event logits shape: {outputs['event_logits'].shape if 'event_logits' in outputs else 'N/A'}")
-                    print(f"🔧 Debug - Valid mask sum: {valid_mask.sum().item()}")
+
                 
                 loss, loss_components = compute_unified_event_loss(outputs, action_target, valid_mask, loss_fn, enum_sizes)
             else:
@@ -487,6 +511,10 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
         val_loss_sum = 0.0
         val_batches = 0
 
+        # Collect all validation predictions
+        all_val_predictions = []
+        all_val_targets = []
+        all_val_masks = []
 
         with torch.no_grad():
             for val_idx, batch in enumerate(val_loader):
@@ -495,6 +523,22 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                 action_target = batch['action_target'].to(device)
                 
                 outputs = model(temporal_sequence, action_sequence)
+                
+                # Collect predictions for full validation set
+                if isinstance(outputs, dict):
+                    # Store raw outputs and targets for full validation analysis
+                    all_val_predictions.append({
+                        'time_deltas': outputs.get('time_deltas', None),
+                        'x_mu': outputs.get('x_mu', None),
+                        'y_mu': outputs.get('y_mu', None),
+                        'button_logits': outputs.get('button_logits', None),
+                        'key_action_logits': outputs.get('key_action_logits', None),
+                        'key_id_logits': outputs.get('key_id_logits', None),
+                        'scroll_y_logits': outputs.get('scroll_y_logits', None),
+                        'sequence_length': outputs.get('sequence_length', None),  # Add sequence length for actions per gamestate
+                    })
+                    all_val_targets.append(action_target.cpu())
+                    all_val_masks.append(batch['valid_mask'].cpu())
 
                 # how many total VAL batches this epoch
                 n_val_batches = len(val_loader)
@@ -533,6 +577,19 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
         avg_val_loss = val_loss_sum / max(val_batches, 1)
         val_losses.append(avg_val_loss)
         
+        # Determine checkpoint saving logic
+        is_best = avg_val_loss < best_val
+        should_save_checkpoint = (
+            epoch == 0 or  # First epoch
+            epoch == num_epochs - 1 or  # Last epoch
+            epoch % 5 == 0  # Every 5 epochs (0, 5, 10, 15, 20, ...)
+        )
+        
+        # Save full validation predictions and create comprehensive graphs (only when checkpoints are saved)
+        if all_val_predictions and should_save_checkpoint:
+            # Combine all validation data for comprehensive analysis
+            behavioral_metrics.create_full_validation_graphs(all_val_predictions, all_val_targets, all_val_masks, epoch)
+        
         # Clean Event Distribution Display
         if val_batches > 0:
             # Get event predictions from validation
@@ -550,29 +607,46 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                     # Calculate average probabilities across all actions
                     avg_probs = event_probs.mean(dim=(0, 1))  # Average across batch and actions
                     
-                    # Display clean event distribution
-                    print(f"  🎮 What the Bot Thinks:")
+                    # Display detailed event distribution table
+                    print(f"  🎮 Event Distribution Analysis:")
+                    print(f"  ┌─────────────┬──────────────┬──────────────┬──────────────┐")
+                    print(f"  │ Event Type  │ Predicted    │ Target       │ Difference   │")
+                    print(f"  ├─────────────┼──────────────┼──────────────┼──────────────┤")
                     event_names = ['CLICK', 'KEY', 'SCROLL', 'MOVE']
+                    # Calculate target distribution from validation data (only valid actions)
+                    target_dist = torch.zeros(4)
+                    if 'event_logits' in sample_outputs:
+                        # Derive event targets from action targets (same logic as loss function)
+                        targets = sample_batch['action_target']  # [B, A, 7]
+                        valid_mask = sample_batch['valid_mask']  # [B, A]
+                        
+                        # Derive event type from action components
+                        B, A = targets.shape[:2]
+                        event_target = torch.full((B, A), 3, dtype=torch.long, device=targets.device)  # Default to MOVE
+                        
+                        # Extract action components
+                        button_target = targets[..., 3]  # Button column
+                        key_action_target = targets[..., 4]  # Key action column
+                        scroll_y_target = targets[..., 6]  # Scroll column
+                        
+                        # Derive event types with priority
+                        event_target = torch.where(button_target > 0, 0, event_target)  # CLICK
+                        event_target = torch.where(key_action_target > 0, 1, event_target)  # KEY
+                        event_target = torch.where(scroll_y_target != 0, 2, event_target)  # SCROLL
+                        # MOVE is default (3)
+                        
+                        # Only count events for valid actions
+                        valid_events = event_target[valid_mask.bool()]  # [N_valid]
+                        
+                        if valid_events.numel() > 0:
+                            for j in range(4):
+                                target_dist[j] = (valid_events == j).float().mean()
+                    
                     for i, (name, prob) in enumerate(zip(event_names, avg_probs)):
-                        bar_length = int(prob * 20)  # 20 character bar
-                        bar = '█' * bar_length + '░' * (20 - bar_length)
-                        print(f"    {name:>6}: {prob:.1%} {bar}")
-                    
-                    # Show what this means in plain English
-                    dominant_event = event_names[avg_probs.argmax()]
-                    dominant_prob = avg_probs.max()
-                    print(f"\n  🧠 Bot's Decision: '{dominant_event}' actions {dominant_prob:.1%} of the time")
-                    
-                    # Show coordinate predictions
-                    if 'x_mu' in sample_outputs and 'y_mu' in sample_outputs:
-                        x_pred = sample_outputs['x_mu'].mean().item()
-                        y_pred = sample_outputs['y_mu'].mean().item()
-                        print(f"  🖱️  Mouse Position: Bot thinks mouse should be at ({x_pred:.0f}, {y_pred:.0f})")
-                    
-                    # Show timing predictions
-                    if 'time_q' in sample_outputs:
-                        time_pred = sample_outputs['time_q'][:, 1].mean().item()  # median
-                        print(f"  ⏰ Action Timing: Bot thinks actions should happen every {time_pred:.1f} seconds")
+                        target_prob = target_dist[i].item()
+                        diff = prob.item() - target_prob
+                        print(f"  │ {name:>11} │ {prob:.1%} │ {target_prob:.1%} │ {diff:+.1%} │")
+                    print(f"  └─────────────┴──────────────┴──────────────┴──────────────┘")
         
         # Behavioral Intelligence Analysis (every 5 epochs)
         if val_batches > 0:
@@ -583,17 +657,14 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
             sample_target = sample_batch['action_target'].to(device)
             sample_valid = sample_batch['valid_mask'].to(device)
             
-            print(f"\n🔍 What the Bot is Learning (Epoch {epoch + 1}):")
-            print("=" * 50)
-            
-            # Get model predictions on sample
+            # Get model predictions on sample for detailed analysis
             with torch.no_grad():
                 sample_outputs = model(sample_temporal, sample_action)
                 
                 # Debug: Show tensor shapes (but only once)
                 if not hasattr(model, "_shapes_shown"):
                     model._shapes_shown = True
-                    print(f"🔧 Model Output Shapes:")
+                    print(f"\n🔧 Model Output Shapes:")
                     if isinstance(sample_outputs, dict):
                         for k, v in sample_outputs.items():
                             print(f"  {k}: {tuple(v.shape)}")
@@ -601,88 +672,269 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                     print(f"  valid_mask: {sample_valid.shape}")
                     print("─" * 30)
             
-            # 1. Show what the bot learned about events
-            if isinstance(sample_outputs, dict) and 'event_logits' in sample_outputs:
-                try:
-                    event_probs = torch.softmax(sample_outputs['event_logits'], dim=-1)
-                    # event_probs has shape [B, A, 4] where 4 = [CLICK, KEY, SCROLL, MOVE]
-                    # We need to average across all actions for each batch, then across batches
-                    avg_event_probs = event_probs.mean(dim=(0, 1))  # Average across batch and actions
-                    event_names = ['CLICK', 'KEY', 'SCROLL', 'MOVE']
-                    
-                    print(f"🎮 Event Learning:")
-                    for name, prob in zip(event_names, avg_event_probs):
-                        confidence = "High" if prob > 0.7 else "Medium" if prob > 0.3 else "Low"
-                        print(f"  {name:>6}: {prob:.1%} confidence ({confidence})")
-                    
-                    # Show what the bot learned
-                    dominant_event = event_names[avg_event_probs.argmax()]
-                    print(f"\n  🧠 Bot learned: '{dominant_event}' is the most common action")
-                except Exception as e:
-                    print(f"🎮 Event Learning: Could not analyze events (error: {e})")
-            
-            # 2. Show what the bot learned about mouse positions
-            if isinstance(sample_outputs, dict) and 'x_mu' in sample_outputs and 'y_mu' in sample_outputs:
-                try:
-                    # x_mu and y_mu have shape [B, A] where A = max_actions
-                    # We need to average across valid actions for each batch, then across batches
-                    x_pred = sample_outputs['x_mu'].mean().item()  # Average across all positions
-                    y_pred = sample_outputs['y_mu'].mean().item()
-                    x_std = sample_outputs['x_logsig'].exp().mean().item()
-                    y_std = sample_outputs['y_logsig'].exp().mean().item()
-                    
-                    print(f"\n🖱️  Mouse Learning:")
-                    print(f"  Position: Bot learned mouse is usually at ({x_pred:.0f}, {y_pred:.0f})")
-                    print(f"  Uncertainty: ±{x_std:.0f} pixels X, ±{y_std:.0f} pixels Y")
-                except Exception as e:
-                    print(f"\n🖱️  Mouse Learning: Could not analyze mouse positions (error: {e})")
-            
-            # 3. Show what the bot learned about timing
+            # Detailed Timing Analysis Table
             if isinstance(sample_outputs, dict) and 'time_q' in sample_outputs:
                 try:
-                    # time_q has shape [B, 3] where 3 = [q0.1, q0.5, q0.9]
-                    # We need to get the median (q0.5) for each batch
-                    time_pred = sample_outputs['time_q'][:, 1].mean().item()  # median across all batches
-                    time_uncertainty = (sample_outputs['time_q'][:, 2] - sample_outputs['time_q'][:, 0]).mean().item() / 2
+                    print(f"\n⏰ Timing Prediction Analysis:")
+                    print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+                    print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
+                    print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
                     
-                    print(f"\n⏰ Timing Learning:")
-                    print(f"  Interval: Bot learned actions happen every {time_pred:.1f} seconds")
-                    print(f"  Uncertainty: ±{time_uncertainty:.1f} seconds")
-                except Exception as e:
-                    print(f"\n⏰ Timing Learning: Could not analyze timing (error: {e})")
-            
-            # 4. Show what the bot sees in the game
-            if sample_temporal.numel() > 0:
-                try:
-                    # Show what the bot sees in the game state
-                    player_x = sample_temporal[0, -1, 0].item()  # Last timestep, first feature
-                    player_y = sample_temporal[0, -1, 1].item()  # Last timestep, second feature
+                    # Get timing predictions (median quantile)
+                    time_preds = sample_outputs['time_q'][:, 1]  # [B] - median timing
+                    time_targets = sample_target[:, :, 0]  # [B, A] - target timing (timestamp column)
                     
-                    print(f"\n🎯 Game State Learning:")
-                    print(f"  Player Position: Bot sees player at ({player_x:.0f}, {player_y:.0f})")
-                    print(f"  Input: Bot sees {sample_temporal.size(1)} timesteps of game history")
-                    print(f"  Features: Bot analyzes {sample_temporal.size(2)} different game features")
+                    # Calculate statistics
+                    pred_mean = time_preds.mean().item()
+                    pred_std = time_preds.std().item()
+                    pred_min, pred_max = time_preds.min().item(), time_preds.max().item()
+                    
+                    # Target statistics (only for valid actions)
+                    valid_times = time_targets[sample_valid.bool()]
+                    target_mean = valid_times.mean().item() if valid_times.numel() > 0 else 0.0
+                    target_std = valid_times.std().item() if valid_times.numel() > 0 else 0.0
+                    target_min, target_max = valid_times.min().item(), valid_times.max().item() if valid_times.numel() > 0 else (0.0, 0.0)
+                    
+                    print(f"  │ Mean Timing (seconds)    │ {pred_mean:>12.3f} │ {target_mean:>12.3f} │ {pred_mean-target_mean:>+12.3f} │")
+                    print(f"  │ Std Timing (seconds)     │ {pred_std:>12.3f} │ {target_std:>12.3f} │ {pred_std-target_std:>+12.3f} │")
+                    print(f"  │ Min Timing (seconds)     │ {pred_min:>12.3f} │ {target_min:>12.3f} │ {pred_min-target_min:>+12.3f} │")
+                    print(f"  │ Max Timing (seconds)     │ {pred_max:>12.3f} │ {target_max:>12.3f} │ {pred_max-target_max:>+12.3f} │")
+                    print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
                 except Exception as e:
-                    print(f"\n🎯 Game State Learning: Could not extract player position (error: {e})")
+                    print(f"\n⏰ Timing Analysis: Could not analyze timing (error: {e})")
             
-            # Analyze behavioral intelligence
+            # Actions per Gamestate Analysis Table
             try:
-                behavioral_metrics.analyze_epoch_predictions(
-                    model_outputs=sample_outputs,
-                    gamestates=sample_temporal,  # [B, 10, 128]
-                    action_targets=sample_target,  # [B, 100, 7]
-                    valid_mask=sample_valid,      # [B, 100]
-                    epoch=epoch
-                )
+                print(f"\n📊 Actions per Gamestate Analysis:")
+                print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+                print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
+                print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+                
+                # Calculate predicted actions per gamestate
+                if 'sequence_length' in sample_outputs:
+                    pred_actions = sample_outputs['sequence_length'].squeeze().cpu().numpy()
+                else:
+                    # Fallback: count actions with timing > 0
+                    time_preds = sample_outputs.get('time_q', torch.zeros(sample_temporal.size(0), 1))
+                    pred_actions = (time_preds[:, 1] > 0.01).sum(dim=1).float().cpu().numpy()
+                
+                # Calculate target actions per gamestate
+                target_actions = sample_valid.sum(dim=1).float().cpu().numpy()
+                
+                pred_mean = pred_actions.mean()
+                pred_std = pred_actions.std()
+                target_mean = target_actions.mean()
+                target_std = target_actions.std()
+                
+                print(f"  │ Mean Actions/Gamestate   │ {pred_mean:>12.1f} │ {target_mean:>12.1f} │ {pred_mean-target_mean:>+12.1f} │")
+                print(f"  │ Std Actions/Gamestate    │ {pred_std:>12.1f} │ {target_std:>12.1f} │ {pred_std-target_std:>+12.1f} │")
+                print(f"  │ Min Actions/Gamestate    │ {pred_actions.min():>12.1f} │ {target_actions.min():>12.1f} │ {pred_actions.min()-target_actions.min():>+12.1f} │")
+                print(f"  │ Max Actions/Gamestate    │ {pred_actions.max():>12.1f} │ {target_actions.max():>12.1f} │ {pred_actions.max()-target_actions.max():>+12.1f} │")
+                print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
             except Exception as e:
-                print(f"⚠️  Behavioral analysis failed: {e}")
-        
+                print(f"\n📊 Actions per Gamestate Analysis: Could not analyze (error: {e})")
+            
+            # Timing Prediction Analysis Table
+            try:
+                if isinstance(sample_outputs, dict) and 'time_deltas' in sample_outputs and 'cumulative_times' in sample_outputs:
+                    print(f"\n⏱️  Timing Prediction Analysis:")
+                    print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+                    print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
+                    print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+                    
+                    # Get timing predictions
+                    time_deltas = sample_outputs['time_deltas']  # [B, A, 1]
+                    cumulative_times = sample_outputs['cumulative_times']  # [B, A, 1]
+                    
+                    # Get targets
+                    time_targets = sample_target[:, :, 0]  # [B, A] - target timing (timestamp column)
+                    
+                    # Calculate statistics (only for valid actions)
+                    valid_mask = sample_valid.bool()
+                    time_deltas_valid = time_deltas[valid_mask]  # [N_valid, 1]
+                    cumulative_times_valid = cumulative_times[valid_mask]  # [N_valid, 1]
+                    time_targets_valid = time_targets[valid_mask]  # [N_valid]
+                    
+                    if time_deltas_valid.numel() > 0:
+                        # Delta timing statistics
+                        delta_pred_mean = time_deltas_valid.mean().item()
+                        delta_pred_std = time_deltas_valid.std().item()
+                        delta_pred_min = time_deltas_valid.min().item()
+                        delta_pred_max = time_deltas_valid.max().item()
+                        delta_pred_median = time_deltas_valid.median().item()
+                        delta_pred_p25 = time_deltas_valid.quantile(0.25).item()
+                        delta_pred_p75 = time_deltas_valid.quantile(0.75).item()
+                        delta_pred_p10 = time_deltas_valid.quantile(0.10).item()
+                        delta_pred_p90 = time_deltas_valid.quantile(0.90).item()
+                        delta_pred_unique = len(torch.unique(time_deltas_valid))
+                        
+                        # Cumulative timing statistics
+                        cumul_pred_mean = cumulative_times_valid.mean().item()
+                        cumul_pred_std = cumulative_times_valid.std().item()
+                        cumul_pred_min = cumulative_times_valid.min().item()
+                        cumul_pred_max = cumulative_times_valid.max().item()
+                        
+                        # Target timing statistics (data is already in delta time format)
+                        if time_targets_valid.numel() > 0:
+                            # Use the delta times directly (no torch.diff needed)
+                            target_deltas = time_targets_valid
+                            target_delta_mean = target_deltas.mean().item()
+                            target_delta_std = target_deltas.std().item()
+                            target_delta_min = target_deltas.min().item()
+                            target_delta_max = target_deltas.max().item()
+                            target_delta_median = target_deltas.median().item()
+                            target_delta_p25 = target_deltas.quantile(0.25).item()
+                            target_delta_p75 = target_deltas.quantile(0.75).item()
+                            target_delta_p10 = target_deltas.quantile(0.10).item()
+                            target_delta_p90 = target_deltas.quantile(0.90).item()
+                            target_delta_unique = len(torch.unique(target_deltas))
+                        else:
+                            target_delta_mean = 0.0
+                            target_delta_std = 0.0
+                            target_delta_min = 0.0
+                            target_delta_max = 0.0
+                            target_delta_median = 0.0
+                            target_delta_p25 = 0.0
+                            target_delta_p75 = 0.0
+                            target_delta_p10 = 0.0
+                            target_delta_p90 = 0.0
+                            target_delta_unique = 0
+                        
+                        print(f"  │ Delta Time Mean (s)     │ {delta_pred_mean:>12.3f} │ {target_delta_mean:>12.3f} │ {delta_pred_mean-target_delta_mean:>+12.3f} │")
+                        print(f"  │ Delta Time Std (s)      │ {delta_pred_std:>12.3f} │ {target_delta_std:>12.3f} │ {delta_pred_std-target_delta_std:>+12.3f} │")
+                        print(f"  │ Delta Time Median (s)   │ {delta_pred_median:>12.3f} │ {target_delta_median:>12.3f} │ {delta_pred_median-target_delta_median:>+12.3f} │")
+                        print(f"  │ Delta Time P25 (s)      │ {delta_pred_p25:>12.3f} │ {target_delta_p25:>12.3f} │ {delta_pred_p25-target_delta_p25:>+12.3f} │")
+                        print(f"  │ Delta Time P75 (s)      │ {delta_pred_p75:>12.3f} │ {target_delta_p75:>12.3f} │ {delta_pred_p75-target_delta_p75:>+12.3f} │")
+                        print(f"  │ Delta Time P10 (s)      │ {delta_pred_p10:>12.3f} │ {target_delta_p10:>12.3f} │ {delta_pred_p10-target_delta_p10:>+12.3f} │")
+                        print(f"  │ Delta Time P90 (s)      │ {delta_pred_p90:>12.3f} │ {target_delta_p90:>12.3f} │ {delta_pred_p90-target_delta_p90:>+12.3f} │")
+                        print(f"  │ Delta Time Min (s)      │ {delta_pred_min:>12.3f} │ {target_delta_min:>12.3f} │ {delta_pred_min-target_delta_min:>+12.3f} │")
+                        print(f"  │ Delta Time Max (s)      │ {delta_pred_max:>12.3f} │ {target_delta_max:>12.3f} │ {delta_pred_max-target_delta_max:>+12.3f} │")
+                        print(f"  │ Delta Time Unique Count │ {delta_pred_unique:>12.0f} │ {target_delta_unique:>12.0f} │ {delta_pred_unique-target_delta_unique:>+12.0f} │")
+                        print(f"  │ Cumulative Time Mean (s)│ {cumul_pred_mean:>12.3f} │        N/A │        N/A │")
+                        print(f"  │ Cumulative Time Max (s) │ {cumul_pred_max:>12.3f} │        N/A │        N/A │")
+                        print(f"  │ Actions > 600ms         │ {((cumulative_times_valid > 0.6).sum().item()):>12.0f} │        N/A │        N/A │")
+                    else:
+                        print(f"  │ No valid timing data    │        N/A │        N/A │        N/A │")
+                    
+                    print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+            except Exception as e:
+                print(f"\n⏱️  Timing Prediction Analysis: Could not analyze (error: {e})")
+            
+            # Mouse Position Analysis Table
+            if isinstance(sample_outputs, dict) and 'x_mu' in sample_outputs and 'y_mu' in sample_outputs:
+                try:
+                    print(f"\n🖱️  Mouse Position Analysis:")
+                    print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+                    print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
+                    print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+                    
+                    # Get predictions
+                    x_pred = sample_outputs['x_mu']
+                    y_pred = sample_outputs['y_mu']
+                    x_std = sample_outputs['x_logsig'].exp()
+                    y_std = sample_outputs['y_logsig'].exp()
+                    
+                    # Get targets
+                    x_target = sample_target[:, :, 1]  # x coordinate
+                    y_target = sample_target[:, :, 2]  # y coordinate
+                    
+                    # Calculate statistics (only for valid actions)
+                    valid_mask = sample_valid.bool()
+                    x_pred_valid = x_pred[valid_mask]
+                    y_pred_valid = y_pred[valid_mask]
+                    x_target_valid = x_target[valid_mask]
+                    y_target_valid = y_target[valid_mask]
+                    
+                    if x_pred_valid.numel() > 0:
+                        x_pred_mean = x_pred_valid.mean().item()
+                        y_pred_mean = y_pred_valid.mean().item()
+                        x_target_mean = x_target_valid.mean().item()
+                        y_target_mean = y_target_valid.mean().item()
+                        
+                        print(f"  │ X Mean (normalized)     │ {x_pred_mean:>12.3f} │ {x_target_mean:>12.3f} │ {x_pred_mean-x_target_mean:>+12.3f} │")
+                        print(f"  │ Y Mean (normalized)     │ {y_pred_mean:>12.3f} │ {y_target_mean:>12.3f} │ {y_pred_mean-y_target_mean:>+12.3f} │")
+                        print(f"  │ X Uncertainty (pixels)  │ {x_std.mean().item():>12.0f} │        N/A │        N/A │")
+                        print(f"  │ Y Uncertainty (pixels)  │ {y_std.mean().item():>12.0f} │        N/A │        N/A │")
+                    else:
+                        print(f"  │ No valid actions found  │        N/A │        N/A │        N/A │")
+                    
+                    print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+                except Exception as e:
+                    print(f"\n🖱️  Mouse Position Analysis: Could not analyze (error: {e})")
+            
+            # Data Quality Analysis Table
+            try:
+                print(f"\n📊 Data Quality Analysis:")
+                print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+                print(f"  │ Metric                  │ Count        │ Total        │ Percentage   │")
+                print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+                
+                # Calculate data quality metrics
+                total_actions = sample_valid.numel()
+                valid_actions = sample_valid.sum().item()
+                padding_actions = total_actions - valid_actions
+                valid_percentage = (valid_actions / total_actions) * 100
+                padding_percentage = (padding_actions / total_actions) * 100
+                
+                print(f"  │ Valid Actions           │ {valid_actions:>12} │ {total_actions:>12} │ {valid_percentage:>11.1f}% │")
+                print(f"  │ Padding Actions         │ {padding_actions:>12} │ {total_actions:>12} │ {padding_percentage:>11.1f}% │")
+                
+                # Calculate actions per batch
+                actions_per_batch = sample_valid.sum(dim=1).float()
+                avg_actions_per_batch = actions_per_batch.mean().item()
+                std_actions_per_batch = actions_per_batch.std().item()
+                
+                print(f"  │ Avg Actions/Batch       │ {avg_actions_per_batch:>12.1f} │        N/A │        N/A │")
+                print(f"  │ Std Actions/Batch       │ {std_actions_per_batch:>12.1f} │        N/A │        N/A │")
+                print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+            except Exception as e:
+                print(f"\n📊 Data Quality Analysis: Could not analyze (error: {e})")
+            
+            # Model Performance Summary Table
+            try:
+                print(f"\n🎯 Model Performance Summary:")
+                print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+                print(f"  │ Metric                  │ Current      │ Best         │ Improvement  │")
+                print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+                
+                # Get current and best losses
+                current_train_loss = avg_train_loss
+                current_val_loss = avg_val_loss
+                best_val_loss = best_val
+                
+                print(f"  │ Training Loss           │ {current_train_loss:>12.3f} │        N/A │        N/A │")
+                print(f"  │ Validation Loss         │ {current_val_loss:>12.3f} │ {best_val_loss:>12.3f} │ {current_val_loss-best_val_loss:>+12.3f} │")
+                
+                # Calculate improvement percentage
+                if best_val_loss > 0:
+                    improvement_pct = ((best_val_loss - current_val_loss) / best_val_loss) * 100
+                    print(f"  │ Loss Improvement %      │ {improvement_pct:>12.1f} │        N/A │        N/A │")
+                
+                print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+            except Exception as e:
+                print(f"\n🎯 Model Performance Summary: Could not analyze (error: {e})")
+            
+        # Early stopping + checkpoint (logic already defined above)
+            
+        # Analyze behavioral intelligence (only save visualizations when checkpoints are saved)
+        # Skip both timing graphs and actions per gamestate graph since they're already created from full validation set
+        try:
+            behavioral_metrics.analyze_epoch_predictions(
+                model_outputs=sample_outputs,
+                gamestates=sample_temporal,  # [B, 10, 128]
+                action_targets=sample_target,  # [B, 100, 7]
+                valid_mask=sample_valid,      # [B, 100]
+                epoch=epoch,
+                save_visualizations=False,  # Skip all visualizations - already created from full validation set
+                save_timing_graphs=False  # Skip timing graphs - already created from full validation set
+            )
+        except Exception as e:
+            print(f"⚠️  Behavioral analysis failed: {e}")
+
         # Scheduler step (if any)
         if scheduler is not None:
             scheduler.step()
             
-        # Early stopping + checkpoint
-        is_best = avg_val_loss < best_val
         if is_best:
             best_val = avg_val_loss
             patience_left = patience
@@ -691,6 +943,14 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                         "optimizer": optimizer.state_dict(),
                         "epoch": epoch+1,
                         "val_loss": best_val}, best_path)
+        
+        # Save regular checkpoint if needed
+        if should_save_checkpoint:
+            checkpoint_path = os.path.join(ckpt_dir, f"epoch_{epoch+1:03d}.pt")
+            torch.save({"model": model.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        "epoch": epoch+1,
+                        "val_loss": avg_val_loss}, checkpoint_path)
         else:
             patience_left -= 1
             if patience_left <= 0:
@@ -804,6 +1064,9 @@ def main():
     parser.add_argument("--targets_version", default="v2")
     parser.add_argument("--time_clip", type=float, default=None,
                         help="Override time_clip; if None, use manifest.")
+    # Model architecture
+    parser.add_argument("--use_sequential", action='store_true',
+                        help="Use SequentialImitationModel with SequentialActionDecoder")
     args = parser.parse_args()
     
     # Create dataset and data loaders
@@ -835,7 +1098,7 @@ def main():
     time_clip = manifest["time_clip"] if (manifest and args.time_clip is None) else (args.time_clip or 3.0)
     
     # Create model and setup training components
-    model = setup_model_v2(manifest=manifest or {}, targets_version=config.get("targets_version", "v1"), device=device, data_dir=data_dir)
+    model = setup_model_v2(manifest=manifest or {}, targets_version=config.get("targets_version", "v1"), device=device, data_dir=data_dir, use_sequential=args.use_sequential)
     
     # Runtime safety check for feature spec
     spec = load_feature_spec(data_dir)
@@ -954,7 +1217,8 @@ def run_training(config: dict):
         'num_heads': 8,
             'num_layers': 6
         },
-        data_dir=config["data_dir"]
+        data_dir=config["data_dir"],
+        use_sequential=config.get("use_sequential", False)
     )
     
     # Extract enum_sizes for compatibility
@@ -1022,7 +1286,8 @@ def run_training(config: dict):
         time_div=config.get("time_div_ms", 1000.0),
         targets_version="v2",
         time_clip=config.get("time_clip_s", 3.0),
-        enum_sizes=enum_sizes
+        enum_sizes=enum_sizes,
+        data_dir=config.get("data_dir")
     )
     history = {"train_losses": losses_train, "val_losses": losses_val}
     return history

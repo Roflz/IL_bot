@@ -401,16 +401,9 @@ class ActionSequenceDecoder(nn.Module):
         """
         batch_size = context.size(0)
         
-        # 1. Predict sequence length (how many actions in this gamestate?)
-        sequence_length_logits = self.sequence_length_head(context)  # [B, 1] - sigmoid output [0,1]
-        predicted_length = (sequence_length_logits * self.max_actions).round().long()  # [B, 1]
-        
-        # Debug: Print sequence length predictions during training
-        if self.training and torch.rand(1).item() < 0.01:  # 1% of the time during training
-            print(f"🔍 Sequence Length Debug:")
-            print(f"  - Sigmoid output (0-1): {sequence_length_logits[:3].detach().cpu().numpy()}")
-            print(f"  - Predicted length: {predicted_length[:3].detach().cpu().numpy()}")
-            print(f"  - Max actions: {self.max_actions}")
+        # PHASE 1: Derive sequence length from timing instead of predicting separately
+        # We'll compute this after we have the timing predictions
+        predicted_length = None  # Will be computed later from timing
         
         # 2. Process action history for temporal context and delta understanding
         temporal_context = context
@@ -527,9 +520,16 @@ class ActionSequenceDecoder(nn.Module):
         # Event classification
         outputs['event_logits'] = self.event_head(action_features)  # [B, max_actions, event_types]
         
-        # Time quantiles
+        # PHASE 1: Cumulative timing prediction instead of independent deltas
         time_q_raw = self.time_quantile_head(action_features)  # [B, max_actions, 3]
-        outputs['time_q'] = F.softplus(time_q_raw) + 0.001  # Ensure positivity
+        time_q_deltas = F.softplus(time_q_raw) + 0.001  # Ensure positivity
+        
+        # Convert deltas to cumulative timing
+        cumulative_times = self._compute_cumulative_timing(time_q_deltas, valid_mask)
+        outputs['time_q'] = cumulative_times
+        
+        # PHASE 1: Derive sequence length from timing predictions
+        predicted_length = self._derive_sequence_length_from_timing(cumulative_times, valid_mask)
         
         # Coordinates
         x_mu = self.x_mu_head(action_features).squeeze(-1)  # [B, max_actions]
@@ -596,6 +596,60 @@ class ActionSequenceDecoder(nn.Module):
         if self.use_log1p_time:
             return torch.expm1(t) * (self.time_div_ms / 1000.0)
         return t
+    
+    def _compute_cumulative_timing(self, time_deltas: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
+        """
+        PHASE 1: Convert timing deltas to cumulative timing.
+        
+        Args:
+            time_deltas: [B, A, 3] - timing deltas for each action (q0.1, q0.5, q0.9)
+            valid_mask: [B, A] - valid action mask
+            
+        Returns:
+            cumulative_times: [B, A, 3] - cumulative timing from start of 600ms window
+        """
+        batch_size, max_actions, num_quantiles = time_deltas.shape
+        
+        # Initialize cumulative times
+        cumulative_times = torch.zeros_like(time_deltas)
+        
+        # Apply valid mask to deltas
+        masked_deltas = time_deltas * valid_mask.unsqueeze(-1).float()
+        
+        # Compute cumulative sum for each quantile
+        for q in range(num_quantiles):
+            cumulative_times[:, :, q] = torch.cumsum(masked_deltas[:, :, q], dim=1)
+        
+        # Ensure cumulative times don't exceed 600ms (0.6 seconds)
+        cumulative_times = torch.clamp(cumulative_times, 0.0, 0.6)
+        
+        return cumulative_times
+    
+    def _derive_sequence_length_from_timing(self, cumulative_times: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
+        """
+        PHASE 1: Derive sequence length from timing predictions.
+        
+        Args:
+            cumulative_times: [B, A, 3] - cumulative timing predictions
+            valid_mask: [B, A] - valid action mask
+            
+        Returns:
+            sequence_lengths: [B, 1] - derived sequence lengths
+        """
+        # Use median quantile (q0.5) for sequence length derivation
+        median_times = cumulative_times[:, :, 1]  # [B, A] - q0.5
+        
+        # Apply valid mask
+        valid_times = median_times * valid_mask.float()
+        
+        # Count actions that fit within 600ms window
+        # An action is considered part of the sequence if its cumulative time <= 0.6s
+        sequence_lengths = (valid_times <= 0.6).sum(dim=1, keepdim=True).float()  # [B, 1]
+        
+        # Ensure minimum sequence length of 1 (at least one action)
+        sequence_lengths = torch.clamp(sequence_lengths, 1.0, self.max_actions)
+        
+        return sequence_lengths
 
 
 class ImitationHybridModel(nn.Module):
@@ -909,7 +963,7 @@ class ImitationHybridModel(nn.Module):
             'hidden_dim': self.hidden_dim
         }
 
-def create_model(data_config: Dict = None, model_config: Dict = None, data_dir: str = None, feature_spec: Dict = None) -> ImitationHybridModel:
+def create_model(data_config: Dict = None, model_config: Dict = None, data_dir: str = None, feature_spec: Dict = None, use_sequential: bool = False):
     """Factory function to create the model with data-driven configuration"""
     if data_config is None:
         # Create default data config for testing
@@ -942,7 +996,11 @@ def create_model(data_config: Dict = None, model_config: Dict = None, data_dir: 
                 print(f"WARNING: Could not load feature spec: {e}")
                 feature_spec = {}
     
-    model = ImitationHybridModel(data_config=data_config, feature_spec=feature_spec, **model_config)
+    if use_sequential:
+        from .sequential_imitation_model import SequentialImitationModel
+        model = SequentialImitationModel(data_config=data_config, feature_spec=feature_spec, **model_config)
+    else:
+        model = ImitationHybridModel(data_config=data_config, feature_spec=feature_spec, **model_config)
     return model
 
 if __name__ == "__main__":

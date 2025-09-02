@@ -118,6 +118,14 @@ class AdvancedUnifiedEventLoss(nn.Module):
         from .losses import PinballLoss
         self.time_loss = PinballLoss(quantiles=time_quantiles, burst_aware=True)
         
+        # PHASE 1: Add timing-aware loss functions
+        self.timing_aware_loss = TimingAwareLoss(
+            max_time=0.6,
+            timing_weight=1.0,
+            length_weight=1.0,
+            coherence_weight=0.5
+        )
+        
         # Weights for different loss components
         self.uncertainty_weight = uncertainty_weight
         self.temporal_weight = temporal_weight
@@ -209,6 +217,10 @@ class AdvancedUnifiedEventLoss(nn.Module):
         )
         losses['uncertainty_reg'] = uncertainty_reg_loss
         
+        # PHASE 1: Add timing-aware losses
+        timing_aware_losses = self.timing_aware_loss(predictions, targets, valid_mask)
+        losses.update(timing_aware_losses)
+        
         # Combine all losses
         total_loss = sum(losses.values())
         
@@ -227,12 +239,7 @@ class AdvancedUnifiedEventLoss(nn.Module):
         # Derive event targets from action targets
         event_targets = self._derive_event_target(targets)
         
-        # Debug: Print event target distribution
-        if hasattr(self, '_debug_printed') and not self._debug_printed:
-            print(f"🔧 Debug - Event targets shape: {event_targets.shape}")
-            print(f"🔧 Debug - Event targets unique: {event_targets.unique().tolist()}")
-            print(f"🔧 Debug - Event targets distribution: {torch.bincount(event_targets.flatten(), minlength=self.event_types).tolist()}")
-            self._debug_printed = True
+
         
         # Apply valid mask
         valid_event_logits = event_logits[valid_mask]
@@ -510,13 +517,7 @@ class AdvancedUnifiedEventLoss(nn.Module):
         key_action_target = targets[..., 4]  # Key action column
         scroll_y_target = targets[..., 6]  # Scroll column
         
-        # Debug: Print actual values to see what we're getting
-        if hasattr(self, '_debug_derive_printed') and not self._debug_derive_printed:
-            print(f"🔧 Debug - Button targets unique: {button_target.unique().tolist()}")
-            print(f"🔧 Debug - Key action targets unique: {key_action_target.unique().tolist()}")
-            print(f"🔧 Debug - Scroll targets unique: {scroll_y_target.unique().tolist()}")
-            print(f"🔧 Debug - Sample button values: {button_target[:5, :5].tolist()}")
-            self._debug_derive_printed = True
+
         
         # Priority order: CLICK > KEY > SCROLL > MOVE
         # SCROLL: scroll_y != 0 (lowest priority)
@@ -642,3 +643,192 @@ class AdaptiveLossWeighting(nn.Module):
     def get_weight_history(self) -> Dict[str, List[float]]:
         """Get weight adaptation history"""
         return self.weight_history
+
+
+class TimingAwareLoss(nn.Module):
+    """
+    Timing-aware loss that enforces 600ms constraints and cumulative timing logic.
+    
+    This loss addresses the fundamental issues with timing predictions:
+    1. Ensures predicted times are cumulative and don't exceed 600ms
+    2. Penalizes when sequence length doesn't match timing-derived length
+    3. Enforces temporal coherence between actions
+    """
+    
+    def __init__(self, max_time: float = 0.6, timing_weight: float = 1.0, 
+                 length_weight: float = 1.0, coherence_weight: float = 0.5):
+        super().__init__()
+        self.max_time = max_time
+        self.timing_weight = timing_weight
+        self.length_weight = length_weight
+        self.coherence_weight = coherence_weight
+        
+    def forward(self, predictions: Dict[str, torch.Tensor], 
+                targets: torch.Tensor, 
+                valid_mask: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Compute timing-aware losses.
+        
+        Args:
+            predictions: Model predictions including 'time_q' and 'sequence_length'
+            targets: Target action sequences [B, A, F]
+            valid_mask: Valid action mask [B, A]
+            
+        Returns:
+            Dict of timing-aware losses
+        """
+        losses = {}
+        
+        # 1. Cumulative Timing Loss
+        if 'time_q' in predictions:
+            timing_loss = self._compute_cumulative_timing_loss(
+                predictions['time_q'], targets, valid_mask
+            )
+            losses['cumulative_timing'] = timing_loss * self.timing_weight
+        
+        # 2. Sequence Length Consistency Loss
+        if 'sequence_length' in predictions:
+            length_loss = self._compute_sequence_length_consistency_loss(
+                predictions, valid_mask
+            )
+            losses['sequence_length_consistency'] = length_loss * self.length_weight
+        
+        # 3. Temporal Coherence Loss
+        if 'time_q' in predictions:
+            coherence_loss = self._compute_temporal_coherence_loss(
+                predictions['time_q'], valid_mask
+            )
+            losses['temporal_coherence'] = coherence_loss * self.coherence_weight
+        
+        return losses
+    
+    def _compute_cumulative_timing_loss(self, time_predictions: torch.Tensor, 
+                                      targets: torch.Tensor, 
+                                      valid_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Compute cumulative timing loss that enforces 600ms constraint.
+        
+        Args:
+            time_predictions: [B, A, 3] - quantile predictions (q0.1, q0.5, q0.9)
+            targets: [B, A, F] - target actions (column 0 is timing)
+            valid_mask: [B, A] - valid action mask
+        """
+        # Use median quantile (q0.5) for timing predictions
+        median_times = time_predictions[:, :, 1]  # [B, A] - q0.5
+        
+        # Apply valid mask
+        valid_times = median_times * valid_mask.float()
+        
+        # Compute cumulative timing
+        cumulative_times = torch.cumsum(valid_times, dim=1)  # [B, A]
+        
+        # Penalize exceeding 600ms window
+        exceed_mask = cumulative_times > self.max_time  # [B, A]
+        exceed_penalty = torch.sum((cumulative_times - self.max_time) * exceed_mask.float())
+        
+        # Also penalize if cumulative times are too small (unrealistic)
+        min_time_penalty = torch.sum(torch.clamp(0.01 - cumulative_times, min=0.0))
+        
+        return exceed_penalty + min_time_penalty
+    
+    def _compute_sequence_length_consistency_loss(self, predictions: Dict[str, torch.Tensor], 
+                                                valid_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Compute sequence length consistency loss.
+        
+        Args:
+            predictions: Model predictions
+            valid_mask: [B, A] - valid action mask
+        """
+        if 'time_q' not in predictions or 'sequence_length' not in predictions:
+            return torch.tensor(0.0, device=valid_mask.device)
+        
+        # Get predicted sequence length
+        predicted_lengths = predictions['sequence_length']  # [B, 1]
+        
+        # Derive sequence length from timing predictions
+        median_times = predictions['time_q'][:, :, 1]  # [B, A] - q0.5
+        valid_times = median_times * valid_mask.float()
+        cumulative_times = torch.cumsum(valid_times, dim=1)  # [B, A]
+        
+        # Count actions that fit within 600ms
+        timing_derived_lengths = (cumulative_times <= self.max_time).sum(dim=1, keepdim=True).float()
+        
+        # Compute consistency loss
+        length_consistency_loss = F.mse_loss(predicted_lengths, timing_derived_lengths)
+        
+        return length_consistency_loss
+    
+    def _compute_temporal_coherence_loss(self, time_predictions: torch.Tensor, 
+                                       valid_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Compute temporal coherence loss to ensure realistic timing patterns.
+        
+        Args:
+            time_predictions: [B, A, 3] - quantile predictions
+            valid_mask: [B, A] - valid action mask
+        """
+        # Use median quantile for coherence
+        median_times = time_predictions[:, :, 1]  # [B, A]
+        
+        # Apply valid mask
+        valid_times = median_times * valid_mask.float()
+        
+        # Penalize unrealistic timing patterns
+        # 1. Actions should have reasonable intervals (not too fast, not too slow)
+        too_fast_penalty = torch.sum(torch.clamp(0.01 - valid_times, min=0.0))  # < 10ms
+        too_slow_penalty = torch.sum(torch.clamp(valid_times - 2.0, min=0.0))   # > 2s
+        
+        # 2. Timing should be somewhat consistent (not wildly varying)
+        # Compute variance in timing within each sequence
+        timing_variance = torch.var(valid_times, dim=1, keepdim=True)  # [B, 1]
+        variance_penalty = torch.mean(timing_variance)
+        
+        return too_fast_penalty + too_slow_penalty + variance_penalty
+
+
+class CumulativeTimingLoss(nn.Module):
+    """
+    Loss function that enforces cumulative timing logic.
+    
+    This loss ensures that timing predictions are cumulative from the start
+    of the 600ms window, not independent deltas.
+    """
+    
+    def __init__(self, max_time: float = 0.6, weight: float = 1.0):
+        super().__init__()
+        self.max_time = max_time
+        self.weight = weight
+        
+    def forward(self, time_predictions: torch.Tensor, 
+                target_times: torch.Tensor, 
+                valid_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Compute cumulative timing loss.
+        
+        Args:
+            time_predictions: [B, A, 3] - quantile predictions
+            target_times: [B, A] - target timing (cumulative from start)
+            valid_mask: [B, A] - valid action mask
+        """
+        # Use median quantile for loss computation
+        predicted_times = time_predictions[:, :, 1]  # [B, A] - q0.5
+        
+        # Apply valid mask
+        valid_predicted = predicted_times * valid_mask.float()
+        valid_targets = target_times * valid_mask.float()
+        
+        # Compute cumulative timing for predictions
+        cumulative_predicted = torch.cumsum(valid_predicted, dim=1)  # [B, A]
+        
+        # Target times should already be cumulative
+        cumulative_targets = valid_targets  # [B, A]
+        
+        # Compute loss between cumulative predictions and targets
+        timing_loss = F.mse_loss(cumulative_predicted, cumulative_targets)
+        
+        # Additional penalty for exceeding max time
+        exceed_mask = cumulative_predicted > self.max_time
+        exceed_penalty = torch.sum((cumulative_predicted - self.max_time) * exceed_mask.float())
+        
+        return self.weight * (timing_loss + exceed_penalty)

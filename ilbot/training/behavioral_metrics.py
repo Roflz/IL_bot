@@ -83,13 +83,8 @@ class BehavioralMetrics:
         # Calculate confidence metrics
         max_probs, predicted_events = torch.max(valid_probs, dim=1)
         
-        # Debug: Look at raw logits and probabilities
-        print(f"\n🔍 Event Classification Debug:")
-        print(f"  Raw logits range: [{valid_logits.min():.3f}, {valid_logits.max():.3f}]")
-        print(f"  Logits mean: {valid_logits.mean():.3f}")
-        print(f"  Logits std: {valid_logits.std():.3f}")
-        print(f"  Sample logits (first 3): {valid_logits[:3].tolist()}")
-        print(f"  Sample probs (first 3): {valid_probs[:3].tolist()}")
+
+
         
         metrics = {
             'mean_confidence': float(max_probs.mean()),

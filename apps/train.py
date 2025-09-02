@@ -35,6 +35,7 @@ def main():
     p.add_argument("--lw_scroll_y", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=1337)
     p.add_argument("--device", type=str, default="cuda")
+    p.add_argument("--use_sequential", action="store_true", help="Use SequentialImitationModel instead of ImitationHybridModel")
     args = p.parse_args()
 
     # auto-detect targets_version + enums from manifest
@@ -87,6 +88,7 @@ def main():
         },
         "seed": args.seed,
         "device": args.device,
+        "use_sequential": args.use_sequential,
     }
 
     print("OSRS Imitation Learning Training")
