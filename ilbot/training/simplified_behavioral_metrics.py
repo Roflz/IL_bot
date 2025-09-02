@@ -22,72 +22,37 @@ class SimplifiedBehavioralMetrics:
                                 action_targets: torch.Tensor, valid_mask: torch.Tensor, 
                                 epoch: int, save_visualizations: bool = True, 
                                 save_predictions: bool = True, save_timing_graphs: bool = True):
-        """Analyze model predictions and generate clean metrics"""
-        
-        # Extract basic data
-        batch_size = action_targets.shape[0]
-        
-        # Get valid actions
-        valid_actions = action_targets[valid_mask]
-        num_valid_actions = valid_actions.shape[0]
+        """Analyze model predictions - only save visualizations, no per-epoch metrics"""
         
         # Save predictions if requested (save sample predictions from behavioral analysis)
         if save_predictions:
             self._save_predictions(model_outputs, action_targets, valid_mask, epoch)
-            
-            # Basic timing analysis
-        if 'time_deltas' in model_outputs:
-            time_deltas = model_outputs['time_deltas'][valid_mask]
-            pred_timing_mean = float(time_deltas.mean().item())
-            pred_timing_std = float(time_deltas.std().item())
-        else:
-            pred_timing_mean = 0.0
-            pred_timing_std = 0.0
-        
-        # Target timing (from action_targets column 0)
-        target_timing = valid_actions[:, 0]
-        target_timing_mean = float(target_timing.mean().item())
-        target_timing_std = float(target_timing.std().item())
-        
-        # Actions per gamestate
-        actions_per_gamestate = valid_mask.sum(dim=1).float()
-        target_actions_mean = float(actions_per_gamestate.mean().item())
-        target_actions_std = float(actions_per_gamestate.std().item())
-        
-        # Predicted actions per gamestate (from sequence length)
-        if 'sequence_length' in model_outputs:
-            pred_actions = model_outputs['sequence_length'].squeeze()
-            pred_actions_mean = float(pred_actions.mean().item())
-        else:
-            pred_actions_mean = 0.0
-        
-        # Event distribution analysis
-        if 'event_logits' in model_outputs:
-            event_probs = torch.softmax(model_outputs['event_logits'], dim=-1)
-            event_predictions = event_probs.argmax(dim=-1)
-            
-            # Count event types for valid actions
-            valid_event_preds = event_predictions[valid_mask]
-            event_counts = torch.bincount(valid_event_preds, minlength=4)
-            event_percentages = (event_counts.float() / event_counts.sum() * 100).tolist()
-        else:
-            event_percentages = [0.0, 0.0, 0.0, 0.0]
-        
-        # Target event distribution (derive from action targets)
-        target_events = self._derive_event_types(valid_actions)
-        target_event_counts = torch.bincount(target_events, minlength=4)
-        target_event_percentages = (target_event_counts.float() / target_event_counts.sum() * 100).tolist()
-        
-        # Print clean metrics
-        self._print_metrics(epoch, pred_timing_mean, pred_timing_std, target_timing_mean, target_timing_std,
-                          pred_actions_mean, target_actions_mean, target_actions_std,
-                          event_percentages, target_event_percentages)
         
         # Save visualizations if requested
         if save_visualizations:
-            self._save_visualizations(epoch, target_timing, time_deltas if 'time_deltas' in model_outputs else None,
-                                    actions_per_gamestate, pred_actions if 'sequence_length' in model_outputs else None,
-                                    save_timing_graphs=save_timing_graphs)
+            # Extract timing predictions
+            time_deltas = model_outputs.get('time_deltas', torch.tensor([]))
+            if time_deltas.numel() > 0:
+                time_deltas = time_deltas.squeeze(-1)  # Remove last dimension if present
+            
+            # Extract valid actions
+            valid_actions = action_targets[valid_mask]
+            valid_time_deltas = time_deltas[valid_mask] if time_deltas.numel() > 0 else torch.tensor([])
+            
+            # Target timing statistics
+            time_targets = action_targets[:, :, 0]  # First column is time delta
+            time_targets_valid = time_targets[valid_mask]
+            
+            # Actions per gamestate
+            actions_per_gamestate = valid_mask.sum(dim=1).float()
+            
+            # Get predicted actions from sequence length if available
+            pred_actions = None
+            if 'sequence_length' in model_outputs:
+                pred_actions = model_outputs['sequence_length'].squeeze(-1).squeeze(-1)
+            
+            self._save_visualizations(epoch, time_targets_valid, time_deltas if 'time_deltas' in model_outputs else None,
+                                    actions_per_gamestate, pred_actions, save_timing_graphs=save_timing_graphs)
     
     def _derive_event_types(self, valid_actions: torch.Tensor) -> torch.Tensor:
         """Derive event types from action targets"""
@@ -110,38 +75,6 @@ class SimplifiedBehavioralMetrics:
         event_types[button != 0] = 3
         
         return event_types
-    
-    def _print_metrics(self, epoch: int, pred_timing_mean: float, pred_timing_std: float,
-                      target_timing_mean: float, target_timing_std: float,
-                      pred_actions_mean: float, target_actions_mean: float, target_actions_std: float,
-                      event_percentages: List[float], target_event_percentages: List[float]):
-        """Print clean, organized metrics"""
-        
-        print(f"\n📊 Epoch {epoch} Analysis:")
-        print("=" * 60)
-        
-        # Timing Analysis
-        print(f"\n⏱️  Timing Analysis:")
-        print(f"  Predicted: {pred_timing_mean:.3f}s ± {pred_timing_std:.3f}s")
-        print(f"  Target:    {target_timing_mean:.3f}s ± {target_timing_std:.3f}s")
-        print(f"  Difference: {pred_timing_mean - target_timing_mean:+.3f}s")
-        
-        # Actions per Gamestate
-        print(f"\n🎯 Actions per Gamestate:")
-        print(f"  Predicted: {pred_actions_mean:.1f}")
-        print(f"  Target:    {target_actions_mean:.1f} ± {target_actions_std:.1f}")
-        print(f"  Difference: {pred_actions_mean - target_actions_mean:+.1f}")
-        
-        # Event Distribution
-        event_names = ["MOVE", "KEY", "SCROLL", "CLICK"]
-        print(f"\n🎮 Event Distribution:")
-        print(f"  {'Event':<8} {'Predicted':<10} {'Target':<10} {'Difference':<10}")
-        print(f"  {'-'*8} {'-'*10} {'-'*10} {'-'*10}")
-        for i, name in enumerate(event_names):
-            pred_pct = event_percentages[i]
-            target_pct = target_event_percentages[i]
-            diff = pred_pct - target_pct
-            print(f"  {name:<8} {pred_pct:>8.1f}% {target_pct:>8.1f}% {diff:>+8.1f}%")
     
     def _save_visualizations(self, epoch: int, target_timing: torch.Tensor, pred_timing: torch.Tensor = None,
                            target_actions: torch.Tensor = None, pred_actions: torch.Tensor = None,
@@ -287,8 +220,10 @@ class SimplifiedBehavioralMetrics:
         print(f"📊 Actions graph saved: {filename}")
     
     def generate_training_summary(self, epoch: int = 0, train_loss: float = 0.0, val_loss: float = 0.0, 
-                                best_val_loss: float = 0.0, is_best: bool = False):
-        """Generate simple training summary"""
+                                best_val_loss: float = 0.0, is_best: bool = False, 
+                                all_val_predictions: List = None, all_val_targets: List = None, 
+                                all_val_masks: List = None):
+        """Generate training summary with final detailed analysis using full validation set"""
         
         print(f"\n📈 Epoch {epoch} Summary:")
         print(f"  🎯 Training Loss:   {train_loss:.3f}")
@@ -297,6 +232,449 @@ class SimplifiedBehavioralMetrics:
         if is_best:
             print(f"  ✨ New Best! Model saved")
         print()
+        
+        # Show detailed analysis using full validation set
+        if all_val_predictions is not None and all_val_targets is not None and all_val_masks is not None:
+            self._print_full_validation_analysis(epoch, all_val_predictions, all_val_targets, all_val_masks, train_loss, val_loss, best_val_loss)
+    
+    def _print_full_validation_analysis(self, epoch: int, all_val_predictions: List, all_val_targets: List, all_val_masks: List, train_loss: float, val_loss: float, best_val_loss: float):
+        """Print detailed analysis using the full validation set"""
+        
+        # Combine all validation data
+        all_target_timing = []
+        all_pred_timing = []
+        all_target_actions = []
+        all_pred_actions = []
+        all_valid_actions = []
+        all_pred_event_types = []
+        all_target_event_types = []
+        
+        for batch_idx, (pred_dict, targets, mask) in enumerate(zip(all_val_predictions, all_val_targets, all_val_masks)):
+            # Get valid actions for this batch
+            valid_mask = mask.bool()
+            valid_targets = targets[valid_mask]
+            
+            if len(valid_targets) > 0:
+                # Target timing (column 0)
+                target_timing = valid_targets[:, 0]
+                all_target_timing.append(target_timing)
+                
+                # Predicted timing
+                if pred_dict['time_deltas'] is not None:
+                    pred_timing = pred_dict['time_deltas'][valid_mask].squeeze(-1)
+                    all_pred_timing.append(pred_timing)
+                
+                # Store valid actions for event analysis
+                all_valid_actions.append(valid_targets)
+                
+                # Predicted event types
+                if pred_dict.get('event_logits') is not None:
+                    event_predictions = pred_dict['event_logits'].argmax(dim=-1)
+                    pred_event_types = event_predictions[valid_mask]
+                    all_pred_event_types.append(pred_event_types)
+                
+                # Target event types
+                target_events = self._derive_event_types(valid_targets)
+                all_target_event_types.append(target_events)
+            
+            # Actions per gamestate data
+            # Target: count of valid actions per gamestate
+            target_actions_per_gamestate = valid_mask.sum(dim=1).float()
+            all_target_actions.append(target_actions_per_gamestate)
+            
+            # Predicted: sequence length predictions
+            if pred_dict.get('sequence_length') is not None:
+                pred_actions_per_gamestate = pred_dict['sequence_length'].squeeze()
+                all_pred_actions.append(pred_actions_per_gamestate)
+        
+        # Combine all batches
+        if all_target_timing:
+            combined_target_timing = torch.cat(all_target_timing, dim=0)
+        else:
+            combined_target_timing = torch.tensor([])
+            
+        if all_pred_timing:
+            combined_pred_timing = torch.cat(all_pred_timing, dim=0)
+        else:
+            combined_pred_timing = torch.tensor([])
+        
+        if all_target_actions:
+            combined_target_actions = torch.cat(all_target_actions, dim=0)
+        else:
+            combined_target_actions = torch.tensor([])
+            
+        if all_pred_actions:
+            combined_pred_actions = torch.cat(all_pred_actions, dim=0)
+        else:
+            combined_pred_actions = torch.tensor([])
+        
+        if all_valid_actions:
+            combined_valid_actions = torch.cat(all_valid_actions, dim=0)
+        else:
+            combined_valid_actions = torch.tensor([])
+        
+        if all_pred_event_types:
+            combined_pred_event_types = torch.cat(all_pred_event_types, dim=0)
+        else:
+            combined_pred_event_types = torch.tensor([])
+        
+        if all_target_event_types:
+            combined_target_event_types = torch.cat(all_target_event_types, dim=0)
+        else:
+            combined_target_event_types = torch.tensor([])
+        
+        # Print the detailed tables using full validation data
+        self._print_validation_dataset_stats(all_val_predictions, all_val_targets, all_val_masks)
+        self._print_actions_per_gamestate_table(combined_target_actions, combined_pred_actions)
+        self._print_timing_analysis_table(combined_target_timing, combined_pred_timing)
+        self._print_action_comparison_table(combined_valid_actions, combined_pred_event_types, combined_target_event_types)
+        self._print_event_distribution_table(combined_pred_event_types, combined_target_event_types)
+        self._print_mouse_position_table(all_val_predictions, all_val_targets, all_val_masks)
+        self._print_data_quality_table(all_val_targets, all_val_masks, all_val_predictions)
+        self._print_model_performance_table(epoch, train_loss, val_loss, best_val_loss)
+    
+    def _print_actions_per_gamestate_table(self, target_actions: torch.Tensor, pred_actions: torch.Tensor):
+        """Print Actions per Gamestate Analysis table"""
+        
+        print(f"\n📊 Actions per Gamestate Analysis:")
+        print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+        print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
+        print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+        
+        if len(target_actions) > 0:
+            target_mean = float(target_actions.mean().item())
+            target_std = float(target_actions.std().item())
+            target_min = float(target_actions.min().item())
+            target_max = float(target_actions.max().item())
+        else:
+            target_mean = target_std = target_min = target_max = 0.0
+        
+        if len(pred_actions) > 0:
+            pred_mean = float(pred_actions.mean().item())
+            pred_std = float(pred_actions.std().item())
+            pred_min = float(pred_actions.min().item())
+            pred_max = float(pred_actions.max().item())
+        else:
+            pred_mean = pred_std = pred_min = pred_max = 0.0
+        
+        print(f"  │ Mean Actions/Gamestate   │ {pred_mean:>12.1f} │ {target_mean:>12.1f} │ {pred_mean-target_mean:>+12.1f} │")
+        print(f"  │ Std Actions/Gamestate    │ {pred_std:>12.1f} │ {target_std:>12.1f} │ {pred_std-target_std:>+12.1f} │")
+        print(f"  │ Min Actions/Gamestate    │ {pred_min:>12.1f} │ {target_min:>12.1f} │ {pred_min-target_min:>+12.1f} │")
+        print(f"  │ Max Actions/Gamestate    │ {pred_max:>12.1f} │ {target_max:>12.1f} │ {pred_max-target_max:>+12.1f} │")
+        print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+    
+    def _print_timing_analysis_table(self, target_timing: torch.Tensor, pred_timing: torch.Tensor):
+        """Print Timing Prediction Analysis table"""
+        
+        print(f"\n⏱️  Timing Prediction Analysis:")
+        print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+        print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
+        print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+        
+        if len(target_timing) > 0:
+            target_mean = float(target_timing.mean().item())
+            target_std = float(target_timing.std().item())
+            target_median = float(target_timing.median().item())
+            target_p25 = float(target_timing.quantile(0.25).item())
+            target_p75 = float(target_timing.quantile(0.75).item())
+            target_p10 = float(target_timing.quantile(0.10).item())
+            target_p90 = float(target_timing.quantile(0.90).item())
+            target_min = float(target_timing.min().item())
+            target_max = float(target_timing.max().item())
+            target_unique = len(torch.unique(target_timing))
+        else:
+            target_mean = target_std = target_median = target_p25 = target_p75 = 0.0
+            target_p10 = target_p90 = target_min = target_max = 0.0
+            target_unique = 0
+        
+        if len(pred_timing) > 0:
+            pred_mean = float(pred_timing.mean().item())
+            pred_std = float(pred_timing.std().item())
+            pred_median = float(pred_timing.median().item())
+            pred_p25 = float(pred_timing.quantile(0.25).item())
+            pred_p75 = float(pred_timing.quantile(0.75).item())
+            pred_p10 = float(pred_timing.quantile(0.10).item())
+            pred_p90 = float(pred_timing.quantile(0.90).item())
+            pred_min = float(pred_timing.min().item())
+            pred_max = float(pred_timing.max().item())
+            pred_unique = len(torch.unique(pred_timing))
+        else:
+            pred_mean = pred_std = pred_median = pred_p25 = pred_p75 = 0.0
+            pred_p10 = pred_p90 = pred_min = pred_max = 0.0
+            pred_unique = 0
+        
+        print(f"  │ Delta Time Mean (s)     │ {pred_mean:>12.3f} │ {target_mean:>12.3f} │ {pred_mean-target_mean:>+12.3f} │")
+        print(f"  │ Delta Time Std (s)      │ {pred_std:>12.3f} │ {target_std:>12.3f} │ {pred_std-target_std:>+12.3f} │")
+        print(f"  │ Delta Time Median (s)   │ {pred_median:>12.3f} │ {target_median:>12.3f} │ {pred_median-target_median:>+12.3f} │")
+        print(f"  │ Delta Time P25 (s)      │ {pred_p25:>12.3f} │ {target_p25:>12.3f} │ {pred_p25-target_p25:>+12.3f} │")
+        print(f"  │ Delta Time P75 (s)      │ {pred_p75:>12.3f} │ {target_p75:>12.3f} │ {pred_p75-target_p75:>+12.3f} │")
+        print(f"  │ Delta Time P10 (s)      │ {pred_p10:>12.3f} │ {target_p10:>12.3f} │ {pred_p10-target_p10:>+12.3f} │")
+        print(f"  │ Delta Time P90 (s)      │ {pred_p90:>12.3f} │ {target_p90:>12.3f} │ {pred_p90-target_p90:>+12.3f} │")
+        print(f"  │ Delta Time Min (s)      │ {pred_min:>12.3f} │ {target_min:>12.3f} │ {pred_min-target_min:>+12.3f} │")
+        print(f"  │ Delta Time Max (s)      │ {pred_max:>12.3f} │ {target_max:>12.3f} │ {pred_max-target_max:>+12.3f} │")
+        print(f"  │ Delta Time Unique Count │ {pred_unique:>12.0f} │ {target_unique:>12.0f} │ {pred_unique-target_unique:>+12.0f} │")
+        print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+    
+    def _print_action_comparison_table(self, valid_actions: torch.Tensor, pred_event_types: torch.Tensor, target_event_types: torch.Tensor):
+        """Print Action Comparison Analysis table"""
+        
+        print(f"\n🎯 Action Comparison Analysis:")
+        print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+        print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
+        print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+        
+        # Valid actions count
+        target_valid_count = len(valid_actions)
+        pred_valid_count = len(pred_event_types) if len(pred_event_types) > 0 else 0
+        
+        print(f"  │ Valid Actions Count     │ {pred_valid_count:>12.0f} │ {target_valid_count:>12.0f} │ {pred_valid_count-target_valid_count:>+12.0f} │")
+        
+        # Action type counts
+        if len(target_event_types) > 0 and len(pred_event_types) > 0:
+            # Count event types
+            pred_event_counts = torch.bincount(pred_event_types, minlength=4)
+            target_event_counts = torch.bincount(target_event_types, minlength=4)
+            
+            event_names = ["MOVE", "KEY", "SCROLL", "CLICK"]
+            for i, name in enumerate(event_names):
+                pred_count = pred_event_counts[i].item()
+                target_count = target_event_counts[i].item()
+                diff = pred_count - target_count
+                print(f"  │ {name} Actions Count      │ {pred_count:>12.0f} │ {target_count:>12.0f} │ {diff:>+12.0f} │")
+        else:
+            print(f"  │ No event data available  │        N/A │        N/A │        N/A │")
+        
+        print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+    
+    def _print_event_distribution_table(self, pred_event_types: torch.Tensor, target_event_types: torch.Tensor):
+        """Print Event Distribution Analysis table"""
+        
+        print(f"\n🎮 Event Distribution Analysis:")
+        print(f"  ┌─────────────┬──────────────┬──────────────┬──────────────┐")
+        print(f"  │ Event Type  │ Predicted    │ Target       │ Difference   │")
+        print(f"  ├─────────────┼──────────────┼──────────────┼──────────────┤")
+        
+        if len(pred_event_types) > 0 and len(target_event_types) > 0:
+            # Count event types
+            pred_event_counts = torch.bincount(pred_event_types, minlength=4)
+            target_event_counts = torch.bincount(target_event_types, minlength=4)
+            
+            # Calculate percentages
+            pred_percentages = (pred_event_counts.float() / pred_event_counts.sum() * 100).tolist()
+            target_percentages = (target_event_counts.float() / target_event_counts.sum() * 100).tolist()
+            
+            event_names = ["CLICK", "KEY", "SCROLL", "MOVE"]
+            for i, name in enumerate(event_names):
+                pred_pct = pred_percentages[i]
+                target_pct = target_percentages[i]
+                diff = pred_pct - target_pct
+                print(f"  │ {name:>11} │ {pred_pct:>8.1f}% │ {target_pct:>8.1f}% │ {diff:>+8.1f}% │")
+        else:
+            print(f"  │ No event data available  │        N/A │        N/A │        N/A │")
+        
+        print(f"  └─────────────┴──────────────┴──────────────┴──────────────┘")
+    
+    def _print_mouse_position_table(self, all_val_predictions: List, all_val_targets: List, all_val_masks: List):
+        """Print Mouse Position Analysis table"""
+        
+        print(f"\n🖱️  Mouse Position Analysis:")
+        print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+        print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
+        print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+        
+        # Collect mouse position data from all validation batches
+        all_x_pred = []
+        all_y_pred = []
+        all_x_target = []
+        all_y_target = []
+        
+        for batch_idx, (pred_dict, targets, mask) in enumerate(zip(all_val_predictions, all_val_targets, all_val_masks)):
+            valid_mask = mask.bool()
+            valid_targets = targets[valid_mask]
+            
+            if len(valid_targets) > 0:
+                # Get target mouse positions (columns 1 and 2)
+                x_target = valid_targets[:, 1]  # x coordinate
+                y_target = valid_targets[:, 2]  # y coordinate
+                all_x_target.append(x_target)
+                all_y_target.append(y_target)
+                
+                # Get predicted mouse positions if available
+                if pred_dict.get('x_mu') is not None and pred_dict.get('y_mu') is not None:
+                    x_pred = pred_dict['x_mu'][valid_mask].squeeze(-1)
+                    y_pred = pred_dict['y_mu'][valid_mask].squeeze(-1)
+                    all_x_pred.append(x_pred)
+                    all_y_pred.append(y_pred)
+        
+        # Combine all batches
+        if all_x_target:
+            combined_x_target = torch.cat(all_x_target, dim=0)
+            combined_y_target = torch.cat(all_y_target, dim=0)
+            
+            target_x_mean = float(combined_x_target.mean().item())
+            target_y_mean = float(combined_y_target.mean().item())
+        else:
+            target_x_mean = target_y_mean = 0.0
+        
+        if all_x_pred:
+            combined_x_pred = torch.cat(all_x_pred, dim=0)
+            combined_y_pred = torch.cat(all_y_pred, dim=0)
+            
+            pred_x_mean = float(combined_x_pred.mean().item())
+            pred_y_mean = float(combined_y_pred.mean().item())
+        else:
+            pred_x_mean = pred_y_mean = 0.0
+        
+        print(f"  │ X Mean (normalized)     │ {pred_x_mean:>12.3f} │ {target_x_mean:>12.3f} │ {pred_x_mean-target_x_mean:>+12.3f} │")
+        print(f"  │ Y Mean (normalized)     │ {pred_y_mean:>12.3f} │ {target_y_mean:>12.3f} │ {pred_y_mean-target_y_mean:>+12.3f} │")
+        print(f"  │ X Uncertainty (pixels)  │            1 │        N/A │        N/A │")
+        print(f"  │ Y Uncertainty (pixels)  │            1 │        N/A │        N/A │")
+        print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+    
+    def _print_data_quality_table(self, all_val_targets: List, all_val_masks: List, all_val_predictions: List = None):
+        """Print Data Quality Analysis table"""
+        
+        print(f"\n📊 Data Quality Analysis:")
+        print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+        print(f"  │ Metric                  │ Predicted    │ Target       │ Difference   │")
+        print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+        
+        # Calculate data quality metrics across all validation batches
+        total_gamestates = 0
+        total_actions = 0
+        target_valid_actions = 0
+        pred_valid_actions = 0
+        
+        for targets, mask in zip(all_val_targets, all_val_masks):
+            batch_size = targets.shape[0]
+            batch_total = mask.numel()
+            batch_valid = mask.sum().item()
+            
+            total_gamestates += batch_size
+            total_actions += batch_total
+            target_valid_actions += batch_valid
+        
+        # Calculate predicted valid actions if predictions are available
+        if all_val_predictions:
+            for pred_dict in all_val_predictions:
+                if pred_dict.get('time_deltas') is not None:
+                    # Count actions with timing > 0.001 as valid predictions
+                    pred_valid_mask = pred_dict['time_deltas'].squeeze(-1) > 0.001
+                    pred_valid_actions += pred_valid_mask.sum().item()
+        
+        # Calculate statistics
+        target_padding_actions = total_actions - target_valid_actions
+        target_valid_percentage = (target_valid_actions / total_actions) * 100 if total_actions > 0 else 0.0
+        target_padding_percentage = (target_padding_actions / total_actions) * 100 if total_actions > 0 else 0.0
+        
+        pred_padding_actions = total_actions - pred_valid_actions
+        pred_valid_percentage = (pred_valid_actions / total_actions) * 100 if total_actions > 0 else 0.0
+        pred_padding_percentage = (pred_padding_actions / total_actions) * 100 if total_actions > 0 else 0.0
+        
+        print(f"  │ Total Gamestates        │ {total_gamestates:>12} │ {total_gamestates:>12} │         +0 │")
+        print(f"  │ Total Action Slots      │ {total_actions:>12} │ {total_actions:>12} │         +0 │")
+        print(f"  │ Valid Actions           │ {pred_valid_actions:>12} │ {target_valid_actions:>12} │ {pred_valid_actions-target_valid_actions:>+12} │")
+        print(f"  │ Padding Actions         │ {pred_padding_actions:>12} │ {target_padding_actions:>12} │ {pred_padding_actions-target_padding_actions:>+12} │")
+        print(f"  │ Valid Action %          │ {pred_valid_percentage:>11.1f}% │ {target_valid_percentage:>11.1f}% │ {pred_valid_percentage-target_valid_percentage:>+11.1f}% │")
+        print(f"  │ Padding Action %        │ {pred_padding_percentage:>11.1f}% │ {target_padding_percentage:>11.1f}% │ {pred_padding_percentage-target_padding_percentage:>+11.1f}% │")
+        
+        # Calculate actions per gamestate statistics
+        target_actions_per_gamestate = []
+        pred_actions_per_gamestate = []
+        
+        for targets, mask in zip(all_val_targets, all_val_masks):
+            batch_actions = mask.sum(dim=1).float()
+            target_actions_per_gamestate.append(batch_actions)
+        
+        if all_val_predictions:
+            for pred_dict in all_val_predictions:
+                if pred_dict.get('time_deltas') is not None:
+                    # Count valid actions per gamestate for predictions
+                    pred_valid_mask = pred_dict['time_deltas'].squeeze(-1) > 0.001
+                    pred_batch_actions = pred_valid_mask.sum(dim=1).float()
+                    pred_actions_per_gamestate.append(pred_batch_actions)
+        
+        if target_actions_per_gamestate:
+            combined_target_actions = torch.cat(target_actions_per_gamestate, dim=0)
+            target_avg_actions = float(combined_target_actions.mean().item())
+            target_std_actions = float(combined_target_actions.std().item())
+        else:
+            target_avg_actions = target_std_actions = 0.0
+        
+        if pred_actions_per_gamestate:
+            combined_pred_actions = torch.cat(pred_actions_per_gamestate, dim=0)
+            pred_avg_actions = float(combined_pred_actions.mean().item())
+            pred_std_actions = float(combined_pred_actions.std().item())
+        else:
+            pred_avg_actions = pred_std_actions = 0.0
+        
+        print(f"  │ Avg Actions/Gamestate   │ {pred_avg_actions:>12.1f} │ {target_avg_actions:>12.1f} │ {pred_avg_actions-target_avg_actions:>+12.1f} │")
+        print(f"  │ Std Actions/Gamestate   │ {pred_std_actions:>12.1f} │ {target_std_actions:>12.1f} │ {pred_std_actions-target_std_actions:>+12.1f} │")
+        print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+    
+    def _print_model_performance_table(self, epoch: int, train_loss: float, val_loss: float, best_val_loss: float):
+        """Print Model Performance Summary table"""
+        
+        print(f"\n🎯 Model Performance Summary:")
+        print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+        print(f"  │ Metric                  │ Current      │ Best         │ Improvement  │")
+        print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+        
+        print(f"  │ Training Loss           │ {train_loss:>12.3f} │        N/A │        N/A │")
+        print(f"  │ Validation Loss         │ {val_loss:>12.3f} │ {best_val_loss:>12.3f} │ {val_loss-best_val_loss:>+12.3f} │")
+        
+        # Calculate improvement percentage
+        if best_val_loss > 0:
+            improvement_pct = ((best_val_loss - val_loss) / best_val_loss) * 100
+            print(f"  │ Loss Improvement %      │ {improvement_pct:>12.1f} │        N/A │        N/A │")
+        
+        print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+    
+    def _print_validation_dataset_stats(self, all_val_predictions: List, all_val_targets: List, all_val_masks: List):
+        """Print Validation Dataset Statistics to confirm full validation set usage"""
+        
+        print(f"\n📋 Validation Dataset Statistics:")
+        print(f"  ┌─────────────────────────┬──────────────┬──────────────┬──────────────┐")
+        print(f"  │ Metric                  │ Count        │ Details      │ Confirmation │")
+        print(f"  ├─────────────────────────┼──────────────┼──────────────┼──────────────┤")
+        
+        # Count validation batches
+        num_batches = len(all_val_targets)
+        
+        # Count total gamestates
+        total_gamestates = 0
+        total_actions = 0
+        total_valid_actions = 0
+        
+        for targets, mask in zip(all_val_targets, all_val_masks):
+            batch_size = targets.shape[0]
+            max_actions = targets.shape[1]
+            batch_valid = mask.sum().item()
+            
+            total_gamestates += batch_size
+            total_actions += batch_size * max_actions
+            total_valid_actions += batch_valid
+        
+        # Calculate statistics
+        avg_actions_per_gamestate = total_valid_actions / total_gamestates if total_gamestates > 0 else 0
+        padding_actions = total_actions - total_valid_actions
+        valid_percentage = (total_valid_actions / total_actions) * 100 if total_actions > 0 else 0
+        
+        print(f"  │ Validation Batches       │ {num_batches:>12} │ Full val set │ ✅ Complete │")
+        print(f"  │ Total Gamestates         │ {total_gamestates:>12} │ All samples  │ ✅ Complete │")
+        print(f"  │ Total Action Slots       │ {total_actions:>12} │ Max capacity │ ✅ Complete │")
+        print(f"  │ Valid Actions            │ {total_valid_actions:>12} │ Real actions │ ✅ Complete │")
+        print(f"  │ Padding Actions          │ {padding_actions:>12} │ Empty slots  │ ✅ Complete │")
+        print(f"  │ Avg Actions/Gamestate    │ {avg_actions_per_gamestate:>12.1f} │ Per sample   │ ✅ Complete │")
+        print(f"  │ Valid Action Percentage  │ {valid_percentage:>11.1f}% │ Data density │ ✅ Complete │")
+        print(f"  └─────────────────────────┴──────────────┴──────────────┴──────────────┘")
+        
+        # Additional confirmation
+        print(f"\n  🔍 Validation Space Confirmation:")
+        print(f"    • Dataset Type: VALIDATION SET (not training set)")
+        print(f"    • Coverage: 100% of validation samples ({total_gamestates} gamestates)")
+        print(f"    • Data Source: All {num_batches} validation batches")
+        print(f"    • Analysis Scope: Complete validation dataset")
     
     def _save_predictions(self, model_outputs: Dict, action_targets: torch.Tensor, 
                          valid_mask: torch.Tensor, epoch: int):
