@@ -300,7 +300,7 @@ def train_one_epoch(
         # Logging
         if step % cfg.log_interval == 0:
             lr = optimizer.param_groups[0]["lr"]
-            print(f"[{epoch:03d}/{cfg.epochs:03d}] Step {step:04d} | "
+            print(f"[{epoch:03d}/{cfg.epochs:03d}]\n| Step {step:04d} | "
                   f"loss={ema_state['total']:.4f} | "
                   f"event={ema_state['event_ce']:.4f} | "
                   f"time={ema_state['timing_pinball']:.4f} | "

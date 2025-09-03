@@ -29,6 +29,8 @@ data/runelite_gamestates/
 data/runelite_screenshots/
 data/actions.csv
 data/recording_sessions/
+data/eval
+test_inference_output/
 *.npy
 *.json
 !config.json
@@ -90,3 +92,4 @@ logs/
 training_results/
 data/**/*.npy
 !data/sample_data/**
+data/eval/amp_probe_val/xy_scatter_norm.png
