@@ -1,9 +1,0 @@
-[project]
-name = "ilbot"
-version = "0.1.0"
-description = "OSRS imitation learning bot"
-requires-python = ">=3.10"
-dependencies = ["torch>=2.2","numpy","tqdm","matplotlib","scikit-learn"]
-
-[tool.setuptools]
-packages = ["ilbot","apps"]
