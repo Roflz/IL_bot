@@ -20,9 +20,22 @@ class SequentialImitationModel(nn.Module):
         self.event_types = int(data_config.get("event_types", 4))
         enum_sizes = enum_sizes or {"button":3, "key_action":3, "key_id":505, "scroll":3}
 
-        self.gs_enc = nn.Sequential(nn.Linear(self.Dg, hidden_dim), nn.ReLU(), nn.LayerNorm(hidden_dim))
-        self.act_enc = nn.Sequential(nn.Linear(self.Fa, hidden_dim//2), nn.ReLU(), nn.LayerNorm(hidden_dim//2))
-        self.fuse = nn.Sequential(nn.Linear(hidden_dim + hidden_dim//2, hidden_dim), nn.ReLU(), nn.LayerNorm(hidden_dim))
+        # Pre-normalize *inputs* before the first Linear to avoid FP16 overflow
+        self.gs_enc = nn.Sequential(
+            nn.LayerNorm(self.Dg),
+            nn.Linear(self.Dg, hidden_dim),
+            nn.ReLU(),
+        )
+        self.act_enc = nn.Sequential(
+            nn.LayerNorm(self.Fa),
+            nn.Linear(self.Fa, hidden_dim // 2),
+            nn.ReLU(),
+        )
+        self.fuse = nn.Sequential(
+            nn.LayerNorm(hidden_dim + hidden_dim // 2),
+            nn.Linear(hidden_dim + hidden_dim // 2, hidden_dim),
+            nn.ReLU(),
+        )
 
         self.decoder = SequentialActionDecoder(input_dim=hidden_dim, max_actions=self.A, enum_sizes=enum_sizes, event_types=self.event_types, horizon_s=horizon_s)
 

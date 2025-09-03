@@ -25,6 +25,7 @@ from ilbot.data.contracts import derive_event_targets_from_marks
 
 def _print_run_header(cfg, data_config: Dict[str, Any], model: nn.Module, loss_fn: AdvancedUnifiedEventLoss, device: torch.device, train_loader, val_loader) -> None:
     print("\n==================== TRAIN SETUP ====================")
+    total_steps = cfg.epochs * len(train_loader)
     print(f"Device: {device.type} | AMP: {cfg.amp}")
     print(f"Seed: {cfg.seed}")
     print(f"Data dims: Dg={data_config.get('gamestate_dim')}  T={data_config.get('temporal_window')}  "
@@ -38,11 +39,14 @@ def _print_run_header(cfg, data_config: Dict[str, Any], model: nn.Module, loss_f
     except Exception:
         print("Normalization bounds: (unavailable in header; dataset already enforced it)")
     # loss weights & clamps
-    print(f"Loss weights: event={loss_fn.event_weight}  timing={loss_fn.timing_weight}  xy={loss_fn.xy_weight}  qc={loss_fn.qc_weight}")
-    print(f"XY logσ clamp: [{LOGSIG_MIN}, {LOGSIG_MAX}]  (σ≈[{math.exp(LOGSIG_MIN):.3f}, {math.exp(LOGSIG_MAX):.3f}])")
+    print(f"Loss weights: event={loss_fn.event_weight}  timing={loss_fn.timing_weight}  xy={loss_fn.xy_weight}  qc={getattr(loss_fn,'qc_weight',0.0)}")
+    print(f"XY logσ clamp: [{getattr(loss_fn,'logsig_min',-3.0)}, {getattr(loss_fn,'logsig_max',0.0)}]  (σ≈[{math.exp(getattr(loss_fn,'logsig_min',-3.0)):.3f}, {math.exp(getattr(loss_fn,'logsig_max',0.0)):.3f}])")
     # model params
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {n_params:,}")
+    # new visibility
+    print(f"Optimizer: AdamW | lr={cfg.lr} | weight_decay={cfg.weight_decay} | grad_clip={cfg.grad_clip}")
+    print(f"Scheduler: CosineLR | total_steps={total_steps} | steps/epoch={len(train_loader)}")
     # --- Snapshot the first batch of each loader for mask stats
     def _snapshot(name: str, loader):
         try:
@@ -229,8 +233,10 @@ def train_one_epoch(
         
         optimizer.zero_grad()
         
-        with autocast(device_type=("cuda" if device.type=="cuda" else None), enabled=(cfg.amp and device.type == "cuda")):
+        with autocast(device_type='cuda', enabled=(cfg.amp and device.type == "cuda")):
             outputs = model(gs, ai, vm)
+            # loss in FP32 even under AMP
+            outputs = {k: v.float() for k, v in outputs.items()}
             
             # Strict pre-loss checks (fail-fast at the true source)
             # Dump the *very first* batch for maximum visibility
@@ -247,8 +253,12 @@ def train_one_epoch(
                         print(_stats_str(tens, f"NON-FINITE {head_name}"))
                         raise RuntimeError(f"Non-finite values in model output head '{head_name}' at step {step}")
 
-            loss_dict = loss_fn(outputs, tg, vm)
-            total_loss = loss_dict["total"]
+            loss_out = loss_fn(outputs, tg, vm)
+            total_loss = (
+                loss_out["event_ce"] * loss_fn.event_weight
+                + loss_out["timing_pinball"] * loss_fn.timing_weight
+                + (loss_out["x_gaussian_nll"] + loss_out["y_gaussian_nll"]) * 0.5 * loss_fn.xy_weight
+            )
         
         # Backward pass
         if cfg.amp and device.type == "cuda":
@@ -281,10 +291,10 @@ def train_one_epoch(
         
         # Update EMA
         ema_state["total"] = ema(float(total_loss), ema_state["total"])
-        ema_state["event_ce"] = ema(float(loss_dict["event_ce"]), ema_state["event_ce"])
-        ema_state["timing_pinball"] = ema(float(loss_dict["timing_pinball"]), ema_state["timing_pinball"])
-        ema_state["x_nll"] = ema(float(loss_dict["x_gaussian_nll"]), ema_state["x_nll"])
-        ema_state["y_nll"] = ema(float(loss_dict["y_gaussian_nll"]), ema_state["y_nll"])
+        ema_state["event_ce"] = ema(float(loss_out["event_ce"]), ema_state["event_ce"])
+        ema_state["timing_pinball"] = ema(float(loss_out["timing_pinball"]), ema_state["timing_pinball"])
+        ema_state["x_nll"] = ema(float(loss_out["x_gaussian_nll"]), ema_state["x_nll"])
+        ema_state["y_nll"] = ema(float(loss_out["y_gaussian_nll"]), ema_state["y_nll"])
         ema_state["grad_norm"] = ema(float(grad_norm), ema_state["grad_norm"])
         
         # Logging
@@ -303,7 +313,7 @@ def train_one_epoch(
         if not torch.isfinite(total_loss):
             # Compute components + quick head summary for context
             components = {k: (v.item() if isinstance(v, torch.Tensor) else float(v))
-                          for k,v in loss_dict.items() if k != "total"}
+                          for k,v in loss_out.items() if k != "total"}
             heads_finite = {hn: (torch.isfinite(outputs[hn]).all().item() if hn in outputs else False)
                             for hn in ("event_logits","time_delta_q","x_mu","y_mu","x_logsigma","y_logsigma")}
             print(_stats_str(total_loss, "loss.total"))
@@ -359,13 +369,17 @@ def validate(
                 action_sequence=batch["action_sequence"],
                 valid_mask=batch["valid_mask"]
             )
-            loss_dict = loss_fn(outputs, batch["targets"], batch["valid_mask"])
-            total_loss = loss_dict["total"]
+            loss_out = loss_fn(outputs, batch["targets"], batch["valid_mask"])
+            total_loss = (
+                loss_out["event_ce"] * loss_fn.event_weight
+                + loss_out["timing_pinball"] * loss_fn.timing_weight
+                + (loss_out["x_gaussian_nll"] + loss_out["y_gaussian_nll"]) * 0.5 * loss_fn.xy_weight
+            )
             
             # Store losses
             total_losses.append(float(total_loss))
             for key in loss_components:
-                loss_components[key].append(float(loss_dict[key]))
+                loss_components[key].append(float(loss_out[key]))
             
             # Compute metrics
             mask = batch["valid_mask"]
