@@ -30,7 +30,23 @@ class SequentialImitationModel(nn.Module):
         B = temporal_sequence.size(0)
         gs_last = temporal_sequence[:, -1, :]              # [B,Dg]
         gs_feat = self.gs_enc(gs_last)                     # [B,H]
-        act_mean = action_sequence.mean(dim=(1,2))         # [B,Fa]
-        act_feat = self.act_enc(act_mean)                  # [B,H/2]
+        
+        # Action history encoder (pooled)  [B, Fa] -> [B, H//2]
+        # SAFE POOLING: avoid division-by-zero when a sequence has no valid actions
+        # Use last timestep actions and pool across A with the provided valid_mask.
+        B, T, A, F = action_sequence.shape
+        last_actions = action_sequence[:, -1, :, :]                 # [B, A, Fa]
+        maskA = valid_mask.to(last_actions.dtype).unsqueeze(-1)     # [B, A, 1]
+        num = (last_actions * maskA).sum(dim=1)                     # [B, Fa]
+        den = maskA.sum(dim=1).clamp_min(1.0)                       # [B, 1]
+        pooled = num / den                                          # [B, Fa]
+        # Fail fast if anything went non-finite
+        if not torch.isfinite(pooled).all():
+            bad = ~torch.isfinite(pooled)
+            raise RuntimeError(
+                f"Action pooling produced non-finite values: count={int(bad.sum())}. "
+                f"Hint: some sequences may have zero valid actions; pooling now guards via clamp_min(1.0)."
+            )
+        act_feat = self.act_enc(pooled)                  # [B,H/2]
         fused = self.fuse(torch.cat([gs_feat, act_feat], dim=-1))  # [B,H]
         return self.decoder(fused, valid_mask)

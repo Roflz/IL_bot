@@ -1,5 +1,6 @@
 # ilbot/model/decoder.py
 from typing import Dict, Optional
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -36,6 +37,11 @@ class SequentialActionDecoder(nn.Module):
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None: nn.init.zeros_(m.bias)
+        # Start σ ≈ 0.1 so XY NLL gradients are moderate from step 0
+        if self.x_ls.bias is not None:
+            self.x_ls.bias.data.fill_(math.log(0.1))
+        if self.y_ls.bias is not None:
+            self.y_ls.bias.data.fill_(math.log(0.1))
 
     @staticmethod
     def _pad(list_of_B_tensors, pad_shape, device, pad_value=0.0):

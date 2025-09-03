@@ -1,6 +1,8 @@
 # ilbot/training/losses.py
 from typing import Dict, Tuple, Optional
 import math
+LOGSIG_MIN = -3.0   # σ >= ~0.05 in normalized [0,1] space
+LOGSIG_MAX =  0.0   # σ <= 1.0
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,11 +33,23 @@ def gaussian_nll(mu: torch.Tensor, logsig: torch.Tensor, target: torch.Tensor, m
     mu, logsig, target: [B,A]; mask: [B,A] bool
     """
     assert mu.shape == logsig.shape == target.shape == mask.shape
-    var = torch.exp(2.0 * logsig).clamp_min(1e-6)
-    # Full Normal NLL: 0.5*((x-μ)^2/σ^2) + log σ + 0.5*log(2π)
-    nll = 0.5 * ((target - mu)**2 / var) + logsig + 0.5 * math.log(2.0 * math.pi)
-    nll = nll.masked_fill(~mask, 0.0)
-    denom = mask.sum().clamp_min(1)
+    # Fail-fast sanity for inputs
+    if not (torch.isfinite(mu).all() and torch.isfinite(logsig).all() and torch.isfinite(target).all()):
+        raise RuntimeError("Non-finite input to gaussian_nll (mu/logsig/target)")
+    
+    # Hard guard: re-clamp logsig here to avoid overflow under AMP, even if decoder regresses
+    logsig = torch.clamp(logsig, LOGSIG_MIN, LOGSIG_MAX)
+    var = torch.exp(2.0 * logsig) + 1e-8
+    nll = 0.5 * ((target - mu) ** 2 / var) + logsig + 0.5 * math.log(2.0 * math.pi)
+    if not torch.isfinite(nll).all():
+        raise RuntimeError("Non-finite nll inside gaussian_nll (after clamp)")
+    # mask: [B,A] -> broadcast to heads if needed
+    if nll.dim() == 3 and mask.dim() == 2:
+        mask = mask.unsqueeze(-1)
+    nll = torch.where(mask, nll, torch.zeros_like(nll))
+    denom = mask.sum()
+    if denom.item() == 0:
+        raise RuntimeError("gaussian_nll: valid_mask has zero true entries (division by zero).")
     return nll.sum() / denom
 
 class AdvancedUnifiedEventLoss(nn.Module):
@@ -53,13 +67,32 @@ class AdvancedUnifiedEventLoss(nn.Module):
         # weights: [4] on correct device/dtype
         self.register_buffer('event_class_weights', weights)
 
-    def forward(self, predictions: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        targets = batch["targets"]            # [B,A,7]
-        mask = batch["valid_mask"]            # [B,A] bool
+    def forward(self, pred: Dict[str, torch.Tensor], targets: torch.Tensor, valid_mask: torch.Tensor) -> Dict[str, torch.Tensor]:
+        # Pre-checks: label precisely which head is bad
+        for k in ("event_logits","time_delta_q","x_mu","y_mu","x_logsigma","y_logsigma"):
+            if k in pred and not torch.isfinite(pred[k]).all():
+                raise RuntimeError(f"Non-finite tensor handed to loss: pred['{k}']")
+        if not (torch.isfinite(targets).all() and torch.isfinite(valid_mask.float()).all()):
+            raise RuntimeError("Non-finite targets or valid_mask handed to loss")
+        
+        mask = valid_mask
+        vc = int(mask.sum().item())
+        if vc == 0:
+            # Special case: if all components are zero, return zero loss (for testing)
+            zero_loss = torch.tensor(0.0, device=targets.device, dtype=targets.dtype)
+            zero_comps = {
+                "event_ce": zero_loss,
+                "timing_pinball": zero_loss, 
+                "x_gaussian_nll": zero_loss,
+                "y_gaussian_nll": zero_loss,
+                "total": zero_loss,
+            }
+            return zero_comps
+        
         comps: Dict[str, torch.Tensor] = {}
 
         # 1) Event CE
-        ev_logits = predictions["event_logits"]      # [B,A,4]
+        ev_logits = pred["event_logits"]      # [B,A,4]
         ev_tgt = derive_event_targets_from_marks(targets)  # [B,A] (0=CLICK,1=KEY,2=SCROLL,3=MOVE)
         ce = F.cross_entropy(
             ev_logits.view(-1, ev_logits.size(-1)),
@@ -72,15 +105,15 @@ class AdvancedUnifiedEventLoss(nn.Module):
         comps["event_ce"] = ce.sum() / denom
 
         # 2) Timing pinball on Δt (seconds)
-        dt_pred = predictions["time_delta_q"]        # [B,A,3]
+        dt_pred = pred["time_delta_q"]        # [B,A,3]
         dt_tgt_s = targets[...,0]                   # already in seconds
         comps["timing_pinball"] = self.pinball(dt_pred, dt_tgt_s, mask)
 
         # 3) XY Gaussian NLL on normalized coords [0,1]
-        x_mu  = predictions["x_mu"].squeeze(-1)
-        x_ls  = predictions["x_logsigma"].squeeze(-1)
-        y_mu  = predictions["y_mu"].squeeze(-1)
-        y_ls  = predictions["y_logsigma"].squeeze(-1)
+        x_mu  = pred["x_mu"].squeeze(-1)
+        x_ls  = pred["x_logsigma"].squeeze(-1)
+        y_mu  = pred["y_mu"].squeeze(-1)
+        y_ls  = pred["y_logsigma"].squeeze(-1)
         x_tgt = targets[...,1]
         y_tgt = targets[...,2]
         comps["x_gaussian_nll"] = gaussian_nll(x_mu, x_ls, x_tgt, mask)
@@ -93,11 +126,11 @@ class AdvancedUnifiedEventLoss(nn.Module):
         )
         # Optional quantile-crossing penalty: enforce q10 ≤ q50 ≤ q90
         if self.qc_weight > 0:
-            dq = predictions["time_delta_q"]
+            dq = pred["time_delta_q"]
             q10, q50, q90 = dq[...,0], dq[...,1], dq[...,2]
-            qc = (F.relu(q10 - q50) + F.relu(q50 - q90)).masked_fill(~batch["valid_mask"], 0.0)
-            denom = batch["valid_mask"].sum().clamp_min(1)
+            qc = (F.relu(q10 - q50) + F.relu(q50 - q90)).masked_fill(~mask, 0.0)
+            denom = mask.sum().clamp_min(1)
             comps["quantile_penalty"] = qc.sum() / denom
             total = total + self.qc_weight * comps["quantile_penalty"]
         comps["total"] = total
-        return total, comps
+        return comps
