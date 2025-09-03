@@ -17,11 +17,10 @@
 
 param(
     [string]$DataDir = "data/recording_sessions/20250831_113719/06_final_training_data",
-    [int]$Epochs = 10,
+    [int]$Epochs = 40,
     [double]$LR = 2.5e-4,
     [int]$Batch = 64,
-    [string]$Model = "sequential",  # "default" or "sequential"
-    [string]$TargetsVersion = "v1"
+    [string]$Model = "sequential"  # "default" or "sequential"
 )
 
 $py = "py"
@@ -57,7 +56,7 @@ Write-Host "Data Directory: $DataDir" -ForegroundColor Cyan
 Write-Host "Epochs: $Epochs" -ForegroundColor Cyan
 Write-Host "Learning Rate: $LR" -ForegroundColor Cyan
 Write-Host "Batch Size: $Batch" -ForegroundColor Cyan
-Write-Host "Targets Version: $TargetsVersion" -ForegroundColor Cyan
+
 
 # Validate model parameter
 if ($Model -notin @("default", "sequential")) {
@@ -75,21 +74,20 @@ if ($Model -eq "sequential") {
 Write-Host "=" * 60 -ForegroundColor Yellow
 
 # Build command arguments
-$args = @(
+$cmdArgs = @(
     "--data_dir", $DataDir,
     "--epochs", $Epochs,
     "--lr", $LR,
-    "--batch_size", $Batch,
-    "--targets_version", $TargetsVersion
+    "--batch_size", $Batch
 )
 
 # Add model flag based on model type
 if ($Model -eq "sequential") {
-    $args += "--use_sequential"
+    $cmdArgs += "--use_sequential"
 }
 
 # Run the training script with all parameters
-& $py $script @args
+& $py $script @cmdArgs
 
 # Check exit code and provide summary
 if ($LASTEXITCODE -eq 0) {
@@ -100,7 +98,7 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "  - Epochs: $Epochs" -ForegroundColor White
     Write-Host "  - Learning Rate: $LR" -ForegroundColor White
     Write-Host "  - Batch Size: $Batch" -ForegroundColor White
-    Write-Host "  - Targets Version: $TargetsVersion" -ForegroundColor White
+
     if ($Model -eq "sequential") {
         Write-Host "  - Model: SequentialImitationModel (SequentialActionDecoder)" -ForegroundColor White
         Write-Host "  - Features: Sequential generation, cumulative timing, natural sequence length" -ForegroundColor White

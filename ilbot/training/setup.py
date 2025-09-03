@@ -17,19 +17,17 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union, Any
 import os
 
-from ilbot.model.imitation_hybrid_model import ImitationHybridModel
+
 from ilbot.model.advanced_losses import AdvancedUnifiedEventLoss
 from ilbot.utils.normalization import normalize_gamestate_features, normalize_action_input_features, normalize_action_target_features
 
 class OSRSDataset(Dataset):
     """
-    Loads V1 or V2 targets automatically from a data_dir.
-    - V1: action_targets.npy  (B, A, 8)
-    - V2: actions_v2.npy      (B, A, 7)  + valid_mask.npy (B, A)
+    Loads training data from data_dir.
+    Uses current file format: action_targets.npy + valid_mask.npy
     Shapes (T, G, A, Fin) are inferred from files – no constants.
     """
     def __init__(self, data_dir: Union[str, Path],
-                 targets_version: Optional[str] = None,
                  use_log1p_time: bool = True,
                  time_div_ms: int = 1000,
                  time_clip_s: Optional[float] = None,
@@ -37,26 +35,16 @@ class OSRSDataset(Dataset):
                  device: Optional[torch.device] = None):
         self.data_dir = Path(data_dir)
         self.manifest = self._load_manifest(self.data_dir)
-        # Prefer explicit arg, then manifest, then default to "v1"
-        self.targets_version = targets_version or self.manifest.get("targets_version", "v1")
-        # Enums (for v2 heads); prefer explicit arg, else manifest, else empty
+        # Enums from manifest or explicit arg
         self.enums = enum_sizes or self.manifest.get("enums", {})
         
-        # Load data based on targets version
+        # Load core tensors - current format only
         self.gamestate_sequences = np.load(self.data_dir/"gamestate_sequences.npy")      # (B, T, G)
         self.action_input_sequences = np.load(self.data_dir/"action_input_sequences.npy")# (B, T, A, Fin)
+        self.action_targets = np.load(self.data_dir/"action_targets.npy")                # (B, A, 7)
         
-        # V2 tensors (present only when targets_version == "v2")
-        self.actions_v2 = None
-        if self.targets_version == "v2":
-            self.actions_v2 = np.load(self.data_dir/"actions_v2.npy")
-            self.valid_mask = np.load(self.data_dir/"valid_mask.npy").astype(bool)
-            self.action_targets = self.actions_v2
-        else:
-            # V1 fallback: keep current loading path
-            self.action_targets = np.load(self.data_dir/"action_targets.npy")
-            # infer mask from all-zero rows (padding)
-            self.valid_mask = (np.abs(self.action_targets).sum(axis=-1) > 0)
+        # Create valid_mask from action_targets (non-zero actions are valid)
+        self.valid_mask = (np.abs(self.action_targets).sum(axis=-1) > 0)  # (B, A)
 
         self.B, self.T, self.G = self.gamestate_sequences.shape
         _, _, self.A, self.Fin = self.action_input_sequences.shape
@@ -64,7 +52,7 @@ class OSRSDataset(Dataset):
         print("Dataset loaded successfully!")
         print(f"  Gamestate sequences: {self.gamestate_sequences.shape}")
         print(f"  Action input sequences: {self.action_input_sequences.shape}")
-        print(f"  Action targets: {self.action_targets.shape} ({self.targets_version})")
+        print(f"  Action targets: {self.action_targets.shape}")
         print(f"  Max actions per sequence: {self.A}")
 
     def _load_manifest(self, root: Path) -> Dict[str, Any]:
@@ -97,7 +85,7 @@ class OSRSDataset(Dataset):
             "action_sequence": action_sequence_normalized,
             "action_target": action_target_normalized,
             "valid_mask": valid_mask,
-            "targets_version": self.targets_version,
+
             "manifest": self.manifest or {},
             "screen_dimensions": (1920.0, 1080.0)  # Store for denormalization
         }
@@ -181,122 +169,6 @@ def create_data_loaders(
     
     return train_loader, val_loader
 
-def setup_model(device: torch.device,
-                *,
-                gamestate_dim: int,
-                action_dim: int,
-                sequence_length: int,
-                hidden_dim: int = 256,
-                num_attention_heads: int = 8,
-                head_version: str = "v1",
-                enum_sizes: Optional[Dict[str, int]] = None) -> ImitationHybridModel:
-    """Create and setup the imitation learning model"""
-    
-    print(f"Setting up model...")
-    print(f"  Gamestate features: {gamestate_dim}")
-    print(f"  Action features: {action_dim}")
-    print(f"  Sequence length: {sequence_length}")
-    print(f"  Hidden dimension: {hidden_dim}")
-    print(f"  Attention heads: {num_attention_heads}")
-    
-    # Create data_config dict for the model
-    data_config = {
-        'gamestate_dim': gamestate_dim,
-        'max_actions': 100,  # Fixed for this model
-        'action_features': action_dim,
-        'temporal_window': sequence_length,
-        'enum_sizes': enum_sizes or {},
-        'event_types': 4  # Fixed for this model
-    }
-    
-    # Create model
-    model = ImitationHybridModel(
-        data_config=data_config,
-        hidden_dim=hidden_dim,
-        num_heads=num_attention_heads,
-        num_layers=6  # Default value
-    )
-    
-    # Move to device
-    model = model.to(device)
-    
-    # Get model info
-    model_info = model.get_model_info()
-    print(f"  Model created successfully!")
-    print(f"  Total parameters: {model_info['total_parameters']:,}")
-    print(f"  Trainable parameters: {model_info['trainable_parameters']:,}")
-    
-    return model
 
-def setup_training(model: ImitationHybridModel,
-                  train_loader: DataLoader,
-                  val_loader: DataLoader,
-                  device: torch.device,
-                  learning_rate: float = 3e-4,
-                  weight_decay: float = 1e-4) -> Tuple[AdvancedUnifiedEventLoss, optim.Optimizer]:
-    """Setup loss function and optimizer"""
-    
-    print(f"Setting up training components...")
-    
-    # Loss function
-    criterion = AdvancedUnifiedEventLoss()
-    print(f"  Loss function: {criterion.__class__.__name__}")
-    
-    # Optimizer
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=learning_rate,
-        weight_decay=weight_decay
-    )
-    print(f"  Optimizer: Adam (lr={learning_rate}, weight_decay={weight_decay})")
-    
-    return criterion, optimizer
-
-def test_model_compatibility(model: ImitationHybridModel, 
-                           train_loader: DataLoader,
-                           device: torch.device) -> bool:
-    """Test if the model can process a batch of data"""
-    
-    print(f"Testing model compatibility...")
-    
-    try:
-        # Get a batch
-        batch = next(iter(train_loader))
-        
-        # Extract inputs
-        temporal_sequence = batch['temporal_sequence'].to(device)
-        action_sequence = batch['action_sequence'].to(device)
-        
-        print(f"  Input shapes:")
-        print(f"    Temporal sequence: {temporal_sequence.shape}")
-        print(f"    Action sequence: {action_sequence.shape}")
-        
-        # Test forward pass
-        with torch.no_grad():
-            output = model(temporal_sequence, action_sequence)
-        
-        print(f"  Output shape: {output.shape}")
-        
-        print(f"  ✓ Model compatibility test passed!")
-        
-        # CUDA memory info if available
-        if torch.cuda.is_available():
-            print(f"  CUDA memory after test: {torch.cuda.memory_allocated(0) / 1024**2:.1f} MB allocated")
-            torch.cuda.empty_cache()
-        
-        return True
-        
-    except Exception as e:
-        print(f"  ✗ Model compatibility test failed: {e}")
-        return False
-
-def optimize_cuda_settings():
-    """Optimize CUDA settings for better performance"""
-    if torch.cuda.is_available():
-        # Enable cuDNN benchmarking for faster convolutions
-        torch.backends.cudnn.benchmark = True
-        # Enable cuDNN deterministic mode for reproducibility
-        torch.backends.cudnn.deterministic = False
-        print("CUDA optimizations enabled")
 
 

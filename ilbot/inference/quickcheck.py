@@ -71,8 +71,7 @@ def main():
     ap.add_argument("--time_div", type=float, default=1.0, help="Same scaling used in training (e.g., 1000)")
     ap.add_argument("--disable_auto_batch", action="store_true",
                     help="Force val batch size; skip CUDA auto batch optimization")
-    ap.add_argument("--targets_version", choices=["v1","v2"], default=None,
-                    help="If omitted, use dataset_manifest.json")
+
     args = ap.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -80,28 +79,19 @@ def main():
 
     # Load manifest and determine configuration
     man = load_manifest(Path(args.data_dir))
-    tv  = args.targets_version or (man["targets_version"] if man else "v1")
+
     time_div  = man["time_div"]  if (man and args.time_div is None) else (args.time_div or 1000.0)
     time_clip = man["time_clip"] if (man and args.time_clip is None) else (args.time_clip or 3.0)
     enum_sizes = (man or {}).get("enums", {})
 
-    # Dataset - loaders: if tv=='v2' load actions_v2 + valid_mask else legacy, batch sizes from args
-    if tv == "v2":
-        ds = OSRSDataset(
-            gamestate_file=str(data_dir / "gamestate_sequences.npy"),
-            action_input_file=str(data_dir / "action_input_sequences.npy"),
-            action_targets_file=str(data_dir / "actions_v2.npy"),
-            sequence_length=10,
-            max_actions=100
-        )
-    else:
-        ds = OSRSDataset(
-            gamestate_file=str(data_dir / "gamestate_sequences.npy"),
-            action_input_file=str(data_dir / "action_input_sequences.npy"),
-            action_targets_file=str(data_dir / "action_targets.npy"),
-            sequence_length=10,
-            max_actions=100
-        )
+    # Dataset - loaders: use current format
+    ds = OSRSDataset(
+        gamestate_file=str(data_dir / "gamestate_sequences.npy"),
+        action_input_file=str(data_dir / "action_input_sequences.npy"),
+        action_targets_file=str(data_dir / "action_targets.npy"),
+        sequence_length=10,
+        max_actions=100
+    )
 
     # Loaders (call with dataset=..., not data_dir=...)
     device = torch.device(args.device)
@@ -117,7 +107,7 @@ def main():
     # Model - model: pass max_actions and enum sizes from manifest (fallback to inferred)
     inferred_A = 100  # fallback if no manifest
     model = setup_model(device=device, max_actions=(man["max_actions"] if man else inferred_A),
-                       head_version=tv, enum_sizes=enum_sizes)
+                       enum_sizes=enum_sizes)
     ckpt_path = args.checkpoint or _latest_best()
     if not ckpt_path or not os.path.exists(ckpt_path):
         raise FileNotFoundError("No checkpoint found. Provide --checkpoint or ensure checkpoints/**/best.pt exists.")

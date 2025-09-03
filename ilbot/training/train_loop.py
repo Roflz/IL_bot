@@ -13,8 +13,7 @@ import json
 import time
 import argparse
 from pathlib import Path
-from ilbot.training.setup import create_data_loaders, setup_training, OSRSDataset
-from ilbot.model.imitation_hybrid_model import ImitationHybridModel
+from ilbot.training.setup import create_data_loaders, OSRSDataset
 from ilbot.model.sequential_imitation_model import SequentialImitationModel
 from torch.optim.lr_scheduler import StepLR
 import os, numpy as np
@@ -24,9 +23,6 @@ from datetime import datetime
 from ilbot.utils.feature_spec import load_feature_spec
 from .simplified_behavioral_metrics import SimplifiedBehavioralMetrics
 
-# Add new imports for the updated run_training function
-from ilbot.training.setup import OSRSDataset, create_data_loaders
-from ilbot.model.imitation_hybrid_model import create_model
 import random
 
 # ---- helpers ---------------------------------------------------------------
@@ -39,7 +35,7 @@ def _seed_everything(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-# existing: train() that expects model returning dict of logits (v1)
+
 def _allzero_mask(t: torch.Tensor) -> torch.Tensor:
     """(B,A,*) True where row is non-padding (any nonzero)."""
     return (t.abs().sum(dim=-1) > 0)
@@ -65,9 +61,7 @@ def _masked_ce(logits, tgt, mask, weight=None):
         weight = weight.to(L.device)
     return F.cross_entropy(L, T, weight=weight, reduction="mean")
 
-# (removed: legacy V1 loss)
 
-# (removed: legacy V1 train function)
 
 def _build_valid_mask(action_target: torch.Tensor) -> torch.Tensor:
     """
@@ -91,253 +85,43 @@ def load_manifest(data_dir: Path):
     p = data_dir / "dataset_manifest.json"
     return json.load(open(p,"r",encoding="utf-8")) if p.exists() else None
 
-def setup_model_v2(manifest, targets_version, device, data_dir: Path | None = None, use_sequential=False):
-    """
-    Build the hybrid model for V2 targets.
-    """
-    max_actions = int(manifest["max_actions"]) if manifest else 100
-    head_version = targets_version
-    # Convert enum_sizes from nested format to simple format expected by model
-    raw_enums = manifest.get("enums", {})
-    enum_sizes = {}
-    for k, v in raw_enums.items():
-        if isinstance(v, dict):
-            enum_sizes[k] = int(v.get("size", v))
-        else:
-            enum_sizes[k] = int(v)
-    # dims inferred from data (not constants)
-    # Load actual dimensions from data files
-    gamestate_sequences = np.load(Path(data_dir) / "gamestate_sequences.npy")
-    action_input_sequences = np.load(Path(data_dir) / "action_input_sequences.npy")
-    
-    seq_len = gamestate_sequences.shape[1]  # temporal window
-    gamestate_dim = gamestate_sequences.shape[2]  # number of features
-    action_in_dim = action_input_sequences.shape[3]  # action features
-    
-    # derive indices & vocab from dataset artifacts
-    spec = load_feature_spec(data_dir) if data_dir else {}
-    
-    # Create data_config for the model
-    data_config = {
-        'gamestate_dim': gamestate_dim,
-        'max_actions': max_actions,
-        'action_features': action_in_dim,
-        'temporal_window': seq_len,
-        'enum_sizes': enum_sizes,
-        'event_types': 4
+def build_model_and_loss(manifest, device, data_dir: Path):
+    # derive data_config from manifest + npy shapes (gamestate_dim, action_features, max_actions, temporal_window, enum_sizes, event_types)
+    import numpy as np, json
+    gs = np.load(data_dir / "gamestate_sequences.npy")
+    ai = np.load(data_dir / "action_input_sequences.npy")
+    dc = {
+        "gamestate_dim": int(gs.shape[2]),
+        "action_features": int(ai.shape[3]),
+        "temporal_window": int(gs.shape[1]),
+        "max_actions": 100,
+        "enum_sizes": {k:int(v["size"] if isinstance(v,dict) else v) for k,v in manifest.get("enums",{}).items()},
+        "event_types": 4,
     }
-    
-    if use_sequential:
-        model = SequentialImitationModel(
-            data_config=data_config,
-            hidden_dim=256,
-            num_heads=8,
-            num_layers=6,
-            feature_spec=spec
-        )
-        printer.print_debug_info("Using SequentialImitationModel with SequentialActionDecoder", "SUCCESS")
-    else:
-        model = ImitationHybridModel(
-            data_config=data_config,
-            hidden_dim=256,
-            num_heads=8,
-            num_layers=6,
-            feature_spec=spec
-        )
-        printer.print_debug_info("Using ImitationHybridModel with ActionSequenceDecoder", "INFO")
-    
-    return model
-
-def estimate_class_weights(train_loader, targets_version="v2", enum_sizes=None):
-    """
-    Build inverse-frequency class weights with dynamic lengths.
-    """
-    # V2 only - new format: just the integer sizes
-    n_btn  = int(enum_sizes["button"])
-    n_ka   = int(enum_sizes["key_action"])
-    n_kid  = int(enum_sizes["key_id"])
-    n_sy   = int(enum_sizes["scroll"])
-    none_idx_ka = 0  # Default none index for key_action
-    none_idx_sy = 1  # Default none index for scroll_y
-    
-    btn_counts = torch.ones(n_btn); ka_counts = torch.ones(n_ka)
-    kid_counts = torch.ones(n_kid); sy_counts = torch.ones(n_sy)
-    
-    for b in train_loader:
-        tgt = b["action_target"]; m = b["valid_mask"]
-        one = lambda t: torch.ones_like(t, dtype=torch.float, device=t.device)
-
-        # button / key_action: clamp into vocab just in case
-        btn_idx = tgt[...,3].long().clamp(0, n_btn-1)
-        ka_idx  = tgt[...,4].long().clamp(0, n_ka-1)
-        btn_counts.index_add_(0, btn_idx[m].view(-1), one(btn_idx[m].view(-1)))
-        ka_counts.index_add_(0,  ka_idx[m].view(-1),  one(ka_idx[m].view(-1)))
-
-        # key_id: gate by key_action != NONE and clamp into vocab
-        ka_flat = tgt[...,4].long().view(-1)
-        kid_idx = tgt[...,5].long().clamp(0, n_kid-1).view(-1)
-        m_flat = m.view(-1)
-        kid_mask = (ka_flat != none_idx_ka) & m_flat
-        if kid_mask.any():
-            kid_counts.index_add_(0, kid_idx[kid_mask], one(kid_idx[kid_mask]))
-
-        # scroll_y: map {-1,0,+1} → {0,1,2}
-        sy_idx = (tgt[...,6].long() + none_idx_sy).clamp(0, n_sy-1).view(-1)
-        sy_counts.index_add_(0, sy_idx[m_flat], one(sy_idx[m_flat]))
-    
-    inv = lambda c: (1.0/(c+1e-9)); norm = lambda w: (w/w.mean())
-    return {"btn": norm(inv(btn_counts)), "ka": norm(inv(ka_counts)),
-            "kid": norm(inv(kid_counts)), "sy": norm(inv(sy_counts))}
-
-def clamp_time(t, time_div, time_clip, already_scaled=False):
-    if time_clip is None:
-        time_clip = 3.0  # Default fallback
-    if already_scaled:  # V2 saved time already scaled
-        return torch.clamp(t, 0.0, float(time_clip))
-    return torch.clamp(t / float(time_div), 0.0, float(time_clip))
+    model = SequentialImitationModel(dc).to(device)
+    from ilbot.model.advanced_losses import AdvancedUnifiedEventLoss
+    loss_fn = AdvancedUnifiedEventLoss(event_weight=1.0, timing_weight=0.5, xy_weight=0.1)
+    return model, loss_fn, dc
 
 
 
 
 
-    """
-    Accumulate per-head histograms & event-type summaries on masked rows.
-    Does NOT modify loss or training behavior.
-    """
-    # Shapes
-    B, A = target.shape[:2]
-    vm2 = valid_mask.view(B, A)
-    m = vm2.view(-1)
-
-    # Sizes & none indices
-    n_btn = int(enum_sizes["button"])
-    n_ka  = int(enum_sizes["key_action"])
-    n_kid = int(enum_sizes["key_id"])
-    n_sy  = int(enum_sizes["scroll"])
-    btn_none = 0  # Default none index for button
-    ka_none  = 0  # Default none index for key_action
-    sy_none  = 1  # Default none index for scroll_y
-
-    # Flatten helpers
-    def fl(x): return x.view(-1)
-
-    # --- button ---
-    btn_logits = heads["button_logits"].view(-1, n_btn)
-    btn_pred = btn_logits.argmax(-1)
-    btn_tgt  = fl(target[...,3]).long().clamp(0, n_btn-1)
-    agg["btn_pred"] += torch.bincount(btn_pred[m], minlength=n_btn).cpu()
-    agg["btn_tgt"]  += torch.bincount(btn_tgt[m],  minlength=n_btn).cpu()
-
-    # --- key_action ---
-    ka_logits = heads["key_action_logits"].view(-1, n_ka)
-    ka_pred = ka_logits.argmax(-1)
-    ka_tgt  = fl(target[...,4]).long().clamp(0, n_ka-1)
-    agg["ka_pred"] += torch.bincount(ka_pred[m], minlength=n_ka).cpu()
-    agg["ka_tgt"]  += torch.bincount(ka_tgt[m],  minlength=n_ka).cpu()
-
-    # --- key_id (only when key_action != NONE) ---
-    kid_logits = heads["key_id_logits"].view(-1, n_kid)
-    kid_pred = kid_logits.argmax(-1)
-    kid_tgt  = fl(target[...,5]).long().clamp(0, n_kid-1)
-    kid_keep = m & (ka_tgt != ka_none)
-    if kid_keep.any():
-        agg["kid_pred"] += torch.bincount(kid_pred[kid_keep], minlength=n_kid).cpu()
-        agg["kid_tgt"]  += torch.bincount(kid_tgt[kid_keep],  minlength=n_kid).cpu()
-
-    # --- scroll_y mapping: raw {-1,0,+1} -> idx {0,1,2} (none=center) ---
-    sy_raw = fl(target[...,6]).long()
-    sy_tgt = (sy_raw + sy_none).clamp(0, n_sy-1)
-    sy_logits = heads["scroll_y_logits"].view(-1, n_sy)
-    sy_pred = sy_logits.argmax(-1)
-    agg["sy_pred"] += torch.bincount(sy_pred[m], minlength=n_sy).cpu()
-    agg["sy_tgt"]  += torch.bincount(sy_tgt[m],  minlength=n_sy).cpu()
-
-    # --- time stats on masked rows ---
-    t_pred = fl(heads["time_q"][...,1])  # Use median (q50) from quantiles
-    t_tgt  = fl(clamp_time(target[...,0], time_div, time_clip, already_scaled=True))
-    t_pred_m = t_pred[m]
-    t_tgt_m  = t_tgt[m]
-    agg["time_pred_sum"] += float(t_pred_m.sum().item())
-    agg["time_tgt_sum"]  += float(t_tgt_m.sum().item())
-    agg["time_count"]    += int(t_pred_m.numel())
-    agg["time_pred_neg"] += int((t_pred_m < 0).sum().item())
-
-    # --- event-type summaries using actual event classification head ---
-    # Get event predictions from the event classification head
-    event_pred = heads["event_logits"].argmax(-1)  # [B, A] -> 0=CLICK, 1=KEY, 2=SCROLL, 3=MOVE
-    event_pred_flat = fl(event_pred)
-    
-    # Derive event targets from auxiliary heads (same logic as in _masked_metrics)
-    button_gt = target[...,3].long()
-    key_action_gt = target[...,4].long()
-    scroll_y_gt = target[...,6].long()
-    
-    # Create event targets: 0=CLICK, 1=KEY, 2=SCROLL, 3=MOVE
-    event_target = torch.zeros_like(button_gt)
-    event_target = torch.where(button_gt != 0, 0, event_target)      # CLICK
-    event_target = torch.where(key_action_gt != 0, 1, event_target)  # KEY  
-    event_target = torch.where(scroll_y_gt != 0, 2, event_target)    # SCROLL
-    # MOVE is default (3) when no other events occur
-    event_target_flat = fl(event_target)
-    
-    if m.any():
-        # Count predicted events
-        event_pred_masked = event_pred_flat[m]
-        event_target_masked = event_target_flat[m]
-        
-        # Count each event type
-        agg["evt_pred"]["CLICK"]  += int((event_pred_masked == 0).sum().item())
-        agg["evt_pred"]["KEY"]    += int((event_pred_masked == 1).sum().item())
-        agg["evt_pred"]["SCROLL"] += int((event_pred_masked == 2).sum().item())
-        agg["evt_pred"]["MOVE"]   += int((event_pred_masked == 3).sum().item())
-        agg["evt_pred"]["MULTI"]  = 0  # No more MULTI in unified event system
-        
-        # Count target events
-        agg["evt_tgt"]["CLICK"]  += int((event_target_masked == 0).sum().item())
-        agg["evt_tgt"]["KEY"]    += int((event_target_masked == 1).sum().item())
-        agg["evt_tgt"]["SCROLL"] += int((event_target_masked == 2).sum().item())
 
 
 
 
 
-    def pct(cnt, total): return (100.0*cnt/total) if total > 0 else 0.0
-    print("=== Detailed validation report ===")
-    total_masked = int(agg["time_count"])
-    print(f"masked rows used: {total_masked}")
-    # Button
-    btn_tot = int(agg["btn_pred"].sum().item())
-    print(f"[button] pred total={btn_tot}, top5={_topk_from_counts(agg['btn_pred'],5)}, tgt top5={_topk_from_counts(agg['btn_tgt'],5)}")
-    # Key action
-    ka_tot = int(agg["ka_pred"].sum().item())
-    print(f"[key_action] pred total={ka_tot}, top5={_topk_from_counts(agg['ka_pred'],5)}, tgt top5={_topk_from_counts(agg['ka_tgt'],5)}")
-    # Key id
-    kid_tot = int(agg["kid_pred"].sum().item())
-    print(f"[key_id] pred total={kid_tot}, top10={_topk_from_counts(agg['kid_pred'],10)}")
-    # Scroll
-    sy_tot = int(agg["sy_pred"].sum().item())
-    print(f"[scroll_y] pred total={sy_tot}, counts={_topk_from_counts(agg['sy_pred'],3)} (idx order)")
-    # Time
-    if total_masked > 0:
-        mean_pred = agg["time_pred_sum"]/total_masked
-        mean_tgt  = agg["time_tgt_sum"]/total_masked
-        print(f"[time] mean_pred={mean_pred:.4f} ({mean_pred*time_div:.1f} ms) | mean_tgt={mean_tgt:.4f} ({mean_tgt*time_div:.1f} ms) "
-              f"| neg_pred_frac={pct(agg['time_pred_neg'], total_masked):.2f}%")
-    # Event types & contradictions
-    ep = agg["evt_pred"]; et = agg["evt_tgt"]
-    pred_sum = sum(ep.values())
-    tgt_sum  = sum(et.values())
-    print(f"[event(pred)] MOVE={ep['MOVE']} ({pct(ep['MOVE'],pred_sum):.1f}%), "
-          f"CLICK={ep['CLICK']} ({pct(ep['CLICK'],pred_sum):.1f}%), "
-          f"KEY={ep['KEY']} ({pct(ep['KEY'],pred_sum):.1f}%), "
-          f"SCROLL={ep['SCROLL']} ({pct(ep['SCROLL'],pred_sum):.1f}%)")
-    print(f"[event(tgt)]  MOVE={et['MOVE']} ({pct(et['MOVE'],tgt_sum):.1f}%), "
-          f"CLICK={et['CLICK']} ({pct(et['CLICK'],tgt_sum):.1f}%), "
-          f"KEY={et['KEY']} ({pct(et['KEY'],tgt_sum):.1f}%), "
-          f"SCROLL={et['SCROLL']} ({pct(et['SCROLL'],tgt_sum):.1f}%)")
 
 
-# (removed: legacy V1 IL loss)
+
+
+
+
+
+
+
+
 
 import torch
 import torch.nn.functional as F
@@ -384,31 +168,7 @@ def _print_combined_loss_components_table(epoch: int, train_components: Dict[str
     print(f"  └─────────────────────────────────────┴──────────────┴──────────────┴──────────────┴──────────────┘")
 
 
-def compute_unified_event_loss(predictions, targets, valid_mask, loss_fn, enum_sizes):
-    """
-    Compute advanced unified event system loss using the new AdvancedUnifiedEventLoss.
-    
-    Args:
-        predictions: Model outputs from unified event system
-        targets: [B, A, 7] V2 action targets [time, x, y, button, key_action, key_id, scroll_y]
-        valid_mask: [B, A] Boolean mask for valid actions
-        loss_fn: AdvancedUnifiedEventLoss instance
-        enum_sizes: Dictionary with categorical sizes for auxiliary losses (not used by AdvancedUnifiedEventLoss)
-    
-    Returns:
-        total_loss: Combined weighted loss
-        loss_components: Dictionary of individual loss components
-    """
 
-    # Ensure valid_mask is 2D boolean
-    if valid_mask.dim() == 1:
-        valid_mask = valid_mask.view(targets.shape[0], targets.shape[1])
-    valid_mask = valid_mask.bool()
-    
-    # Compute loss using AdvancedUnifiedEventLoss (enum_sizes not needed)
-    total_loss, loss_components = loss_fn(predictions, targets, valid_mask)
-    
-    return total_loss, loss_components
 
 
 
@@ -416,7 +176,7 @@ def compute_unified_event_loss(predictions, targets, valid_mask, loss_fn, enum_s
 def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                 num_epochs=10, device='cpu', scheduler=None,
                 use_class_weights=True, loss_w=None, time_div=1.0,
-                targets_version="v2", time_clip=3.0, enum_sizes=None, data_dir=None):
+                time_clip=3.0, enum_sizes=None, data_dir=None):
     """Train the model"""
     
     printer.print_header("OSRS Imitation Learning Training", f"Training on {device}")
@@ -434,18 +194,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
     train_loss_components = []  # Store loss components for each epoch
     val_loss_components = []    # Store loss components for each epoch
     
-    if use_class_weights:
-        print("Estimating class weights on train set (masked)…")
-        if enum_sizes is not None:
-            class_w = estimate_class_weights(train_loader, targets_version, enum_sizes)
-            print("  Using dynamic class weights from enum_sizes")
-        else:
-            print("  Warning: enum_sizes not available, class weights disabled")
-            class_w = None
-        print("  class_w keys:", list(class_w.keys()) if class_w else "None")
-    else:
-        print("Class weights disabled via flag.")
-        class_w = None
+
 
     # Early stopping / checkpoint
     best_val = float("inf")
@@ -464,7 +213,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                 break
             run_number += 1
     else:
-        # Fallback to old behavior if data_dir not provided
+        # Fallback behavior if data_dir not provided
         ckpt_dir = os.path.join("checkpoints", datetime.now().strftime("%Y%m%d_%H%M%S"))
     
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -494,7 +243,8 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
             
             # Forward pass
             optimizer.zero_grad()
-            outputs = model(temporal_sequence, action_sequence)
+            
+
 
             # how many total train batches this epoch
             total_train_batches = len(train_loader)
@@ -514,25 +264,34 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
             if vm.dim() == 1 or vm.shape[:2] != (B, A):
                 vm = vm.view(B, A)
 
-            # Skip batches with zero valid rows to avoid NaNs in CE
+            # G) Validate masks - ensure single valid_mask is computed once
             if vm.sum().item() == 0:
                 continue
 
+            # G) Log validation mask statistics on first batch
+            if batch_idx == 0:
+                total_slots = vm.numel()
+                valid_slots = vm.sum().item()
+                valid_percentage = (valid_slots / total_slots) * 100
+                print(f"G) Validation mask: {valid_slots}/{total_slots} slots valid ({valid_percentage:.1f}%)")
+
+            # Forward pass
+            outputs = model(temporal_sequence, action_sequence, vm)
             
             if isinstance(outputs, dict):
-                # V2 only - use advanced unified event loss
+                # Use advanced unified event loss
                 valid_mask = batch['valid_mask'].to(device)
                 
 
                 
-                loss, loss_components = compute_unified_event_loss(outputs, action_target, valid_mask, loss_fn, enum_sizes)
+                loss, loss_components = loss_fn(outputs, action_target, valid_mask)
                 
                 # Store loss components for this batch
                 if not hasattr(train_model, 'batch_loss_components'):
                     train_model.batch_loss_components = []
                 train_model.batch_loss_components.append(loss_components)
             else:
-                # Legacy loss computation (should not be used with V2)
+                # Legacy loss computation (should not be used)
                 loss = torch.tensor(0.0, device=action_target.device)
             
             # Backward pass
@@ -626,11 +385,13 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                 if vm_mask.sum().item() == 0:
                     continue
 
+                # Forward pass
+                outputs = model(temporal_sequence, action_sequence, vm_mask)
 
                 if isinstance(outputs, dict):
-                    # V2 only - use advanced unified event loss
+                    # Use advanced unified event loss
                     valid_mask = batch['valid_mask'].to(device)
-                    vloss, loss_components = compute_unified_event_loss(outputs, action_target, valid_mask, loss_fn, enum_sizes)
+                    vloss, loss_components = loss_fn(outputs, action_target, valid_mask)
                     
                     # Store validation loss components for this batch
                     if not hasattr(train_model, 'val_batch_loss_components'):
@@ -638,7 +399,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
                     train_model.val_batch_loss_components.append(loss_components)
 
                 else:
-                    # Legacy loss computation (should not be used with V2)
+                    # Legacy loss computation (should not be used)
                     vloss = torch.tensor(0.0, device=action_target.device)
                 val_loss_sum += float(vloss.item())
                 val_batches += 1
@@ -710,7 +471,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
         # Memory usage
         printer.print_memory_usage()
         
-        # Clear cache to free up memory
+            # Clear cache to free up memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     
@@ -725,7 +486,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,
         _print_combined_loss_components_table("Final", train_loss_components[-1], val_loss_components[-1])
     
     behavioral_metrics.generate_training_summary(
-        epoch=epoch,
+        epoch=epoch+1,  # Convert 0-based epoch to 1-based for display
         train_loss=train_losses[-1] if train_losses else 0.0,
         val_loss=val_losses[-1] if val_losses else 0.0,
         best_val_loss=best_val,
@@ -822,8 +583,7 @@ def main():
     # Time scaling (normalize inside loss only)
     parser.add_argument('--time_div', type=float, default=1.0,
                         help='divide time by this value in loss (e.g., 1000 for ms->s)')
-    # V2 only
-    parser.add_argument("--targets_version", default="v2")
+
     parser.add_argument("--time_clip", type=float, default=None,
                         help="Override time_clip; if None, use manifest.")
     # Model architecture
@@ -835,7 +595,7 @@ def main():
     data_dir = Path(args.data_dir)
     
     # Create dataset first
-    dataset = OSRSDataset(data_dir, targets_version=config.get("targets_version", "v1"))
+    dataset = OSRSDataset(data_dir)
     
     # Create data loaders from dataset
     train_loader, val_loader = create_data_loaders(
@@ -854,13 +614,12 @@ def main():
     else:
         manifest = {}
     
-    tv = config.get("targets_version", "v1")
     enum_sizes = (manifest or {}).get("enums", {})
     time_div = manifest["time_div"] if (manifest and args.time_div is None) else (args.time_div or 1000.0)
     time_clip = manifest["time_clip"] if (manifest and args.time_clip is None) else (args.time_clip or 3.0)
     
     # Create model and setup training components
-    model = setup_model_v2(manifest=manifest or {}, targets_version=config.get("targets_version", "v1"), device=device, data_dir=data_dir, use_sequential=args.use_sequential)
+    model, loss_fn, data_config = build_model_and_loss(manifest or {}, device, data_dir)
     
     # Runtime safety check for feature spec
     spec = load_feature_spec(data_dir)
@@ -868,191 +627,309 @@ def main():
     print("[feature_spec] cat fields:", [(f["name"], len(f["indices"]), f["vocab_size"]) for f in spec["cat_fields"]])
     print("[feature_spec] total_cat_vocab:", spec["total_cat_vocab"])
     
-    # Estimate class weights
-    class_w = estimate_class_weights(train_loader, targets_version="v2", enum_sizes=enum_sizes)
-    
-    criterion, optimizer = setup_training(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        device=device,
-        learning_rate=args.lr,
-        weight_decay=args.weight_decay
-    )
-    
+    # 3) optimizer/scheduler
+    lr = args.lr
+    wd = args.weight_decay
+    step_size = args.step_size
+    gamma = args.gamma
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
+
     # Move model to device
     model = model.to(device)
     
     print(f"Model loaded with {sum(p.numel() for p in model.parameters()):,} parameters")
     
-    config = {
-        'num_epochs': args.epochs,
-        'learning_rate': args.lr,
-        'weight_decay': args.weight_decay,
-        'batch_size': train_loader.batch_size,
-        'device': str(device),
-        'step_size': args.step_size,
-        'gamma': args.gamma,
-        'use_class_weights': not args.no_class_weights,
-        'loss_weights': {
-            'time': args.lw_time, 'x': args.lw_x, 'y': args.lw_y,
-            'type': args.lw_type, 'btn': args.lw_btn, 'key': args.lw_key,
-            'sx': args.lw_sx, 'sy': args.lw_sy
-        }
-    }
-    
-    # Train the model
-    print("\nStarting training...")
-    scheduler = StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
-    train_losses, val_losses = train_model(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        criterion=criterion,
-        optimizer=optimizer,
-        num_epochs=config['num_epochs'],
-        device=device,
-        scheduler=scheduler,
-        use_class_weights=(not args.no_class_weights),
-        loss_w=config['loss_weights'],
-        time_div=args.time_div,
-        targets_version=tv,
-        time_clip=time_clip,
-        enum_sizes=enum_sizes
-    )
-    
-    # Save results
-    print("\nSaving training results...")
-    save_training_results(model, train_losses, val_losses, config)
-    
-    print("\nTraining completed successfully!")
-    print(f"Final training loss: {train_losses[-1]:.4f}")
-    print(f"Final validation loss: {val_losses[-1]:.4f}")
-    print(f"Best validation loss: {min(val_losses):.4f}")
-    
-    if torch.cuda.is_available():
-        print(f"Final CUDA memory: {torch.cuda.memory_allocated(0) / 1024**2:.1f} MB allocated, {torch.cuda.memory_reserved(0) / 1024**2:.1f} MB reserved")
-
-# main entrypoint called by setup.py
-def run_training(config: dict):
-    """
-    config = {
-      data_dir, targets_version, enum_sizes, epochs, lr, weight_decay, batch_size, disable_auto_batch,
-      grad_clip, step_size, gamma, use_log1p_time, time_div_ms, time_clip_s, loss_weights{...},
-      seed, device
-    }
-    """
-    _seed_everything(config.get("seed", 1337))
-
-    # 1) Use DataInspector to auto-detect configuration first
-    from ilbot.model.data_inspector import DataInspector
-    
-    data_inspector = DataInspector(
-        action_input_path=Path(config["data_dir"]) / "action_input_sequences.npy",
-        gamestate_path=Path(config["data_dir"]) / "gamestate_sequences.npy",
-        action_targets_path=Path(config["data_dir"]) / "action_targets.npy"
-    )
-    
-    data_config = data_inspector.get_model_config()
-    print(f"Auto-detected data config: {data_config}")
-    
-    # Create data loaders using the auto-detected configuration
-    from ilbot.training.setup import create_data_loaders
-    
-    # Use the existing OSRSDataset class instead of duplicating functionality
-    ds = OSRSDataset(
-        data_dir=config["data_dir"],
-        targets_version=config.get("targets_version", "v1")
-    )
-    train_loader, val_loader = create_data_loaders(
-        dataset=ds,
-        batch_size=config.get("batch_size", 32),
-        disable_cuda_batch_opt=config.get("disable_auto_batch", False),
-    )
-
-    # 2) model
-    # Build model using auto-detected configuration
-    model = create_model(
-        data_config=data_config,
-        model_config={
-        'hidden_dim': 256,
-        'num_heads': 8,
-            'num_layers': 6
-        },
-        data_dir=config["data_dir"],
-        use_sequential=config.get("use_sequential", False)
-    )
-    
-    # Extract enum_sizes for compatibility
-    enum_sizes = data_config['enum_sizes']
-
-    # 3) optimizer/scheduler
-    lr = config.get("lr", 2.5e-4)
-    wd = config.get("weight_decay", 1e-4)
-    step_size = config.get("step_size", 8)
-    gamma = config.get("gamma", 0.5)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
-
-    # Move model to device
-    device = torch.device(config.get("device", "cuda"))
-    model = model.to(device)
-
-    # 4) Create advanced unified event loss function
-    from ilbot.model.advanced_losses import AdvancedUnifiedEventLoss
-    
-    # Use the same data_config for the loss function
-    # data_config is already created above from DataInspector
-    
-    loss_fn = AdvancedUnifiedEventLoss(data_config=data_config)
-    print(f"Created AdvancedUnifiedEventLoss with data config: {data_config}")
-    
-    # Set global class weights based on the entire dataset
-    print("🎯 Computing global class weights from dataset...")
-    all_event_targets = []
-    all_valid_masks = []
-    
-    # Collect all event targets and valid masks
-    for batch in train_loader:
-        action_targets = batch["action_target"]
-        valid_masks = batch["valid_mask"]
-        
-        # Derive event targets using the full action_targets tensor
-        event_targets = loss_fn._derive_event_target(action_targets)
-        
-        all_event_targets.append(event_targets)
-        all_valid_masks.append(valid_masks)
-    
-    # Set global weights
-    loss_fn.set_global_event_weights(all_event_targets, all_valid_masks)
-    
-    # Debug: Print loss function info
-    print(f"🔧 Loss function type: {type(loss_fn).__name__}")
-    print(f"🔧 Loss function has focal loss: {hasattr(loss_fn, 'focal_loss')}")
-    print(f"🔧 Loss function has label smoothing: {hasattr(loss_fn, 'label_smoothing_loss')}")
-    print(f"🔧 Event class weights set: {loss_fn.event_class_weights is not None}")
-    
     # 5) train loop
-    # V2-only training with unified event system
     losses_train, losses_val = train_model(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
-        loss_fn=loss_fn,  # Pass the unified event loss function
+        loss_fn=loss_fn,
         optimizer=optimizer,
-        num_epochs=config.get("epochs", 40),
-        device=config.get("device", "cuda"),
-        scheduler=scheduler,
-        use_class_weights=True,
-        loss_w=config.get("loss_weights", {}),
-        time_div=config.get("time_div_ms", 1000.0),
-        targets_version="v2",
-        time_clip=config.get("time_clip_s", 3.0),
-        enum_sizes=enum_sizes,
-        data_dir=config.get("data_dir")
+        num_epochs=args.epochs,
+        device=device,
+        scheduler=scheduler
     )
-    history = {"train_losses": losses_train, "val_losses": losses_val}
-    return history
+    
+    print("\nTraining completed successfully!")
+    print(f"Final training loss: {losses_train[-1]:.4f}")
+    print(f"Final validation loss: {losses_val[-1]:.4f}")
+    print(f"Best validation loss: {min(losses_val):.4f}")
+    
+    if torch.cuda.is_available():
+        print(f"Final CUDA memory: {torch.cuda.memory_allocated(0) / 1024**2:.1f} MB allocated, {torch.cuda.memory_reserved(0) / 1024**2:.1f} MB reserved")
+
+
+
+
+def train_model(model, train_loader, val_loader, loss_fn, optimizer,
+                num_epochs=10, device='cpu', scheduler=None, behavioral_metrics=None,
+                best_val_loss=float('inf'), patience=10, patience_counter=0):
+    """Train the model"""
+    
+    printer.print_header("OSRS Imitation Learning Training", f"Training on {device}")
+    
+    if torch.cuda.is_available():
+        printer.print_debug_info(f"CUDA device: {torch.cuda.get_device_name(0)}")
+        printer.print_debug_info(f"Initial memory: {torch.cuda.memory_allocated(0) / 1024**2:.1f}MB allocated")
+    
+    printer.print_debug_info(f"Training samples: {len(train_loader.dataset)}")
+    printer.print_debug_info(f"Validation samples: {len(val_loader.dataset)}")
+    printer.print_debug_info(f"Epochs: {num_epochs}")
+    
+    train_losses = []
+    val_losses = []
+    train_loss_components = []
+    val_loss_components = []
+
+    for epoch in range(num_epochs):
+        # Training phase
+        model.train()
+        train_loss = 0.0
+        train_batches = 0
+        
+        printer.print_epoch_start(epoch + 1, num_epochs)
+        
+        for batch_idx, batch in enumerate(train_loader):
+            # Move data to device
+            temporal_sequence = batch['temporal_sequence'].to(device)
+            action_sequence = batch['action_sequence'].to(device)
+            action_target = batch['action_target'].to(device)
+            
+            # Forward pass
+            optimizer.zero_grad()
+            
+            # Prepare a 2D mask for diagnostics and optional skipping
+            vm = batch['valid_mask'].to(device)
+            B, A = action_target.size(0), action_target.size(1)
+            if vm.dim() == 1 or vm.shape[:2] != (B, A):
+                vm = vm.view(B, A)
+
+            # Skip batches with zero valid rows to avoid NaNs in CE
+            if vm.sum().item() == 0:
+                continue
+
+            # Forward pass
+            outputs = model(temporal_sequence, action_sequence, vm)
+            
+            if isinstance(outputs, dict):
+                # Use unified event loss
+                valid_mask = batch['valid_mask'].to(device)
+                loss, loss_components = loss_fn(outputs, action_target, valid_mask)
+                
+                # Store loss components for this batch
+                if not hasattr(train_model, 'batch_loss_components'):
+                    train_model.batch_loss_components = []
+                train_model.batch_loss_components.append(loss_components)
+            else:
+                # Legacy loss computation (should not be used)
+                loss = torch.tensor(0.0, device=action_target.device)
+            
+            # Backward pass
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            
+            train_loss += loss.item()
+            train_batches += 1
+            
+            # Progress update
+            printer.print_training_progress(batch_idx, len(train_loader), loss.item())
+
+        avg_train_loss = train_loss / train_batches
+        train_losses.append(avg_train_loss)
+        
+        # Average training loss components for this epoch
+        if hasattr(train_model, 'batch_loss_components') and train_model.batch_loss_components:
+            epoch_train_components = {}
+            for component_name in train_model.batch_loss_components[0].keys():
+                component_values = [batch_components[component_name] for batch_components in train_model.batch_loss_components]
+                epoch_train_components[component_name] = sum(component_values) / len(component_values)
+            train_loss_components.append(epoch_train_components)
+            # Clear batch components for next epoch
+            train_model.batch_loss_components = []
+        else:
+            train_loss_components.append({})
+
+        # Validation phase
+        model.eval()
+        val_loss_sum = 0.0
+        val_batches = 0
+        all_val_predictions = []
+        all_val_targets = []
+        all_val_masks = []
+        
+        with torch.no_grad():
+            for val_idx, batch in enumerate(val_loader):
+                temporal_sequence = batch['temporal_sequence'].to(device)
+                action_sequence = batch['action_sequence'].to(device)
+                action_target = batch['action_target'].to(device)
+                
+                # Prepare a 2D mask for diagnostics and optional skipping
+                vm_mask = batch['valid_mask'].to(device)
+                B, A = action_target.size(0), action_target.size(1)
+                if vm_mask.dim() == 1 or vm_mask.shape[:2] != (B, A):
+                    vm_mask = vm_mask.view(B, A)
+
+                # Skip VAL batches with zero valid rows to avoid NaNs in CE
+                if vm_mask.sum().item() == 0:
+                    continue
+
+                # Forward pass
+                outputs = model(temporal_sequence, action_sequence, vm_mask)
+
+                if isinstance(outputs, dict):
+                    # Use unified event loss
+                    valid_mask = batch['valid_mask'].to(device)
+                    vloss, loss_components = loss_fn(outputs, action_target, valid_mask)
+                    
+                    # Store validation loss components for this batch
+                    if not hasattr(train_model, 'val_batch_loss_components'):
+                        train_model.val_batch_loss_components = []
+                    train_model.val_batch_loss_components.append(loss_components)
+                    
+                    # Store predictions for behavioral analysis
+                    if behavioral_metrics is not None:
+                        all_val_predictions.append(outputs)
+                        all_val_targets.append(action_target)
+                        all_val_masks.append(valid_mask)
+                else:
+                    # Legacy loss computation (should not be used)
+                    vloss = torch.tensor(0.0, device=action_target.device)
+                val_loss_sum += float(vloss.item())
+                val_batches += 1
+        
+        avg_val_loss = val_loss_sum / max(val_batches, 1)
+        val_losses.append(avg_val_loss)
+        
+        # Average validation loss components for this epoch
+        if hasattr(train_model, 'val_batch_loss_components') and train_model.val_batch_loss_components:
+            epoch_val_components = {}
+            for component_name in train_model.val_batch_loss_components[0].keys():
+                component_values = [batch_components[component_name] for batch_components in train_model.val_batch_loss_components]
+                epoch_val_components[component_name] = sum(component_values) / len(component_values)
+            val_loss_components.append(epoch_val_components)
+            # Clear validation batch components for next epoch
+            train_model.val_batch_loss_components = []
+        else:
+            val_loss_components.append({})
+
+        # Update scheduler
+        if scheduler is not None:
+            scheduler.step()
+
+        # Early stopping and behavioral metrics
+        is_best = avg_val_loss < best_val_loss
+        if is_best:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
+            # Save best model
+            torch.save(model.state_dict(), 'best_model.pth')
+        else:
+            patience_counter += 1
+
+        # Generate behavioral metrics summary
+        if behavioral_metrics is not None and all_val_predictions:
+            behavioral_metrics.generate_training_summary(
+                epoch=epoch + 1,
+                train_loss=avg_train_loss,
+                val_loss=avg_val_loss,
+                best_val_loss=best_val_loss,
+                is_best=is_best,
+                all_val_predictions=all_val_predictions,
+                all_val_targets=all_val_targets,
+                all_val_masks=all_val_masks
+            )
+
+        # Print epoch summary
+        best_val = min(val_losses) if val_losses else avg_val_loss
+        printer.print_epoch_summary(epoch + 1, avg_train_loss, avg_val_loss, best_val, 0)
+
+        # Early stopping check
+        if patience_counter >= patience:
+            print(f"\nEarly stopping triggered after {epoch + 1} epochs (patience: {patience})")
+            break
+
+    return train_losses, val_losses
+
+
+def main():
+    """Main entry point for training"""
+    # Parse arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_dir', required=True, help='Path to training data directory')
+    parser.add_argument('--epochs', type=int, default=40, help='Number of training epochs')
+    parser.add_argument('--lr', type=float, default=2.5e-4, help='Learning rate')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay')
+    parser.add_argument('--step_size', type=int, default=8, help='Scheduler step size')
+    parser.add_argument('--gamma', type=float, default=0.5, help='Scheduler gamma')
+    parser.add_argument('--use_sequential', action='store_true', help='Use sequential model')
+    parser.add_argument('--device', default='cuda', help='Device to use')
+    
+    args = parser.parse_args()
+    
+    # Set up training
+    _seed_everything(1337)
+    
+    # Set device
+    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    # 1) data loaders
+    data_dir = Path(args.data_dir)
+    dataset = OSRSDataset(data_dir)
+    train_loader, val_loader = create_data_loaders(dataset, batch_size=args.batch_size)
+    
+    # Load manifest
+    manifest_path = data_dir / "dataset_manifest.json"
+    if manifest_path.exists():
+        with open(manifest_path, 'r') as f:
+            manifest = json.load(f)
+    else:
+        manifest = {}
+    
+    # 2) model and loss
+    model, loss_fn, data_config = build_model_and_loss(manifest or {}, device, data_dir)
+    
+    # 3) optimizer/scheduler
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
+    
+    print(f"Model loaded with {sum(p.numel() for p in model.parameters()):,} parameters")
+    
+    # 5) train loop with early stopping and behavioral metrics
+    from ilbot.training.simplified_behavioral_metrics import SimplifiedBehavioralMetrics
+    
+    behavioral_metrics = SimplifiedBehavioralMetrics()
+    best_val_loss = float('inf')
+    patience = 10
+    patience_counter = 0
+    
+    losses_train, losses_val = train_model(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        loss_fn=loss_fn,
+        optimizer=optimizer,
+        num_epochs=args.epochs,
+        device=device,
+        scheduler=scheduler,
+        behavioral_metrics=behavioral_metrics,
+        best_val_loss=best_val_loss,
+        patience=patience,
+        patience_counter=patience_counter
+    )
+    
+    print("\nTraining completed successfully!")
+    print(f"Final training loss: {losses_train[-1]:.4f}")
+    print(f"Final validation loss: {losses_val[-1]:.4f}")
+    print(f"Best validation loss: {min(losses_val):.4f}")
+    
+    if torch.cuda.is_available():
+        print(f"Final CUDA memory: {torch.cuda.memory_allocated(0) / 1024**2:.1f} MB allocated, {torch.cuda.memory_reserved(0) / 1024**2:.1f} MB reserved")
+
 
 if __name__ == "__main__":
     main()
