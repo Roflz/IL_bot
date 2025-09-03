@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, Tuple
+from typing import Any, Dict, Tuple
 import json
 from torch import amp
 from torch.amp import autocast
@@ -203,6 +203,39 @@ def _write_metrics(metrics: Dict[str, float], epoch: int, split: str, run_dir: P
     with open(metrics_path, "a") as f:
         f.write(row)
 
+
+def _fmt(v: float) -> str:
+    return f"{v:.3f}"
+
+
+def _epoch_table(
+    epoch: int,
+    n_epochs: int,
+    train: Dict[str, float],
+    val: Dict[str, float],
+    lr: float,
+    improved: bool,
+) -> str:
+    """Create a readable table format for epoch summary."""
+    star = "★" if improved else " "
+    
+    # Header
+    header = f"Epoch {epoch:03d}/{n_epochs:03d} | LR: {lr:.2e} | {star}"
+    
+    # Table rows
+    rows = [
+        "┌─────────────┬─────────────┬─────────────┬─────────────┬─────────────┐",
+        "│    Metric   │    Total    │    Event    │   Timing    │     XY      │",
+        "├─────────────┼─────────────┼─────────────┼─────────────┼─────────────┤",
+        f"│ Train       │ {_fmt(train['total']):>11} │ {_fmt(train['event_ce']):>11} │ {_fmt(train['timing_pinball']):>11} │ {_fmt(train['x_nll']):>5},{_fmt(train['y_nll']):>5} │",
+        f"│ Val         │ {_fmt(val['total']):>11} │ {_fmt(val['event_ce']):>11} │ {_fmt(val['timing_pinball']):>11} │ {_fmt(val['x_nll']):>5},{_fmt(val['y_nll']):>5} │",
+        f"│ Val Top1    │ {_fmt(val.get('event_top1', float('nan'))):>11} │             │             │             │",
+        "└─────────────┴─────────────┴─────────────┴─────────────┴─────────────┘"
+    ]
+    
+    return "\n".join([header] + rows)
+
+
 def train_one_epoch(
     model: nn.Module,
     train_loader,
@@ -298,16 +331,17 @@ def train_one_epoch(
         ema_state["grad_norm"] = ema(float(grad_norm), ema_state["grad_norm"])
         
         # Logging
-        if step % cfg.log_interval == 0:
-            lr = optimizer.param_groups[0]["lr"]
-            print(f"[{epoch:03d}/{cfg.epochs:03d}]\n| Step {step:04d} | "
-                  f"loss={ema_state['total']:.4f} | "
-                  f"event={ema_state['event_ce']:.4f} | "
-                  f"time={ema_state['timing_pinball']:.4f} | "
-                  f"x_nll={ema_state['x_nll']:.4f} | "
-                  f"y_nll={ema_state['y_nll']:.4f} | "
-                  f"grad={ema_state['grad_norm']:.2f} | "
-                  f"lr={lr:.2e}")
+        if (step % cfg.log_interval == 0) or (step == 0):
+            print(
+                f"[{epoch:03d}/{cfg.epochs:03d}] "
+                f"step {step:04d} | "
+                f"loss={total_loss.item():.4f} "
+                f"(evt={loss_out['event_ce']:.4f} "
+                f"time={loss_out['timing_pinball']:.4f} "
+                f"xNLL={loss_out['x_gaussian_nll']:.4f} "
+                f"yNLL={loss_out['y_gaussian_nll']:.4f}) | "
+                f"grad={grad_norm:.2f} | lr={scheduler.get_last_lr()[0]:.2e}"
+            )
         
         # Fail-fast checks
         if not torch.isfinite(total_loss):
@@ -526,13 +560,12 @@ def run_training(cfg: Config) -> Dict[str, Any]:
         val_metrics = validate(model, val_loader, loss_fn, device, data_config)
         
         # Logging
-        print(f"Epoch {epoch:03d}/{cfg.epochs:03d} | "
-              f"train: total={train_metrics['total']:.4f}, event={train_metrics['event_ce']:.4f}, "
-              f"time={train_metrics['timing_pinball']:.4f}, x_nll={train_metrics['x_nll']:.4f}, "
-              f"y_nll={train_metrics['y_nll']:.4f}")
-        print(f"          |  val: total={val_metrics['total']:.4f}, event={val_metrics['event_ce']:.4f}, "
-              f"time={val_metrics['timing_pinball']:.4f}, x_nll={val_metrics['x_nll']:.4f}, "
-              f"y_nll={val_metrics['y_nll']:.4f}, top1={val_metrics['event_top1']:.4f}")
+        print(
+            _epoch_table(
+                epoch, cfg.epochs, train_metrics, val_metrics,
+                scheduler.get_last_lr()[0], val_metrics["total"] < best_val
+            )
+        )
         
         # Save metrics
         _write_metrics(train_metrics, epoch, "train", run_dir)
