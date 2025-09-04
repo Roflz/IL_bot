@@ -11,7 +11,7 @@ class SequentialImitationModel(nn.Module):
     - Encode pooled action history [B,Fa] → [B,H/2]
     - Fuse → decoder
     """
-    def __init__(self, data_config: dict, hidden_dim: int = 256, horizon_s: float = 0.6, enum_sizes: dict | None = None):
+    def __init__(self, data_config: dict, hidden_dim: int = 256, horizon_s: float = 0.6, enum_sizes: dict | None = None, logsig_min: float = -3.0, logsig_max: float = 0.0):
         super().__init__()
         self.Dg = int(data_config["gamestate_dim"])
         self.Fa = int(data_config["action_features"])
@@ -37,7 +37,7 @@ class SequentialImitationModel(nn.Module):
             nn.ReLU(),
         )
 
-        self.decoder = SequentialActionDecoder(input_dim=hidden_dim, max_actions=self.A, enum_sizes=enum_sizes, event_types=self.event_types, horizon_s=horizon_s)
+        self.decoder = SequentialActionDecoder(input_dim=hidden_dim, max_actions=self.A, enum_sizes=enum_sizes, event_types=self.event_types, horizon_s=horizon_s, logsig_min=logsig_min, logsig_max=logsig_max)
 
     def forward(self, temporal_sequence: torch.Tensor, action_sequence: torch.Tensor, valid_mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         B = temporal_sequence.size(0)

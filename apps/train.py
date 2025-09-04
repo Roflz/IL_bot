@@ -17,6 +17,11 @@ def main():
     parser.add_argument("--no-amp", action="store_false", dest="amp", help="Disable AMP")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--patience", type=int, default=5, help="Early stopping patience")
+    parser.add_argument("--event-weighting", choices=["none","inverse","inv_sqrt"], default="none")
+    parser.add_argument("--focal-gamma", type=float, default=0.0)
+    parser.add_argument("--xy-weight", type=float, default=0.1)
+    parser.add_argument("--logsig-min", type=float, default=-3.0)
+    parser.add_argument("--logsig-max", type=float, default=0.0)
     
     args = parser.parse_args()
     
@@ -30,6 +35,11 @@ def main():
         amp=args.amp,
         seed=args.seed,
         patience=args.patience,
+        event_weighting=args.event_weighting,
+        focal_gamma=args.focal_gamma,
+        xy_weight=args.xy_weight,
+        logsig_min=args.logsig_min,
+        logsig_max=args.logsig_max,
     )
     
     print(f"Training configuration:")
@@ -41,6 +51,9 @@ def main():
     print(f"  Grad clip: {cfg.grad_clip}")
     print(f"  Seed: {cfg.seed}")
     print(f"  Patience: {cfg.patience}")
+    print(f"\nEvent weighting: {cfg.event_weighting} | Focal gamma: {cfg.focal_gamma}")
+    print(f"XY weight: {cfg.xy_weight}")
+    print(f"XY logσ clamp: [{cfg.logsig_min}, {cfg.logsig_max}]")
     print()
     
     # Run training

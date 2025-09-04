@@ -6,13 +6,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class SequentialActionDecoder(nn.Module):
-    def __init__(self, input_dim: int, max_actions: int, enum_sizes: dict, event_types: int, horizon_s: float = 0.6):
+    def __init__(self, input_dim: int, max_actions: int, enum_sizes: dict, event_types: int, horizon_s: float = 0.6, logsig_min: float = -3.0, logsig_max: float = 0.0):
         super().__init__()
         self.input_dim = int(input_dim)
         self.max_actions = int(max_actions)
         self.enum_sizes = dict(enum_sizes)
         self.event_types = int(event_types)
         self.horizon_s = float(horizon_s)
+        self.logsig_min = float(logsig_min)
+        self.logsig_max = float(logsig_max)
 
         hidden = self.input_dim
         self.step = nn.Sequential(
@@ -82,8 +84,8 @@ class SequentialActionDecoder(nn.Module):
 
             xmu.append(torch.sigmoid(self.x_mu(h)))
             ymu.append(torch.sigmoid(self.y_mu(h)))
-            xls.append(torch.clamp(self.x_ls(h), -5.0, 2.0))
-            yls.append(torch.clamp(self.y_ls(h), -5.0, 2.0))
+            xls.append(torch.clamp(self.x_ls(h), self.logsig_min, self.logsig_max))
+            yls.append(torch.clamp(self.y_ls(h), self.logsig_min, self.logsig_max))
             btn.append(self.button_head(h))
             ka.append(self.key_action_head(h))
             kid.append(self.key_id_head(h))

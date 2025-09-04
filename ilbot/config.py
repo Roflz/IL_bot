@@ -23,3 +23,11 @@ class Config:
     run_name: Optional[str] = None  # default: auto timestamp
     patience: int = 5               # early stopping on val loss
     log_interval: int = 50          # steps
+
+    # ---- New: imbalance & loss shaping (defaults keep old behavior)
+    event_weighting: str = "none"   # {"none","inverse","inv_sqrt"}
+    focal_gamma: float = 0.0        # 0.0 disables focal loss (pure CE)
+    xy_weight: float = 0.1          # was fixed in loss; now configurable
+    # Decoder XY logσ clamp; lets you widen uncertainty range if desired
+    logsig_min: float = -3.0
+    logsig_max: float = 0.0

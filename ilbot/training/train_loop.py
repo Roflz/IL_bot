@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from pathlib import Path
+from collections import Counter
 from datetime import datetime
 from typing import Any, Dict, Tuple
 import json
@@ -40,7 +41,7 @@ def _print_run_header(cfg, data_config: Dict[str, Any], model: nn.Module, loss_f
         print("Normalization bounds: (unavailable in header; dataset already enforced it)")
     # loss weights & clamps
     print(f"Loss weights: event={loss_fn.event_weight}  timing={loss_fn.timing_weight}  xy={loss_fn.xy_weight}  qc={getattr(loss_fn,'qc_weight',0.0)}")
-    print(f"XY logσ clamp: [{getattr(loss_fn,'logsig_min',-3.0)}, {getattr(loss_fn,'logsig_max',0.0)}]  (σ≈[{math.exp(getattr(loss_fn,'logsig_min',-3.0)):.3f}, {math.exp(getattr(loss_fn,'logsig_max',0.0)):.3f}])")
+    print(f"XY logσ clamp: [{cfg.logsig_min}, {cfg.logsig_max}]  (σ≈[{math.exp(cfg.logsig_min):.3f}, {math.exp(cfg.logsig_max):.3f}])")
     # model params
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {n_params:,}")
@@ -208,6 +209,28 @@ def _fmt(v: float) -> str:
     return f"{v:.3f}"
 
 
+def _pretty_log_epoch(split: str, m: Dict[str, float], epoch: int, total_epochs: int):
+    print(f"Epoch {epoch:03d}/{total_epochs:03d} | {split:5}: "
+          f"total={m['total']:.4f}, event={m['event_ce']:.4f}, time={m['timing_pinball']:.4f}, "
+          f"x_nll={m['x_nll']:.4f}, y_nll={m['y_nll']:.4f}"
+          + (f", top1={m['top1']:.4f}" if 'top1' in m else ""))
+
+
+def _compute_event_weights(train_loader) -> torch.Tensor:
+    """Inverse-frequency (or inv-sqrt) weights from the *masked* training targets."""
+    counts = Counter()
+    for batch in train_loader:
+        targets = batch["targets"]
+        mask = batch["valid_mask"].bool()
+        y = derive_event_targets_from_marks(targets)  # [B,A]
+        for c in range(4):
+            counts[c] += int(((y == c) & mask).sum().item())
+    tot = sum(counts.values())
+    if tot == 0:
+        raise RuntimeError("No valid events in training data; cannot compute class weights.")
+    return torch.tensor([counts[i] for i in range(4)], dtype=torch.float32), counts
+
+
 def _epoch_table(
     epoch: int,
     n_epochs: int,
@@ -345,18 +368,11 @@ def train_one_epoch(
         
         # Fail-fast checks
         if not torch.isfinite(total_loss):
-            # Compute components + quick head summary for context
-            components = {k: (v.item() if isinstance(v, torch.Tensor) else float(v))
-                          for k,v in loss_out.items() if k != "total"}
-            heads_finite = {hn: (torch.isfinite(outputs[hn]).all().item() if hn in outputs else False)
-                            for hn in ("event_logits","time_delta_q","x_mu","y_mu","x_logsigma","y_logsigma")}
-            print(_stats_str(total_loss, "loss.total"))
-            _dump_heads(outputs)
-            raise RuntimeError(
-                f"Non-finite loss at step {step}: {total_loss}\n"
-                f"  components={components}\n"
-                f"  heads_finite={heads_finite}"
-            )
+            raise RuntimeError(f"Non-finite loss at step {step}: {total_loss}\n"
+                               f"  components={{'event_ce': {float(loss_out['event_ce']) if torch.isfinite(loss_out['event_ce']) else 'nan'}, "
+                               f"'timing_pinball': {float(loss_out['timing_pinball']) if torch.isfinite(loss_out['timing_pinball']) else 'nan'}, "
+                               f"'x_nll': {float(loss_out['x_gaussian_nll']) if torch.isfinite(loss_out['x_gaussian_nll']) else 'nan'}, "
+                               f"'y_nll': {float(loss_out['y_gaussian_nll']) if torch.isfinite(loss_out['y_gaussian_nll']) else 'nan'}}}")
         
         # Check for NaNs in parameters
         for name, param in model.named_parameters():
@@ -468,11 +484,28 @@ def run_training(cfg: Config) -> Dict[str, Any]:
     print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
     
     # Build model
-    model = SequentialImitationModel(data_config, hidden_dim=128, horizon_s=cfg.horizon_s).to(device)
+    model = SequentialImitationModel(data_config, hidden_dim=128, horizon_s=cfg.horizon_s, logsig_min=cfg.logsig_min, logsig_max=cfg.logsig_max).to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Build loss function
-    loss_fn = AdvancedUnifiedEventLoss().to(device)
+    loss_fn = AdvancedUnifiedEventLoss(
+        xy_weight=cfg.xy_weight,
+        focal_gamma=cfg.focal_gamma,
+    ).to(device)
+    
+    # ---- Optional: build event class weights
+    if cfg.event_weighting != "none":
+        class_counts_t, class_counts = _compute_event_weights(train_loader)
+        if cfg.event_weighting == "inverse":
+            w = 1.0 / class_counts_t.clamp_min(1.0)
+        elif cfg.event_weighting == "inv_sqrt":
+            w = 1.0 / torch.sqrt(class_counts_t.clamp_min(1.0))
+        else:
+            raise ValueError(f"Unknown event_weighting={cfg.event_weighting}")
+        # normalize to sum=num_classes (nice scale)
+        w = (w / w.sum()) * 4.0
+        loss_fn.set_event_class_weights(w.to(device))
+        print(f"Event weights ({cfg.event_weighting}): {w.tolist()} | counts={dict(class_counts)}")
     
     # Build optimizer and scheduler
     optimizer = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)

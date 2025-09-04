@@ -53,12 +53,14 @@ def gaussian_nll(mu: torch.Tensor, logsig: torch.Tensor, target: torch.Tensor, m
 
 class AdvancedUnifiedEventLoss(nn.Module):
     def __init__(self, event_weight=1.0, timing_weight=0.5, xy_weight=0.1,
-                 quantiles=(0.1,0.5,0.9), qc_weight: float = 0.0):
+                 quantiles=(0.1,0.5,0.9), qc_weight: float = 0.0,
+                 focal_gamma: float = 0.0):
         super().__init__()
         self.event_weight = float(event_weight)
         self.timing_weight = float(timing_weight)
         self.xy_weight = float(xy_weight)
         self.qc_weight = float(qc_weight)
+        self.focal_gamma = float(focal_gamma)
         self.pinball = PinballLoss(quantiles)
         self.register_buffer('event_class_weights', None)
 
@@ -100,12 +102,21 @@ class AdvancedUnifiedEventLoss(nn.Module):
         # 1) Event CE
         ev_logits = event_logits      # [B,A,4]
         ev_tgt = derive_event_targets_from_marks(targets)  # [B,A] (0=CLICK,1=KEY,2=SCROLL,3=MOVE)
+        # cross-entropy per-element (optionally class-weighted)
         ce = F.cross_entropy(
             ev_logits.view(-1, ev_logits.size(-1)),
             ev_tgt.view(-1),
             weight=self.event_class_weights,
             reduction='none',
         ).view_as(ev_tgt)
+
+        # Optional focal modulation (γ>0): FL = (1-p_t)^γ * CE
+        if self.focal_gamma > 0.0:
+            with torch.no_grad():
+                pt = F.softmax(ev_logits, dim=-1).gather(-1, ev_tgt.unsqueeze(-1)).squeeze(-1)
+                pt = pt.clamp_min(1e-12)
+            ce = ce * ((1.0 - pt) ** self.focal_gamma)
+
         ce = ce.masked_fill(~mask, 0.0)
         denom = mask.sum().clamp_min(1)
         comps["event_ce"] = ce.sum() / denom
