@@ -94,6 +94,7 @@ class SimpleDataExplorer:
             "04_sequences",
             "05_mappings",
             "06_final_training_data",
+            "predictions",
         ]
         self.tab_lists = {}
         # summary + mapping state
@@ -744,19 +745,62 @@ class SimpleDataExplorer:
         first_loaded = False
         for folder, lb in self.tab_lists.items():
             lb.delete(0, tk.END)
-            folder_path = os.path.join(self.data_dir, folder)
-            if os.path.exists(folder_path):
-                files = [f for f in os.listdir(folder_path) if f.endswith(('.json', '.npy', '.csv'))]
-                files.sort()
-                for f in files:
-                    lb.insert(tk.END, f)
-                total += len(files)
-                # Auto-load the first file in the first non-empty tab
-                if files and not first_loaded:
-                    lb.selection_set(0)
-                    self.on_tab_file_select(folder)
-                    first_loaded = True
+            
+            if folder == "predictions":
+                # Special handling for predictions: scan checkpoints/run_XX/ folders
+                self._load_predictions_files(lb)
+                total += lb.size()
+            else:
+                # Regular folder handling
+                folder_path = os.path.join(self.data_dir, folder)
+                if os.path.exists(folder_path):
+                    files = [f for f in os.listdir(folder_path) if f.endswith(('.json', '.npy', '.csv'))]
+                    files.sort()
+                    for f in files:
+                        lb.insert(tk.END, f)
+                    total += len(files)
+            
+            # Auto-load the first file in the first non-empty tab
+            if lb.size() > 0 and not first_loaded:
+                lb.selection_set(0)
+                self.on_tab_file_select(folder)
+                first_loaded = True
         self.status_var.set(f"Found {total} files across {len(self.tab_lists)} tabs")
+    
+    def _load_predictions_files(self, listbox):
+        """Load prediction files from checkpoints/run_XX/ folders"""
+        try:
+            # Look for checkpoints directory in the current session
+            checkpoints_dir = os.path.join(self.data_dir, "checkpoints")
+            if not os.path.exists(checkpoints_dir):
+                return
+            
+            # Scan for run_XX directories
+            run_dirs = []
+            for item in os.listdir(checkpoints_dir):
+                item_path = os.path.join(checkpoints_dir, item)
+                if os.path.isdir(item_path) and item.startswith("run_"):
+                    run_dirs.append(item)
+            
+            # Sort run directories by run number
+            def extract_run_number(run_dir):
+                try:
+                    return int(run_dir.split("_")[1])
+                except (IndexError, ValueError):
+                    return 0
+            
+            run_dirs.sort(key=extract_run_number)
+            
+            # Look for sample_predictions.npy in each run directory
+            for run_dir in run_dirs:
+                predictions_file = os.path.join(checkpoints_dir, run_dir, "sample_predictions.npy")
+                if os.path.exists(predictions_file):
+                    # Display as "run_XX/sample_predictions.npy"
+                    display_name = f"{run_dir}/sample_predictions.npy"
+                    listbox.insert(tk.END, display_name)
+                    
+        except Exception as e:
+            self._log(f"Error loading predictions files: {e}", level="error")
     
     def on_tab_file_select(self, folder, event=None):
         """Load the selected file from a given folder tab"""
@@ -767,7 +811,15 @@ class SimpleDataExplorer:
         if not sel:
             return
         filename = lb.get(sel[0])
-        file_path = os.path.join(self.data_dir, folder, filename)
+        
+        # Special handling for predictions files
+        if folder == "predictions":
+            # filename is in format "run_XX/sample_predictions.npy"
+            file_path = os.path.join(self.data_dir, "checkpoints", filename)
+        else:
+            # Regular folder handling
+            file_path = os.path.join(self.data_dir, folder, filename)
+        
         self._log("on_tab_file_select", folder=folder, filename=filename, path=file_path)
         
         # 🚨 CRITICAL: Save current gamestate position before switching files 🚨
@@ -2662,6 +2714,13 @@ class SimpleDataExplorer:
             self._slice_cache[folder] = info
             return info
 
+        if folder == "predictions":
+            # For predictions, we don't have slice info - just return empty info
+            # The predictions are model outputs, not source data
+            info = {"start_idx_raw": None, "end_idx_raw": None, "count": 0}
+            self._slice_cache[folder] = info
+            return info
+
         # Default/unknown
         info = {"start_idx_raw": None, "end_idx_raw": None, "count": 0}
         self._slice_cache[folder] = info
@@ -2861,7 +2920,13 @@ class SimpleDataExplorer:
         """Update dataset/shape/range when a file is loaded."""
         if not file_path:
             return
-        folder = self.current_folder or os.path.basename(os.path.dirname(file_path))
+        # Special handling for predictions files
+        if self.current_folder == "predictions":
+            # Extract run name from the file path for predictions
+            run_name = os.path.basename(os.path.dirname(file_path))
+            folder = f"predictions/{run_name}"
+        else:
+            folder = self.current_folder or os.path.basename(os.path.dirname(file_path))
         self.summary_vars["dataset"].set(folder)
         # shape: always derive from the clicked file (prevents stale shapes)
         shp = "-"
@@ -3116,6 +3181,9 @@ class SimpleDataExplorer:
                 xs, ys = self._compute_counts_from_json(os.path.join(self.data_dir, folder, "normalized_action_data.json"))
         elif folder == "06_final_training_data":
             xs, ys = self._compute_counts_from_sequences(folder)
+        elif folder == "predictions":
+            # For predictions, we don't have action counts - return empty
+            xs, ys = [], []
         # Store even if None (avoid repeated work)
         self._counts_cache[folder] = (xs, ys)
         return xs, ys

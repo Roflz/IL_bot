@@ -391,6 +391,71 @@ def train_one_epoch(
     out["amp_overflows"] = torch.tensor(amp_overflows)
     return out
 
+def generate_predictions(
+    model: nn.Module,
+    val_loader,
+    device: torch.device,
+    data_config: Dict[str, Any],
+    data_bounds: Dict[str, float]
+) -> np.ndarray:
+    """Generate predictions on validation set in action_targets format [N, A, 7]."""
+    model.eval()
+    
+    all_predictions = []
+    
+    with torch.no_grad():
+        for batch in val_loader:
+            # Move to device
+            batch = {k: v.to(device) for k, v in batch.items()}
+            
+            # Forward pass
+            outputs = model(
+                temporal_sequence=batch["temporal_sequence"],
+                action_sequence=batch["action_sequence"],
+                valid_mask=batch["valid_mask"]
+            )
+            
+            # Convert predictions to action_targets format [B, A, 7]
+            B, A = batch["targets"].shape[:2]
+            predictions = torch.zeros(B, A, 7, device=device, dtype=torch.float32)
+            
+            # [0] time_ms: convert from seconds back to milliseconds
+            time_pred = outputs["time_delta_q"][:, :, 1]  # median quantile [B, A]
+            predictions[:, :, 0] = time_pred * 1000.0  # seconds -> ms
+            
+            # [1] x_px: convert from normalized [0,1] back to pixels
+            x_pred = outputs["x_mu"].squeeze(-1)  # [B, A]
+            predictions[:, :, 1] = x_pred * data_bounds["x_max"]
+            
+            # [2] y_px: convert from normalized [0,1] back to pixels  
+            y_pred = outputs["y_mu"].squeeze(-1)  # [B, A]
+            predictions[:, :, 2] = y_pred * data_bounds["y_max"]
+            
+            # [3] button: get argmax from button logits
+            button_pred = outputs["button_logits"].argmax(dim=-1)  # [B, A]
+            predictions[:, :, 3] = button_pred.float()
+            
+            # [4] key_action: get argmax from key_action logits
+            key_action_pred = outputs["key_action_logits"].argmax(dim=-1)  # [B, A]
+            predictions[:, :, 4] = key_action_pred.float()
+            
+            # [5] key_id: get argmax from key_id logits
+            key_id_pred = outputs["key_id_logits"].argmax(dim=-1)  # [B, A]
+            predictions[:, :, 5] = key_id_pred.float()
+            
+            # [6] scroll_y: get argmax from scroll_y logits
+            scroll_pred = outputs["scroll_y_logits"].argmax(dim=-1)  # [B, A]
+            predictions[:, :, 6] = scroll_pred.float()
+            
+            # Only keep predictions where valid_mask is True
+            valid_mask = batch["valid_mask"]  # [B, A]
+            predictions = predictions.masked_fill(~valid_mask.unsqueeze(-1), 0.0)
+            
+            all_predictions.append(predictions.cpu().numpy())
+    
+    # Concatenate all batches: [N, A, 7]
+    return np.concatenate(all_predictions, axis=0).astype(np.float32)
+
 def validate(
     model: nn.Module,
     val_loader,
@@ -520,8 +585,35 @@ def run_training(cfg: Config) -> Dict[str, Any]:
     if data_root.name != "data":
         raise RuntimeError(f"Expected data root to be .../data, got {data_root}")
     
-    ckpt_root = data_root / cfg.ckpt_dir
-    run_name = cfg.run_name or datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    # Extract recording session folder from data_dir path
+    # data_dir: data/recording_sessions/20250831_113719/06_final_training_data
+    # We want to get: 20250831_113719
+    data_dir_path = Path(cfg.data_dir).resolve()
+    session_folder = data_dir_path.parts[-2]  # Get the session folder name directly from path parts
+    
+    # Create checkpoints directory within the recording session folder
+    # data_root is already data/, so we need to go to recording_sessions/session_folder
+    session_dir = data_root / "recording_sessions" / session_folder
+    ckpt_root = session_dir / "checkpoints"
+    
+    # Generate run name: run_XX format
+    if cfg.run_name:
+        run_name = cfg.run_name
+    else:
+        # Find next available run number
+        existing_runs = []
+        if ckpt_root.exists():
+            for item in ckpt_root.iterdir():
+                if item.is_dir() and item.name.startswith("run_"):
+                    try:
+                        run_num = int(item.name.split("_")[1])
+                        existing_runs.append(run_num)
+                    except (ValueError, IndexError):
+                        continue
+        
+        next_run_num = max(existing_runs, default=0) + 1
+        run_name = f"run_{next_run_num:02d}"
+    
     run_dir = ckpt_root / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     
@@ -621,6 +713,14 @@ def run_training(cfg: Config) -> Dict[str, Any]:
             print(f"Early stopping at epoch {epoch} (patience={cfg.patience})")
             break
     
+    # Generate and save sample predictions on validation set
+    print("Generating sample predictions on validation set...")
+    predictions = generate_predictions(model, val_loader, device, data_config, data_bounds)
+    predictions_path = run_dir / "sample_predictions.npy"
+    np.save(predictions_path, predictions)
+    print(f"Saved sample predictions: {predictions_path}")
+    print(f"Predictions shape: {predictions.shape} (matches action_targets format [N, A, 7])")
+    
     # Final summary
     summary = {
         "final_train_loss": train_metrics["total"],
@@ -629,6 +729,7 @@ def run_training(cfg: Config) -> Dict[str, Any]:
         "epochs_run": epoch,
         "run_dir": str(run_dir),
         "data_bounds": data_bounds,
+        "predictions_path": str(predictions_path),
     }
     
     return summary

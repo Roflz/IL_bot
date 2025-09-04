@@ -19,8 +19,7 @@ class Config:
     weight_decay: float = 0.01
     grad_clip: float = 1.0
     amp: bool = True
-    ckpt_dir: str = "checkpoints"
-    run_name: Optional[str] = None  # default: auto timestamp
+    run_name: Optional[str] = None  # default: auto run_XX format
     patience: int = 5               # early stopping on val loss
     log_interval: int = 50          # steps
 
