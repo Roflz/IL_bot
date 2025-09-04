@@ -397,11 +397,19 @@ def generate_predictions(
     device: torch.device,
     data_config: Dict[str, Any],
     data_bounds: Dict[str, float]
-) -> np.ndarray:
-    """Generate predictions on validation set in action_targets format [N, A, 7]."""
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Generate predictions on validation set in action_targets format [N, A, 7].
+    
+    Returns:
+        predictions: [N, A, 7] predicted actions
+        targets: [N, A, 7] target actions  
+        valid_mask: [N, A] boolean mask for valid actions
+    """
     model.eval()
     
     all_predictions = []
+    all_targets = []
+    all_valid_masks = []
     
     with torch.no_grad():
         for batch in val_loader:
@@ -452,9 +460,278 @@ def generate_predictions(
             predictions = predictions.masked_fill(~valid_mask.unsqueeze(-1), 0.0)
             
             all_predictions.append(predictions.cpu().numpy())
+            all_targets.append(batch["targets"].cpu().numpy())
+            all_valid_masks.append(valid_mask.cpu().numpy())
     
-    # Concatenate all batches: [N, A, 7]
-    return np.concatenate(all_predictions, axis=0).astype(np.float32)
+    # Concatenate all batches: [N, A, 7] and [N, A]
+    predictions = np.concatenate(all_predictions, axis=0).astype(np.float32)
+    targets = np.concatenate(all_targets, axis=0).astype(np.float32)
+    valid_masks = np.concatenate(all_valid_masks, axis=0).astype(bool)
+    
+    return predictions, targets, valid_masks
+
+def generate_action_distribution_metrics(
+    predictions: np.ndarray,
+    targets: np.ndarray,
+    valid_mask: np.ndarray
+) -> Dict[str, Any]:
+    """Generate comprehensive action distribution metrics comparing predictions vs targets."""
+    
+    # Flatten to get all actions: [N*A, 7]
+    pred_flat = predictions.reshape(-1, 7)
+    target_flat = targets.reshape(-1, 7)
+    valid_flat = valid_mask.reshape(-1)
+    
+    # Only consider valid actions
+    valid_pred = pred_flat[valid_flat]
+    valid_target = target_flat[valid_flat]
+    
+    # Action type mapping based on button values
+    # button=0: MOVE, button=1: CLICK, button=2: KEY, button=3: SCROLL
+    action_names = ["MOVE", "CLICK", "KEY", "SCROLL"]
+    
+    # Get action types for predictions and targets
+    pred_actions = valid_pred[:, 3].astype(int)  # button column
+    target_actions = valid_target[:, 3].astype(int)  # button column
+    
+    # Count action distributions
+    pred_counts = np.bincount(pred_actions, minlength=4)
+    target_counts = np.bincount(target_actions, minlength=4)
+    
+    # Calculate percentages
+    total_valid = len(valid_pred)
+    pred_percentages = (pred_counts / total_valid * 100) if total_valid > 0 else np.zeros(4)
+    target_percentages = (target_counts / total_valid * 100) if total_valid > 0 else np.zeros(4)
+    
+    # Calculate differences
+    count_diffs = pred_counts - target_counts
+    percentage_diffs = pred_percentages - target_percentages
+    
+    # Overall statistics
+    total_actions = len(pred_flat)  # Total actions (valid + invalid)
+    total_invalid = total_actions - total_valid
+    total_slices = predictions.shape[0]  # Number of action sequences/slices
+    
+    # Create metrics dictionary
+    metrics = {
+        "action_distributions": {
+            "predicted": {name: int(count) for name, count in zip(action_names, pred_counts)},
+            "target": {name: int(count) for name, count in zip(action_names, target_counts)},
+            "predicted_percentages": {name: float(pct) for name, pct in zip(action_names, pred_percentages)},
+            "target_percentages": {name: float(pct) for name, pct in zip(action_names, target_percentages)},
+            "count_differences": {name: int(diff) for name, diff in zip(action_names, count_diffs)},
+            "percentage_differences": {name: float(diff) for name, diff in zip(action_names, percentage_diffs)},
+        },
+        "overall_stats": {
+            "total_valid_actions": int(total_valid),
+            "total_invalid_actions": int(total_invalid),
+            "total_actions": int(total_actions),
+            "total_slices": int(total_slices),
+            "valid_percentage": float(total_valid / total_actions * 100) if total_actions > 0 else 0.0,
+        }
+    }
+    
+    return metrics
+
+def generate_timing_and_position_metrics(
+    predictions: np.ndarray,
+    targets: np.ndarray,
+    valid_mask: np.ndarray
+) -> Dict[str, Any]:
+    """Generate timing and mouse position statistics comparing predictions vs targets."""
+    
+    # Flatten to get all actions: [N*A, 7]
+    pred_flat = predictions.reshape(-1, 7)
+    target_flat = targets.reshape(-1, 7)
+    valid_flat = valid_mask.reshape(-1)
+    
+    # Only consider valid actions
+    valid_pred = pred_flat[valid_flat]
+    valid_target = target_flat[valid_flat]
+    
+    if len(valid_pred) == 0:
+        return {"timing_stats": {}, "position_stats": {}}
+    
+    # Timing statistics (column 0: time_ms)
+    pred_times = valid_pred[:, 0]
+    target_times = valid_target[:, 0]
+    time_errors = pred_times - target_times
+    time_abs_errors = np.abs(time_errors)
+    
+    timing_stats = {
+        "predicted": {
+            "mean": float(np.mean(pred_times)),
+            "std": float(np.std(pred_times)),
+            "min": float(np.min(pred_times)),
+            "max": float(np.max(pred_times)),
+            "median": float(np.median(pred_times)),
+        },
+        "target": {
+            "mean": float(np.mean(target_times)),
+            "std": float(np.std(target_times)),
+            "min": float(np.min(target_times)),
+            "max": float(np.max(target_times)),
+            "median": float(np.median(target_times)),
+        },
+        "errors": {
+            "mean_error": float(np.mean(time_errors)),
+            "std_error": float(np.std(time_errors)),
+            "mean_abs_error": float(np.mean(time_abs_errors)),
+            "std_abs_error": float(np.std(time_abs_errors)),
+            "min_error": float(np.min(time_errors)),
+            "max_error": float(np.max(time_errors)),
+            "median_abs_error": float(np.median(time_abs_errors)),
+        }
+    }
+    
+    # Mouse position statistics (columns 1,2: x_px, y_px)
+    pred_x = valid_pred[:, 1]
+    pred_y = valid_pred[:, 2]
+    target_x = valid_target[:, 1]
+    target_y = valid_target[:, 2]
+    
+    x_errors = pred_x - target_x
+    y_errors = pred_y - target_y
+    euclidean_errors = np.sqrt(x_errors**2 + y_errors**2)
+    
+    position_stats = {
+        "x_coordinate": {
+            "predicted": {
+                "mean": float(np.mean(pred_x)),
+                "std": float(np.std(pred_x)),
+                "min": float(np.min(pred_x)),
+                "max": float(np.max(pred_x)),
+                "median": float(np.median(pred_x)),
+            },
+            "target": {
+                "mean": float(np.mean(target_x)),
+                "std": float(np.std(target_x)),
+                "min": float(np.min(target_x)),
+                "max": float(np.max(target_x)),
+                "median": float(np.median(target_x)),
+            },
+            "errors": {
+                "mean_error": float(np.mean(x_errors)),
+                "std_error": float(np.std(x_errors)),
+                "mean_abs_error": float(np.mean(np.abs(x_errors))),
+                "std_abs_error": float(np.std(np.abs(x_errors))),
+                "min_error": float(np.min(x_errors)),
+                "max_error": float(np.max(x_errors)),
+                "median_abs_error": float(np.median(np.abs(x_errors))),
+            }
+        },
+        "y_coordinate": {
+            "predicted": {
+                "mean": float(np.mean(pred_y)),
+                "std": float(np.std(pred_y)),
+                "min": float(np.min(pred_y)),
+                "max": float(np.max(pred_y)),
+                "median": float(np.median(pred_y)),
+            },
+            "target": {
+                "mean": float(np.mean(target_y)),
+                "std": float(np.std(target_y)),
+                "min": float(np.min(target_y)),
+                "max": float(np.max(target_y)),
+                "median": float(np.median(target_y)),
+            },
+            "errors": {
+                "mean_error": float(np.mean(y_errors)),
+                "std_error": float(np.std(y_errors)),
+                "mean_abs_error": float(np.mean(np.abs(y_errors))),
+                "std_abs_error": float(np.std(np.abs(y_errors))),
+                "min_error": float(np.min(y_errors)),
+                "max_error": float(np.max(y_errors)),
+                "median_abs_error": float(np.median(np.abs(y_errors))),
+            }
+        },
+        "euclidean_distance": {
+            "mean": float(np.mean(euclidean_errors)),
+            "std": float(np.std(euclidean_errors)),
+            "min": float(np.min(euclidean_errors)),
+            "max": float(np.max(euclidean_errors)),
+            "median": float(np.median(euclidean_errors)),
+        }
+    }
+    
+    return {
+        "timing_stats": timing_stats,
+        "position_stats": position_stats
+    }
+
+def generate_gamestate_statistics(
+    predictions: np.ndarray,
+    targets: np.ndarray,
+    valid_mask: np.ndarray
+) -> Dict[str, Any]:
+    """Generate comparative statistics about gamestates and actions per gamestate for predictions vs targets."""
+    
+    # valid_mask shape: [N, A] where N = number of gamestates, A = max actions per gamestate
+    N, A = valid_mask.shape
+    
+    # Count valid actions per gamestate for targets (ground truth)
+    target_actions_per_gamestate = np.sum(valid_mask, axis=1)  # [N] - number of valid actions per gamestate
+    
+    # For predictions, we need to determine which actions are "valid" based on the model's output
+    # We'll consider an action "valid" if it's not all zeros (which indicates invalid/masked actions)
+    pred_valid_mask = np.any(predictions != 0, axis=2)  # [N, A] - True if any dimension is non-zero
+    pred_actions_per_gamestate = np.sum(pred_valid_mask, axis=1)  # [N] - number of predicted valid actions per gamestate
+    
+    # Calculate statistics for both predicted and target
+    def calculate_stats(actions_per_gamestate):
+        return {
+            "mean": float(np.mean(actions_per_gamestate)),
+            "std": float(np.std(actions_per_gamestate)),
+            "min": int(np.min(actions_per_gamestate)),
+            "max": int(np.max(actions_per_gamestate)),
+            "median": float(np.median(actions_per_gamestate)),
+        }
+    
+    target_stats = calculate_stats(target_actions_per_gamestate)
+    pred_stats = calculate_stats(pred_actions_per_gamestate)
+    
+    # Calculate differences
+    diff_stats = {
+        "mean_diff": pred_stats["mean"] - target_stats["mean"],
+        "std_diff": pred_stats["std"] - target_stats["std"],
+        "min_diff": pred_stats["min"] - target_stats["min"],
+        "max_diff": pred_stats["max"] - target_stats["max"],
+        "median_diff": pred_stats["median"] - target_stats["median"],
+    }
+    
+    # Calculate correlation between predicted and target sequence lengths
+    correlation = float(np.corrcoef(pred_actions_per_gamestate, target_actions_per_gamestate)[0, 1])
+    
+    gamestate_stats = {
+        "total_gamestates": int(N),
+        "max_actions_per_gamestate": int(A),
+        "predicted": {
+            "actions_per_gamestate": pred_stats,
+            "total_valid_actions": int(np.sum(pred_actions_per_gamestate)),
+        },
+        "target": {
+            "actions_per_gamestate": target_stats,
+            "total_valid_actions": int(np.sum(target_actions_per_gamestate)),
+        },
+        "differences": {
+            "actions_per_gamestate": diff_stats,
+            "total_valid_actions": int(np.sum(pred_actions_per_gamestate)) - int(np.sum(target_actions_per_gamestate)),
+        },
+        "correlation": correlation,
+        "total_possible_actions": int(N * A),
+        "target_action_density": float(np.sum(target_actions_per_gamestate) / (N * A)) if (N * A) > 0 else 0.0,
+        "predicted_action_density": float(np.sum(pred_actions_per_gamestate) / (N * A)) if (N * A) > 0 else 0.0,
+    }
+    
+    # Distribution analysis for both predicted and target
+    def get_distribution(actions_per_gamestate):
+        unique_lengths, counts = np.unique(actions_per_gamestate, return_counts=True)
+        return {str(int(length)): int(count) for length, count in zip(unique_lengths, counts)}
+    
+    gamestate_stats["predicted"]["length_distribution"] = get_distribution(pred_actions_per_gamestate)
+    gamestate_stats["target"]["length_distribution"] = get_distribution(target_actions_per_gamestate)
+    
+    return gamestate_stats
 
 def validate(
     model: nn.Module,
@@ -715,11 +992,178 @@ def run_training(cfg: Config) -> Dict[str, Any]:
     
     # Generate and save sample predictions on validation set
     print("Generating sample predictions on validation set...")
-    predictions = generate_predictions(model, val_loader, device, data_config, data_bounds)
+    predictions, targets, valid_masks = generate_predictions(model, val_loader, device, data_config, data_bounds)
     predictions_path = run_dir / "sample_predictions.npy"
     np.save(predictions_path, predictions)
     print(f"Saved sample predictions: {predictions_path}")
     print(f"Predictions shape: {predictions.shape} (matches action_targets format [N, A, 7])")
+    
+    # Generate action distribution metrics
+    print("\n" + "="*80)
+    print("ACTION DISTRIBUTION METRICS")
+    print("="*80)
+    
+    metrics = generate_action_distribution_metrics(predictions, targets, valid_masks)
+    timing_position_metrics = generate_timing_and_position_metrics(predictions, targets, valid_masks)
+    gamestate_metrics = generate_gamestate_statistics(predictions, targets, valid_masks)
+    
+    # Print action distribution table
+    print("\nAction Distribution Comparison:")
+    print("-" * 60)
+    print(f"{'Action':<8} {'Predicted':<12} {'Target':<12} {'Difference':<12} {'Pred %':<8} {'Target %':<8} {'Diff %':<8}")
+    print("-" * 60)
+    
+    action_names = ["MOVE", "CLICK", "KEY", "SCROLL"]
+    for action in action_names:
+        pred_count = metrics["action_distributions"]["predicted"][action]
+        target_count = metrics["action_distributions"]["target"][action]
+        count_diff = metrics["action_distributions"]["count_differences"][action]
+        pred_pct = metrics["action_distributions"]["predicted_percentages"][action]
+        target_pct = metrics["action_distributions"]["target_percentages"][action]
+        pct_diff = metrics["action_distributions"]["percentage_differences"][action]
+        
+        print(f"{action:<8} {pred_count:<12} {target_count:<12} {count_diff:<12} {pred_pct:<8.1f} {target_pct:<8.1f} {pct_diff:<8.1f}")
+    
+    print("-" * 60)
+    
+    # Print timing statistics table
+    print("\nTiming Statistics (Time Deltas in ms):")
+    print("-" * 80)
+    print(f"{'Metric':<20} {'Predicted':<12} {'Target':<12} {'Error':<12} {'Abs Error':<12}")
+    print("-" * 80)
+    
+    timing_stats = timing_position_metrics["timing_stats"]
+    if timing_stats:
+        pred_stats = timing_stats["predicted"]
+        target_stats = timing_stats["target"]
+        error_stats = timing_stats["errors"]
+        
+        print(f"{'Mean':<20} {pred_stats['mean']:<12.2f} {target_stats['mean']:<12.2f} {error_stats['mean_error']:<12.2f} {error_stats['mean_abs_error']:<12.2f}")
+        print(f"{'Std Dev':<20} {pred_stats['std']:<12.2f} {target_stats['std']:<12.2f} {error_stats['std_error']:<12.2f} {error_stats['std_abs_error']:<12.2f}")
+        print(f"{'Min':<20} {pred_stats['min']:<12.2f} {target_stats['min']:<12.2f} {error_stats['min_error']:<12.2f} {'':<12}")
+        print(f"{'Max':<20} {pred_stats['max']:<12.2f} {target_stats['max']:<12.2f} {error_stats['max_error']:<12.2f} {'':<12}")
+        print(f"{'Median':<20} {pred_stats['median']:<12.2f} {target_stats['median']:<12.2f} {'':<12} {error_stats['median_abs_error']:<12.2f}")
+    
+    print("-" * 80)
+    
+    # Print mouse position statistics table
+    print("\nMouse Position Statistics (Pixels):")
+    print("-" * 100)
+    print(f"{'Coordinate':<12} {'Metric':<12} {'Predicted':<12} {'Target':<12} {'Error':<12} {'Abs Error':<12}")
+    print("-" * 100)
+    
+    position_stats = timing_position_metrics["position_stats"]
+    if position_stats:
+        # X coordinate stats
+        x_stats = position_stats["x_coordinate"]
+        x_pred = x_stats["predicted"]
+        x_target = x_stats["target"]
+        x_errors = x_stats["errors"]
+        
+        print(f"{'X':<12} {'Mean':<12} {x_pred['mean']:<12.1f} {x_target['mean']:<12.1f} {x_errors['mean_error']:<12.1f} {x_errors['mean_abs_error']:<12.1f}")
+        print(f"{'X':<12} {'Std Dev':<12} {x_pred['std']:<12.1f} {x_target['std']:<12.1f} {x_errors['std_error']:<12.1f} {x_errors['std_abs_error']:<12.1f}")
+        print(f"{'X':<12} {'Min':<12} {x_pred['min']:<12.1f} {x_target['min']:<12.1f} {x_errors['min_error']:<12.1f} {'':<12}")
+        print(f"{'X':<12} {'Max':<12} {x_pred['max']:<12.1f} {x_target['max']:<12.1f} {x_errors['max_error']:<12.1f} {'':<12}")
+        print(f"{'X':<12} {'Median':<12} {x_pred['median']:<12.1f} {x_target['median']:<12.1f} {'':<12} {x_errors['median_abs_error']:<12.1f}")
+        
+        # Y coordinate stats
+        y_stats = position_stats["y_coordinate"]
+        y_pred = y_stats["predicted"]
+        y_target = y_stats["target"]
+        y_errors = y_stats["errors"]
+        
+        print(f"{'Y':<12} {'Mean':<12} {y_pred['mean']:<12.1f} {y_target['mean']:<12.1f} {y_errors['mean_error']:<12.1f} {y_errors['mean_abs_error']:<12.1f}")
+        print(f"{'Y':<12} {'Std Dev':<12} {y_pred['std']:<12.1f} {y_target['std']:<12.1f} {y_errors['std_error']:<12.1f} {y_errors['std_abs_error']:<12.1f}")
+        print(f"{'Y':<12} {'Min':<12} {y_pred['min']:<12.1f} {y_target['min']:<12.1f} {y_errors['min_error']:<12.1f} {'':<12}")
+        print(f"{'Y':<12} {'Max':<12} {y_pred['max']:<12.1f} {y_target['max']:<12.1f} {y_errors['max_error']:<12.1f} {'':<12}")
+        print(f"{'Y':<12} {'Median':<12} {y_pred['median']:<12.1f} {y_target['median']:<12.1f} {'':<12} {y_errors['median_abs_error']:<12.1f}")
+        
+        # Euclidean distance stats
+        euclidean_stats = position_stats["euclidean_distance"]
+        print(f"{'Euclidean':<12} {'Mean':<12} {'':<12} {'':<12} {'':<12} {euclidean_stats['mean']:<12.1f}")
+        print(f"{'Distance':<12} {'Std Dev':<12} {'':<12} {'':<12} {'':<12} {euclidean_stats['std']:<12.1f}")
+        print(f"{'':<12} {'Min':<12} {'':<12} {'':<12} {'':<12} {euclidean_stats['min']:<12.1f}")
+        print(f"{'':<12} {'Max':<12} {'':<12} {'':<12} {'':<12} {euclidean_stats['max']:<12.1f}")
+        print(f"{'':<12} {'Median':<12} {'':<12} {'':<12} {'':<12} {euclidean_stats['median']:<12.1f}")
+    
+    print("-" * 100)
+    
+    # Print overall statistics
+    print("\nOverall Statistics:")
+    print("-" * 40)
+    stats = metrics["overall_stats"]
+    print(f"Total Valid Actions:   {stats['total_valid_actions']:,}")
+    print(f"Total Invalid Actions: {stats['total_invalid_actions']:,}")
+    print(f"Total Actions:         {stats['total_actions']:,}")
+    print(f"Total Slices:          {stats['total_slices']:,}")
+    print(f"Valid Percentage:      {stats['valid_percentage']:.1f}%")
+    print("-" * 40)
+    
+    # Print gamestate statistics
+    print("\nGamestate Statistics (Actions per Gamestate):")
+    print("-" * 80)
+    gamestate_stats = gamestate_metrics
+    
+    print(f"Total Gamestates:           {gamestate_stats['total_gamestates']:,}")
+    print(f"Max Actions per Gamestate:  {gamestate_stats['max_actions_per_gamestate']:,}")
+    print(f"Total Possible Actions:     {gamestate_stats['total_possible_actions']:,}")
+    print()
+    
+    # Print comparative statistics table
+    print("Actions per Gamestate Comparison:")
+    print("-" * 60)
+    print(f"{'Metric':<12} {'Predicted':<12} {'Target':<12} {'Difference':<12}")
+    print("-" * 60)
+    
+    pred_stats = gamestate_stats["predicted"]["actions_per_gamestate"]
+    target_stats = gamestate_stats["target"]["actions_per_gamestate"]
+    diff_stats = gamestate_stats["differences"]["actions_per_gamestate"]
+    
+    print(f"{'Mean':<12} {pred_stats['mean']:<12.2f} {target_stats['mean']:<12.2f} {diff_stats['mean_diff']:<12.2f}")
+    print(f"{'Std Dev':<12} {pred_stats['std']:<12.2f} {target_stats['std']:<12.2f} {diff_stats['std_diff']:<12.2f}")
+    print(f"{'Min':<12} {pred_stats['min']:<12} {target_stats['min']:<12} {diff_stats['min_diff']:<12}")
+    print(f"{'Max':<12} {pred_stats['max']:<12} {target_stats['max']:<12} {diff_stats['max_diff']:<12}")
+    print(f"{'Median':<12} {pred_stats['median']:<12.2f} {target_stats['median']:<12.2f} {diff_stats['median_diff']:<12.2f}")
+    print("-" * 60)
+    
+    # Print total actions comparison
+    print("\nTotal Actions Comparison:")
+    print("-" * 40)
+    pred_total = gamestate_stats["predicted"]["total_valid_actions"]
+    target_total = gamestate_stats["target"]["total_valid_actions"]
+    total_diff = gamestate_stats["differences"]["total_valid_actions"]
+    
+    print(f"Predicted Total:  {pred_total:,}")
+    print(f"Target Total:     {target_total:,}")
+    print(f"Difference:       {total_diff:,}")
+    print(f"Correlation:      {gamestate_stats['correlation']:.3f}")
+    print()
+    
+    # Print action density comparison
+    print("Action Density Comparison:")
+    print("-" * 30)
+    pred_density = gamestate_stats["predicted_action_density"]
+    target_density = gamestate_stats["target_action_density"]
+    density_diff = pred_density - target_density
+    
+    print(f"Predicted:  {pred_density:.3f}")
+    print(f"Target:     {target_density:.3f}")
+    print(f"Difference: {density_diff:.3f}")
+    print("-" * 80)
+    
+    # Combine all metrics
+    all_metrics = {
+        "action_distribution": metrics,
+        "timing_and_position": timing_position_metrics,
+        "gamestate_statistics": gamestate_metrics
+    }
+    
+    # Save metrics to JSON file
+    metrics_path = run_dir / "training_metrics.json"
+    with open(metrics_path, "w") as f:
+        json.dump(all_metrics, f, indent=2)
+    print(f"\nSaved comprehensive training metrics: {metrics_path}")
+    print("="*80)
     
     # Final summary
     summary = {
@@ -730,6 +1174,7 @@ def run_training(cfg: Config) -> Dict[str, Any]:
         "run_dir": str(run_dir),
         "data_bounds": data_bounds,
         "predictions_path": str(predictions_path),
+        "metrics_path": str(metrics_path),
     }
     
     return summary
