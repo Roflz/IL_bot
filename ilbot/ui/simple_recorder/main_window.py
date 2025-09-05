@@ -61,6 +61,404 @@ def _center_distance(rect, px, py):
     dx, dy = (px - cx), (py - cy)
     return (dx * dx + dy * dy) ** 0.5
 
+def _compute_phase(payload: dict, craft_recent: bool) -> str:
+    bank_open   = bool((payload.get("bank") or {}).get("bankOpen", False))
+    craft_open  = bool(payload.get("craftingInterfaceOpen", False))
+
+    has_mould   = _inv_has(payload, "Ring mould")
+    has_gold    = _inv_count(payload, "Gold bar") > 0
+    has_sapph   = _inv_count(payload, "Sapphire") > 0
+
+    out_of_mats = (not has_gold) or (not has_sapph) or (not has_mould)
+
+    # Your rules, with clear precedence:
+
+    # Banking: highest precedence when open
+    if bank_open:
+        return "Banking"
+
+    # Crafting: when UI is open OR recently crafting, until mats are gone
+    if (craft_open or craft_recent):
+        if not out_of_mats:
+            return "Crafting"
+        # no materials -> next trip is bank
+        return "Moving to bank"
+
+    # Moving to bank: missing mats (or no mould)
+    if out_of_mats:
+        return "Moving to bank"
+
+    # Otherwise we're transitioning toward furnace
+    return "Moving to furnace"
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+# Extendable list of known crafting animations
+_CRAFT_ANIMS = {899}  # add more if you discover them
+
+def _is_crafting_anim(anim_id: int) -> bool:
+    return anim_id in _CRAFT_ANIMS
+
+def _decide_action_from_phase(phase: str) -> str:
+    if phase == "Moving to bank":
+        return "→ Walk to nearest bank"
+    elif phase == "Banking":
+        return "→ Deposit outputs, withdraw materials"
+    elif phase == "Moving to furnace":
+        return "→ Walk to nearest furnace"
+    elif phase == "Crafting":
+        return "→ Click Make-All / wait for crafting"
+    return "—"
+
+def _norm_name(s: str | None) -> str:
+    return _clean_rs(s or "").strip().lower()
+
+def _inv_slots(payload: dict) -> list[dict]:
+    return (payload.get("inventory", {}) or {}).get("slots", []) or []
+
+def _inv_has(payload: dict, name: str) -> bool:
+    n = _norm_name(name)
+    return any(_norm_name(s.get("itemName")) == n for s in _inv_slots(payload))
+
+def _inv_count(payload: dict, name: str) -> int:
+    n = _norm_name(name)
+    return sum(int(s.get("quantity") or 0) for s in _inv_slots(payload)
+               if _norm_name(s.get("itemName")) == n)
+
+def _first_inv_slot(payload: dict, name: str) -> dict | None:
+    n = _norm_name(name)
+    for s in _inv_slots(payload):
+        if _norm_name(s.get("itemName")) == n:
+            return s
+    return None
+
+def _bank_slots(payload: dict) -> list[dict]:
+    return (payload.get("bank", {}) or {}).get("slots", []) or []
+
+def _first_bank_slot(payload: dict, name: str) -> dict | None:
+    n = _norm_name(name)
+    best = None
+    for s in _bank_slots(payload):
+        if _norm_name(s.get("itemName")) == n:
+            # Prefer highest quantity or lowest slotId for determinism
+            if best is None:
+                best = s
+            else:
+                q1 = int(s.get("quantity") or 0)
+                q2 = int(best.get("quantity") or 0)
+                if q1 > q2 or (q1 == q2 and int(s.get("slotId") or 9_999) < int(best.get("slotId") or 9_999)):
+                    best = s
+    return best
+
+def _unwrap_rect(maybe_rect_dict: dict | None) -> dict | None:
+    """
+    Inventory/bank slots export as {"bounds": {...}} inside 'bounds'.
+    Widgets export as {"bounds": {...}} directly.
+    Objects export as 'clickbox' directly.
+    This normalizes to a plain {"x","y","width","height"} or None.
+    """
+    if not isinstance(maybe_rect_dict, dict):
+        return None
+    # common cases
+    if {"x","y","width","height"} <= set(maybe_rect_dict.keys()):
+        return maybe_rect_dict
+    inner = maybe_rect_dict.get("bounds")
+    if isinstance(inner, dict) and {"x","y","width","height"} <= set(inner.keys()):
+        return inner
+    return None
+
+def _rect_center_xy(rect: dict | None) -> tuple[int | None, int | None]:
+    if not rect:
+        return None, None
+    try:
+        return int(rect["x"] + rect["width"]/2), int(rect["y"] + rect["height"]/2)
+    except Exception:
+        return None, None
+
+def _closest_object_by_names(payload: dict, names: list[str]) -> dict | None:
+    wanted = [n.lower() for n in names]
+    for obj in (payload.get("closestGameObjects") or []):
+        nm = _norm_name(obj.get("name"))
+        if any(w in nm for w in wanted):
+            return obj
+    return None
+
+def _craft_widget_rect(payload: dict, key: str) -> dict | None:
+    w = (payload.get("crafting_widgets", {}) or {}).get(key)
+    return _unwrap_rect((w or {}).get("bounds") if isinstance(w, dict) else None)
+
+def _build_action_plan(payload: dict, phase: str) -> dict:
+    """
+    Returns a structured plan:
+    {
+      "phase": "Crafting",
+      "steps": [ {action-object}, ... ]
+    }
+    No side-effects. Purely derives targets from gamestate.
+    """
+    plan = {"phase": phase, "steps": []}
+
+    # ---------- MOVING TO BANK ----------
+    if phase == "Moving to bank":
+        obj = _closest_object_by_names(payload, ["bank booth", "banker"])
+        if obj:
+            rect = _unwrap_rect(obj.get("clickbox"))
+            cx, cy = _rect_center_xy(rect)
+            step = {
+                "action": "click-bank",
+                "description": "Click nearest bank booth",
+                "click": (
+                    {"type": "rect-random", "jitter_px": 6}
+                    if rect else
+                    {"type": "point", "x": int(obj.get("canvasX") or 0), "y": int(obj.get("canvasY") or 0)}
+                ),
+                "target": {
+                    "domain": "object",
+                    "name": obj.get("name"),
+                    "id": obj.get("id"),
+                    "clickbox": rect,
+                    "canvas": {"x": obj.get("canvasX"), "y": obj.get("canvasY")}
+                },
+                "preconditions": ["bankOpen == false"],
+                "postconditions": ["bankOpen == true"],
+                "confidence": 0.92 if rect else 0.6
+            }
+            plan["steps"].append(step)
+        return plan
+
+    # ---------- BANKING ----------
+    if phase == "Banking":
+        # Target counts (tune to taste)
+        TARGET_SAPP = 13
+        TARGET_GOLD = 13
+
+        inv_sapp = _inv_count(payload, "Sapphire")
+        inv_gold = _inv_count(payload, "Gold bar")
+        has_mould = _inv_has(payload, "Ring mould")
+        inv_ring = _first_inv_slot(payload, "Sapphire ring")
+
+        # B1: Deposit outputs first
+        if inv_ring:
+            rect = _unwrap_rect(inv_ring.get("bounds"))
+            plan["steps"].append({
+                "action": "deposit-inventory-item",
+                "description": "Deposit Sapphire ring from inventory",
+                "click": {"type": "rect-center"} if rect else {"type": "none"},
+                "target": {
+                    "domain": "inventory",
+                    "name": "Sapphire ring",
+                    "slotId": inv_ring.get("slotId"),
+                    "bounds": rect
+                },
+                "preconditions": ["bankOpen == true", "inventory contains 'Sapphire ring'"],
+                "postconditions": ["inventory does not contain 'Sapphire ring'"],
+                "confidence": 0.9 if rect else 0.4,
+            })
+            return plan  # single-step plan
+
+        # B2: Top off Sapphires to TARGET_SAPP
+        if inv_sapp < TARGET_SAPP:
+            bank_sapp = _first_bank_slot(payload, "Sapphire")
+            if bank_sapp:
+                rect = _unwrap_rect(bank_sapp.get("bounds"))
+                plan["steps"].append({
+                    "action": "withdraw-item",
+                    "description": f"Withdraw Sapphires (need {TARGET_SAPP - inv_sapp} more)",
+                    "click": {"type": "rect-center"} if rect else {"type": "none"},
+                    "target": {
+                        "domain": "bank",
+                        "name": "Sapphire",
+                        "slotId": bank_sapp.get("slotId"),
+                        "bounds": rect
+                    },
+                    "preconditions": ["bankOpen == true", f"inventory count('Sapphire') < {TARGET_SAPP}"],
+                    "postconditions": [f"inventory count('Sapphire') >= {TARGET_SAPP}"],
+                    "confidence": 0.9 if rect else 0.4,
+                })
+                return plan
+            else:
+                plan["steps"].append({
+                    "action": "withdraw-item",
+                    "description": "Could not find Sapphires in bank (scroll/search may be required)",
+                    "click": {"type": "none"},
+                    "target": {"domain": "bank", "name": "Sapphire"},
+                    "preconditions": ["bankOpen == true"],
+                    "postconditions": [],
+                    "confidence": 0.0
+                })
+                return plan
+
+        # B3: Top off Gold bars to TARGET_GOLD
+        if inv_gold < TARGET_GOLD:
+            bank_gold = _first_bank_slot(payload, "Gold bar")
+            if bank_gold:
+                rect = _unwrap_rect(bank_gold.get("bounds"))
+                plan["steps"].append({
+                    "action": "withdraw-item",
+                    "description": f"Withdraw Gold bars (need {TARGET_GOLD - inv_gold} more)",
+                    "click": {"type": "rect-center"} if rect else {"type": "none"},
+                    "target": {
+                        "domain": "bank",
+                        "name": "Gold bar",
+                        "slotId": bank_gold.get("slotId"),
+                        "bounds": rect
+                    },
+                    "preconditions": ["bankOpen == true", f"inventory count('Gold bar') < {TARGET_GOLD}"],
+                    "postconditions": [f"inventory count('Gold bar') >= {TARGET_GOLD}"],
+                    "confidence": 0.9 if rect else 0.4,
+                })
+                return plan
+            else:
+                plan["steps"].append({
+                    "action": "withdraw-item",
+                    "description": "Could not find Gold bars in bank (scroll/search may be required)",
+                    "click": {"type": "none"},
+                    "target": {"domain": "bank", "name": "Gold bar"},
+                    "preconditions": ["bankOpen == true"],
+                    "postconditions": [],
+                    "confidence": 0.0
+                })
+                return plan
+
+        # B4: Ensure Ring mould present
+        if not has_mould:
+            bank_mould = _first_bank_slot(payload, "Ring mould")
+            if bank_mould:
+                rect = _unwrap_rect(bank_mould.get("bounds"))
+                plan["steps"].append({
+                    "action": "withdraw-item",
+                    "description": "Withdraw Ring mould",
+                    "click": {"type": "rect-center"} if rect else {"type": "none"},
+                    "target": {
+                        "domain": "bank",
+                        "name": "Ring mould",
+                        "slotId": bank_mould.get("slotId"),
+                        "bounds": rect
+                    },
+                    "preconditions": ["bankOpen == true", "inventory does not contain 'Ring mould'"],
+                    "postconditions": ["inventory contains 'Ring mould'"],
+                    "confidence": 0.9 if rect else 0.4,
+                })
+                return plan
+            else:
+                plan["steps"].append({
+                    "action": "withdraw-item",
+                    "description": "Could not find Ring mould in bank (scroll/search may be required)",
+                    "click": {"type": "none"},
+                    "target": {"domain": "bank", "name": "Ring mould"},
+                    "preconditions": ["bankOpen == true"],
+                    "postconditions": [],
+                    "confidence": 0.0
+                })
+                return plan
+
+        # B5: Close bank when all conditions satisfied
+        steps = {
+            "action": "close-bank",
+            "description": "Close bank with ESC",
+            "click": {"type": "key", "key": "ESC"},
+            "target": {"domain": "widget", "name": "bank_close"},
+            "preconditions": [
+                "bankOpen == true",
+                "inventory contains 'Ring mould'",
+                f"inventory count('Sapphire') >= {TARGET_SAPP}",
+                f"inventory count('Gold bar') >= {TARGET_GOLD}",
+                "inventory does not contain 'Sapphire ring'"
+            ],
+            "postconditions": ["bankOpen == false"],
+            "confidence": 0.95
+        }
+        plan["steps"].append(steps)
+        return plan
+
+    # ---------- MOVING TO FURNACE ----------
+    if phase == "Moving to furnace":
+        obj = _closest_object_by_names(payload, ["furnace"])
+        if obj:
+            rect = _unwrap_rect(obj.get("clickbox"))
+            cx, cy = _rect_center_xy(rect)
+            step = {
+                "action": "click-furnace",
+                "description": "Click nearest furnace",
+                "click": (
+                    {"type": "rect-random", "jitter_px": 6}
+                    if rect else
+                    {"type": "point", "x": int(obj.get("canvasX") or 0), "y": int(obj.get("canvasY") or 0)}
+                ),
+                "target": {
+                    "domain": "object",
+                    "name": obj.get("name"),
+                    "id": obj.get("id"),
+                    "clickbox": rect,
+                    "canvas": {"x": obj.get("canvasX"), "y": obj.get("canvasY")}
+                },
+                "preconditions": [
+                    "bankOpen == false",
+                    "inventory contains 'Ring mould'",
+                    "inventory count('Sapphire') > 0",
+                    "inventory count('Gold bar') > 0"
+                ],
+                "postconditions": ["craftingInterfaceOpen == true"],
+                "confidence": 0.92 if rect else 0.6
+            }
+            plan["steps"].append(step)
+        return plan
+
+    # ---------- CRAFTING ----------
+    if phase == "Crafting":
+        # C1: click make widget (when visible)
+        make_rect = _craft_widget_rect(payload, "make_sapphire_rings")
+        plan["steps"].append({
+            "action": "click-make-widget",
+            "description": "Click the 'Make sapphire rings' button",
+            "click": {"type": "rect-center"} if make_rect else {"type": "none"},
+            "target": {
+                "domain": "widget",
+                "name": "make_sapphire_rings",
+                "bounds": make_rect
+            },
+            "preconditions": [
+                "craftingInterfaceOpen == true",
+                "inventory count('Sapphire') > 0",
+                "inventory count('Gold bar') > 0"
+            ],
+            "postconditions": [
+                "player.animation == 899 OR crafting in progress"
+            ],
+            "confidence": 0.95 if make_rect else 0.4
+        })
+
+        # C2: wait until materials gone
+        plan["steps"].append({
+            "action": "wait-crafting-complete",
+            "description": "Wait until sapphires and gold bars are consumed",
+            "click": {"type": "none"},
+            "target": {"domain": "none", "name": "crafting_wait"},
+            "preconditions": [
+                "inventory count('Sapphire') > 0",
+                "inventory count('Gold bar') > 0"
+            ],
+            "postconditions": [
+                "inventory count('Sapphire') == 0 OR inventory count('Gold bar') == 0"
+            ],
+            "confidence": 1.0
+        })
+        return plan
+
+    # Fallback (unknown phase)
+    plan["steps"].append({
+        "action": "idle",
+        "description": "No actionable step for this phase",
+        "click": {"type": "none"},
+        "target": {"domain": "none", "name": "n/a"},
+        "preconditions": [],
+        "postconditions": [],
+        "confidence": 0.0
+    })
+    return plan
+
+
 
 class SimpleRecorderWindow(ttk.Frame):
     def __init__(self, root):
@@ -73,8 +471,8 @@ class SimpleRecorderWindow(ttk.Frame):
         self.session_dir: Path | None = None
         self.auto_refresh_on = True
         self._after_id = None
+        self._last_crafting_ms = 0  # last time we observed crafting (anim or UI)
 
-        # overall grid (two columns)
         # overall grid (two columns)
         self.grid(sticky="nsew")
         self.grid_columnconfigure(0, weight=0)            # controls (fixed)
@@ -85,6 +483,7 @@ class SimpleRecorderWindow(ttk.Frame):
         self._last_clicked_target = "—"
         self._last_click_epoch_ms = 0
         self._last_action_text = "—"
+        self.auto_refresh_on = False
 
         self._build_controls_panel()
         self._build_info_panel()
@@ -212,6 +611,8 @@ class SimpleRecorderWindow(ttk.Frame):
             "mouse_pos":         "Mouse Cursor:",
             "last_interaction":  "Last Interaction:",
             "menu_entries":      "Menu Entries:",
+            "phase": "Phase:",
+            "next_action": "Action:",
         }
         self._row_tags = {
             "bank_open": "bool",
@@ -224,6 +625,8 @@ class SimpleRecorderWindow(ttk.Frame):
             "mouse_pos": "mouse",
             "last_interaction": "text",
             "menu_entries": "text",
+            "phase": "status",
+            "next_action": "text",
         }
 
         # Insert rows once and remember their iids for quick updates
@@ -239,6 +642,8 @@ class SimpleRecorderWindow(ttk.Frame):
             "mouse_pos",
             "last_interaction",
             "menu_entries",
+            "phase",
+            "next_action",
         ]
         for i, key in enumerate(keys_in_order):
             zebra = "odd" if i % 2 else "even"
@@ -353,8 +758,9 @@ class SimpleRecorderWindow(ttk.Frame):
     def refresh_gamestate_info(self):
         f = self._latest_gamestate_file()
         if not f:
-            for lbl in self.gamestate_info_labels.values():
-                lbl.config(text="—")
+            # reset all rows in the Treeview to an em dash
+            for key in self.table_items.keys():
+                self._table_set(key, "—")
             return
 
         try:
@@ -378,6 +784,14 @@ class SimpleRecorderWindow(ttk.Frame):
             crafting_status = "Crafting (anim=899)"
         else:
             crafting_status = f"Anim {anim_id}"
+
+        # --- Crafting hysteresis (prevents flapping back to "Moving to furnace") ---
+        now = _now_ms()
+        if crafting_open or _is_crafting_anim(anim_id):
+            self._last_crafting_ms = now
+
+        CRAFT_GRACE_MS = 5000  # keep Crafting phase for up to 5s after last observed craft
+        craft_recent = (now - self._last_crafting_ms) <= CRAFT_GRACE_MS
 
         # Inventory summary
         inv_slots = payload.get("inventory", {}).get("slots", [])
@@ -477,6 +891,35 @@ class SimpleRecorderWindow(ttk.Frame):
         # Use the persisted text (won’t disappear on later refreshes)
         last_action = self._last_action_text
 
+        # Determine Phase
+        phase = _compute_phase(payload, craft_recent)
+        action = _decide_action_from_phase(phase)
+
+        # Build standardized plan (no side-effects)
+        plan = _build_action_plan(payload, phase)
+
+        # Compact summary for table: show first step (if any)
+        if isinstance(plan, dict) and isinstance(plan.get("steps"), list) and plan["steps"]:
+            first = plan["steps"][0]
+            tgt = first.get("target", {}) or {}
+            tname = tgt.get("name") or tgt.get("domain") or "target"
+            click = first.get("click", {}) or {}
+            if click.get("type") in ("rect-center", "rect-random"):
+                rect = tgt.get("bounds") or tgt.get("clickbox")
+                cx, cy = _rect_center_xy(_unwrap_rect(rect))
+                summary = f"{first.get('action')} → {tname}" + (f" @ ({cx}, {cy})" if cx is not None else "")
+            elif click.get("type") == "point":
+                summary = f"{first.get('action')} → {tname} @ ({click.get('x')},{click.get('y')})"
+            elif click.get("type") == "key":
+                summary = f"{first.get('action')} → press {click.get('key')}"
+            else:
+                summary = f"{first.get('action')} → {tname}"
+        else:
+            summary = "—"
+
+        # (Optional) Keep the full plan around for debugging / future UI
+        self._last_action_plan = plan
+
         # Push to table rows
         self._table_set("bank_open",        "Open" if bank_open else "Closed")
         self._table_set("crafting_open",    "Open" if crafting_open else "Closed")
@@ -488,6 +931,8 @@ class SimpleRecorderWindow(ttk.Frame):
         self._table_set("mouse_pos",        mouse_pos)
         self._table_set("last_interaction", last_interaction)
         self._table_set("menu_entries",     menu_entries)
+        self._table_set("phase", phase)
+        self._table_set("next_action", summary)
 
 
     def _table_set(self, key: str, value: str):
