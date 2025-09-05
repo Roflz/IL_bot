@@ -2,10 +2,16 @@ import json
 import os
 import re
 import time
+import random
+import pyautogui
 import tkinter as tk
+import ctypes
 from pathlib import Path
 from tkinter import ttk
+from tkinter.scrolledtext import ScrolledText
 
+
+pyautogui.FAILSAFE = True  # moving mouse to a corner aborts
 AUTO_REFRESH_MS = 100
 
 # ---- helpers to clean RS color tags and format elapsed time ----
@@ -188,6 +194,11 @@ def _craft_widget_rect(payload: dict, key: str) -> dict | None:
     w = (payload.get("crafting_widgets", {}) or {}).get(key)
     return _unwrap_rect((w or {}).get("bounds") if isinstance(w, dict) else None)
 
+# --- Windows POINT struct (module-level) ---
+class POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
 def _build_action_plan(payload: dict, phase: str) -> dict:
     """
     Returns a structured plan:
@@ -209,7 +220,7 @@ def _build_action_plan(payload: dict, phase: str) -> dict:
                 "action": "click-bank",
                 "description": "Click nearest bank booth",
                 "click": (
-                    {"type": "rect-random", "jitter_px": 6}
+                    {"type": "rect-center"}
                     if rect else
                     {"type": "point", "x": int(obj.get("canvasX") or 0), "y": int(obj.get("canvasY") or 0)}
                 ),
@@ -382,7 +393,7 @@ def _build_action_plan(payload: dict, phase: str) -> dict:
                 "action": "click-furnace",
                 "description": "Click nearest furnace",
                 "click": (
-                    {"type": "rect-random", "jitter_px": 6}
+                    {"type": "rect-center"}
                     if rect else
                     {"type": "point", "x": int(obj.get("canvasX") or 0), "y": int(obj.get("canvasY") or 0)}
                 ),
@@ -469,9 +480,12 @@ class SimpleRecorderWindow(ttk.Frame):
 
         # state
         self.session_dir: Path | None = None
-        self.auto_refresh_on = True
+        self.auto_refresh_on = False
         self._after_id = None
         self._last_crafting_ms = 0  # last time we observed crafting (anim or UI)
+        self.input_enabled = False  # safety toggle
+        self._canvas_offset = (0-8, 23-8)  # only use if your coords are CANVAS-relative
+        self._rl_window_rect = None  # optional: set this in detect_window() if you find RuneLite's rect
 
         # overall grid (two columns)
         self.grid(sticky="nsew")
@@ -483,7 +497,8 @@ class SimpleRecorderWindow(ttk.Frame):
         self._last_clicked_target = "—"
         self._last_click_epoch_ms = 0
         self._last_action_text = "—"
-        self.auto_refresh_on = False
+        self._auto_var = tk.BooleanVar(value=self.auto_refresh_on)
+        self._input_var = tk.BooleanVar(value=self.input_enabled)
 
         self._build_controls_panel()
         self._build_info_panel()
@@ -549,6 +564,23 @@ class SimpleRecorderWindow(ttk.Frame):
         self.recording_status = ttk.Label(left, text="Recording paused", foreground="#d69e2e")
         self.recording_status.grid(row=4, column=0, sticky="w", pady=(4, 0))
 
+        # ---- Debug Mouse Move ----
+        dbg = ttk.LabelFrame(left, text="Debug Mouse Move")
+        dbg.grid(row=5, column=0, sticky="ew", pady=6, padx=6)
+        for c in range(3):
+            dbg.grid_columnconfigure(c, weight=1)
+
+        ttk.Label(dbg, text="X:").grid(row=0, column=0, sticky="e")
+        self.debug_x = ttk.Entry(dbg, width=6)
+        self.debug_x.grid(row=0, column=1, sticky="ew")
+
+        ttk.Label(dbg, text="Y:").grid(row=1, column=0, sticky="e")
+        self.debug_y = ttk.Entry(dbg, width=6)
+        self.debug_y.grid(row=1, column=1, sticky="ew")
+
+        self.debug_btn = ttk.Button(dbg, text="Move Mouse", command=self._debug_move_mouse)
+        self.debug_btn.grid(row=0, column=2, rowspan=2, sticky="ew", padx=(6, 0))
+
     def _build_info_panel(self):
         # ---- styles (row colors) ----
         style = ttk.Style(self)
@@ -613,6 +645,7 @@ class SimpleRecorderWindow(ttk.Frame):
             "menu_entries":      "Menu Entries:",
             "phase": "Phase:",
             "next_action": "Action:",
+            "sys_cursor_pos": "System Cursor:",
         }
         self._row_tags = {
             "bank_open": "bool",
@@ -627,6 +660,7 @@ class SimpleRecorderWindow(ttk.Frame):
             "menu_entries": "text",
             "phase": "status",
             "next_action": "text",
+            "sys_cursor_pos": "mouse",
         }
 
         # Insert rows once and remember their iids for quick updates
@@ -640,6 +674,7 @@ class SimpleRecorderWindow(ttk.Frame):
             "clicked_target",
             "hovered_tile",
             "mouse_pos",
+            "sys_cursor_pos",
             "last_interaction",
             "menu_entries",
             "phase",
@@ -660,11 +695,43 @@ class SimpleRecorderWindow(ttk.Frame):
         btns.grid_columnconfigure(1, weight=1)
 
         self.refresh_btn = ttk.Button(btns, text="Refresh Now", command=self.refresh_gamestate_info)
-        self.toggle_btn  = ttk.Button(btns, text="Auto: On", command=self._toggle_auto_refresh)
         self.refresh_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.toggle_btn.grid( row=0, column=1, sticky="ew", padx=(6, 0))
 
+        self.auto_chk = ttk.Checkbutton(
+            btns,
+            text="Auto Update Table",
+            variable=self._auto_var,
+            command=self._on_auto_check
+        )
+        self.auto_chk.grid(row=0, column=1, sticky="w", padx=(6, 0))
 
+        # NEW control row
+        ctrl = ttk.Frame(right, padding=(10, 0, 10, 10))
+        ctrl.grid(row=2, column=0, sticky="ew")
+        ctrl.grid_columnconfigure(0, weight=1)
+        ctrl.grid_columnconfigure(1, weight=1)
+
+        self.exec_btn = ttk.Button(ctrl, text="Execute Action", command=self._execute_next_action)
+        self.exec_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        self.input_chk = ttk.Checkbutton(
+            ctrl,
+            text="Enable Input",
+            variable=self._input_var,
+            command=self._on_input_check
+        )
+        self.input_chk.grid(row=0, column=0, sticky="w", padx=(0, 6))
+
+        # self.input_toggle_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.exec_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        # Debug panel
+        logf = ttk.LabelFrame(right, text="Action Debug")
+        logf.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        right.grid_rowconfigure(3, weight=1)
+
+        self.debug_text = ScrolledText(logf, height=6)
+        self.debug_text.grid(row=0, column=0, sticky="nsew")
 
     # ---------------- Actions / hooks ----------------
 
@@ -726,45 +793,56 @@ class SimpleRecorderWindow(ttk.Frame):
     def _schedule_auto_refresh(self):
         if not self.auto_refresh_on:
             return
-        self.refresh_gamestate_info()
-        self._after_id = self.root.after(AUTO_REFRESH_MS, self._schedule_auto_refresh)
+        try:
+            self.refresh_gamestate_info()
+        except Exception as e:
+            # Never let a single bad refresh kill the loop
+            self._debug(f"refresh_gamestate_info error: {e}")
+        finally:
+            self._after_id = self.root.after(AUTO_REFRESH_MS, self._schedule_auto_refresh)
 
     def _latest_gamestate_file(self) -> Path | None:
-        """
-        Find the newest *.json file either in the current session_dir (if set),
-        or in the newest session under D:\repos\bot_runelite_IL\data\recording_sessions\*\gamestates
-        """
         search_dirs: list[Path] = []
 
-        # prefer the active session folder if present
         if self.session_dir and self.session_dir.exists():
             search_dirs.append(self.session_dir)
 
         base = Path(r"D:\repos\bot_runelite_IL\data\recording_sessions")
         if base.exists():
-            # sessions look like <base>\<YYYYMMDD_HHMMSS>\gamestates
             for run in sorted(base.glob(r"*/gamestates"), key=os.path.getmtime, reverse=True):
                 search_dirs.append(run)
 
         newest: tuple[float, Path] | None = None
         for d in search_dirs:
             for f in d.glob("*.json"):
-                ts = f.stat().st_mtime
+                try:
+                    ts = f.stat().st_mtime
+                except FileNotFoundError:
+                    continue  # file got pruned between glob and stat – skip it
                 if newest is None or ts > newest[0]:
                     newest = (ts, f)
         return newest[1] if newest else None
 
-
     def refresh_gamestate_info(self):
         f = self._latest_gamestate_file()
         if not f:
-            # reset all rows in the Treeview to an em dash
-            for key in self.table_items.keys():
-                self._table_set(key, "—")
+            # clear rows gracefully (or just return)
+            for iid in self.table_items.values():
+                # leave left labels; set value to em dash
+                current_tags = self.info_table.item(iid, "tags") or ()
+                values = self.info_table.item(iid, "values")
+                self.info_table.item(iid, values=(values[0], "—"), tags=current_tags)
             return
 
         try:
-            root = json.loads(f.read_text(encoding="utf-8"))
+            text = f.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return  # it was pruned after selection; next tick will find another
+        except Exception:
+            return
+
+        try:
+            root = json.loads(text)
         except Exception:
             return
 
@@ -885,7 +963,11 @@ class SimpleRecorderWindow(ttk.Frame):
                 new_epoch = None
 
         if new_epoch is not None and new_epoch > self._last_click_epoch_ms:
-            self._last_action_text = self._resolve_last_action(root) or "—"
+            try:
+                self._last_action_text = self._resolve_last_action(root) or "—"
+            except Exception as e:
+                self._last_action_text = "—"
+                self._debug(f"_resolve_last_action error: {e}")
             self._last_click_epoch_ms = new_epoch
 
         # Use the persisted text (won’t disappear on later refreshes)
@@ -917,8 +999,13 @@ class SimpleRecorderWindow(ttk.Frame):
         else:
             summary = "—"
 
+        # System cursor position (absolute Windows coords)
+        sx, sy = self._get_system_cursor_pos()
+        sys_cursor = f"({sx}, {sy})" if isinstance(sx, int) and isinstance(sy, int) else "—"
+
         # (Optional) Keep the full plan around for debugging / future UI
         self._last_action_plan = plan
+        self._last_phase = phase
 
         # Push to table rows
         self._table_set("bank_open",        "Open" if bank_open else "Closed")
@@ -929,6 +1016,7 @@ class SimpleRecorderWindow(ttk.Frame):
         self._table_set("clicked_target", last_action)
         self._table_set("hovered_tile",     hovered_tile)
         self._table_set("mouse_pos",        mouse_pos)
+        self._table_set("sys_cursor_pos", sys_cursor)
         self._table_set("last_interaction", last_interaction)
         self._table_set("menu_entries",     menu_entries)
         self._table_set("phase", phase)
@@ -1058,6 +1146,10 @@ class SimpleRecorderWindow(ttk.Frame):
             if wx is not None and wy is not None:
                 return f"Click ({cx}, {cy}) -> Ground • Tile ({wx}, {wy}) p={pl}"
 
+        # Nothing matched and no ground tile available — bail safely
+        if not candidates:
+            return f"Click ({cx}, {cy}) -> Unknown"
+
         # Pick best candidate by priority then center proximity
         for c in candidates:
             rect = c.get("rect")
@@ -1088,3 +1180,219 @@ class SimpleRecorderWindow(ttk.Frame):
             return f"Click ({cx}, {cy}) -> {target} @ ({tx}, {ty})"
         else:
             return f"Click ({cx}, {cy}) -> {target}"
+
+    def _toggle_input_enable(self):
+        self.input_enabled = not self.input_enabled
+        self.input_toggle_btn.config(text=f"Enable Input: {'ON' if self.input_enabled else 'OFF'}")
+
+    def _screen_point_from_rect(self, rect: dict | None, jitter_px: int | None = None):
+        """
+        rect: {"x","y","width","height"} in SCREEN coords (assumed).
+        jitter_px: if provided, add a random ± jitter within the rect edges.
+        returns (x, y) int or (None, None) if invalid.
+        """
+        if not isinstance(rect, dict): return (None, None)
+        try:
+            x, y, w, h = int(rect["x"]), int(rect["y"]), int(rect["width"]), int(rect["height"])
+            if w <= 0 or h <= 0: return (None, None)
+            cx = x + w // 2
+            cy = y + h // 2
+            if jitter_px:
+                # keep random point inside the rect; cap jitter to rect size
+                jx = min(jitter_px, max(1, w // 3))
+                jy = min(jitter_px, max(1, h // 3))
+                rx = random.randint(x + 2, x + w - 3)
+                ry = random.randint(y + 2, y + h - 3)
+                return (rx, ry)
+            return (cx, cy)
+        except Exception:
+            return (None, None)
+
+    def _apply_canvas_offset(self, x: int | None, y: int | None):
+        """
+        If you discover your coords are CANVAS-relative, set self._canvas_offset=(ox,oy).
+        Otherwise this is a no-op (adds (0,0)).
+        """
+        if x is None or y is None: return (None, None)
+        ox, oy = self._canvas_offset
+        return (int(x) + int(ox), int(y) + int(oy))
+
+    def _do_click_point(self, x: int, y: int, button: str = "left", move_ms: int = 80):
+        # tiny movement for human-like behavior
+        pyautogui.moveTo(x, y, duration=max(0.0, move_ms / 1000.0))
+        pyautogui.click(x=x, y=y, button=button)
+
+    def _do_press_key(self, key: str):
+        pyautogui.press(key)
+
+    def _execute_next_action(self):
+        if not self.input_enabled:
+            self._table_set("next_action", "Input disabled (toggle it ON)")
+            self._debug("Execute skipped: input disabled")
+            return
+
+        plan = getattr(self, "_last_action_plan", None)
+        if not plan or not isinstance(plan, dict) or not plan.get("steps"):
+            self._table_set("next_action", "No plan available")
+            self._debug("Execute skipped: no plan available")
+            return
+
+        step = plan["steps"][0]
+        click = step.get("click", {}) or {}
+        target = step.get("target", {}) or {}
+        ctype = click.get("type")
+
+        try:
+            # log geometry each action
+            self._log_window_geometry()
+
+            if ctype in ("rect-center", "rect-random"):
+                rect = target.get("bounds") or target.get("clickbox")
+                rect = rect if isinstance(rect, dict) else None
+                jitter_px = int(click.get("jitter_px") or 0) if ctype == "rect-random" else None
+                px, py = self._screen_point_from_rect(rect, jitter_px)
+                px, py = self._apply_canvas_offset(px, py)
+
+                if px is None:
+                    self._table_set("next_action", "No rect available for click")
+                    self._log_click_debug(step, ctype, None, None, rect, self._canvas_offset,
+                                          sys_before=self._get_system_cursor_pos(),
+                                          sys_after=None,
+                                          note="(no rect)")
+                    return
+
+                sys_before = self._get_system_cursor_pos()
+                self._do_click_point(px, py)
+                sys_after = self._get_system_cursor_pos()
+
+                self._log_click_debug(step, ctype, px, py, rect, self._canvas_offset,
+                                      sys_before=sys_before, sys_after=sys_after,
+                                      note=f"(jitter={jitter_px})" if jitter_px else "")
+
+            elif ctype == "point":
+                px, py = click.get("x"), click.get("y")
+                px, py = self._apply_canvas_offset(px, py)
+                if not isinstance(px, (int, float)) or not isinstance(py, (int, float)):
+                    self._table_set("next_action", "Invalid point for click")
+                    self._log_click_debug(step, ctype, None, None, None, self._canvas_offset,
+                                          sys_before=self._get_system_cursor_pos(),
+                                          sys_after=None,
+                                          note="(invalid point)")
+                    return
+
+                sys_before = self._get_system_cursor_pos()
+                self._do_click_point(int(px), int(py))
+                sys_after = self._get_system_cursor_pos()
+
+                self._log_click_debug(step, ctype, int(px), int(py), None, self._canvas_offset,
+                                      sys_before=sys_before, sys_after=sys_after)
+
+            elif ctype == "key":
+                key = (click.get("key") or "").lower()
+                if not key:
+                    self._table_set("next_action", "Invalid key")
+                    self._debug("Keypress skipped: invalid key")
+                    return
+
+                sys_before = self._get_system_cursor_pos()
+                self._debug(
+                    f"Phase='{getattr(self, '_last_phase', '?')}' action='{step.get('action')}' press key='{key}' "
+                    f"sysBefore={sys_before}")
+                self._do_press_key(key)
+                sys_after = self._get_system_cursor_pos()
+                # also log window rects for key actions
+                self._log_window_geometry()
+
+            else:
+                self._table_set("next_action", f"Unsupported click.type: {ctype}")
+                self._debug(f"Unsupported click.type: {ctype}")
+                return
+
+            # After action, refresh so next step is proposed
+            self.refresh_gamestate_info()
+
+        except Exception as e:
+            self._table_set("next_action", f"Action error: {e}")
+            self._debug(f"Action error: {e}")
+
+    def _on_auto_check(self):
+        self.auto_refresh_on = bool(self._auto_var.get())
+        if self.auto_refresh_on:
+            self._schedule_auto_refresh()
+        elif self._after_id:
+            self.root.after_cancel(self._after_id)
+            self._after_id = None
+
+    def _on_input_check(self):
+        self.input_enabled = bool(self._input_var.get())
+
+    def _debug(self, msg: str):
+        ts = time.strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}\n"
+        # console
+        print(line.strip())
+        # GUI
+        dt = getattr(self, "debug_text", None)
+        if dt:
+            dt.insert("end", line)
+            dt.see("end")
+
+    def _log_click_debug(self, step, ctype, px=None, py=None, rect=None, used_offset=(0, 0),
+                         sys_before=None, sys_after=None, note=""):
+        tgt = (step.get("target") or {})
+        tname = tgt.get("name") or tgt.get("domain") or "target"
+        phase = getattr(self, "_last_phase", "?")
+        rect_src = "bounds" if "bounds" in tgt else ("clickbox" if "clickbox" in tgt else "point")
+        self._debug(
+            f"Phase='{phase}' action='{step.get('action')}' target='{tname}' "
+            f"type={ctype} planned=({px},{py}) rectSrc={rect_src} rect={rect} "
+            f"offset={used_offset} sysBefore={sys_before} sysAfter={sys_after} {note}"
+        )
+
+    # --- Windows cursor position (absolute screen coords) ---
+    class _POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    def _get_system_cursor_pos(self) -> tuple[int | None, int | None]:
+        pt = POINT()
+        ok = ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        return (int(pt.x), int(pt.y)) if ok else (None, None)
+
+    # --- Tk window rect (absolute screen coords) ---
+    def _get_tk_window_rect(self) -> dict:
+        # ensure layout is up-to-date
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        x = int(self.root.winfo_rootx())
+        y = int(self.root.winfo_rooty())
+        w = int(self.root.winfo_width())
+        h = int(self.root.winfo_height())
+        return {"x": x, "y": y, "width": w, "height": h}
+
+    # optional setter you can call from detect_window() if you locate RuneLite
+    def _set_runelite_window_rect(self, x: int, y: int, w: int, h: int):
+        self._rl_window_rect = {"x": int(x), "y": int(y), "width": int(w), "height": int(h)}
+
+    # --- Debug dump of window geometry + offsets ---
+    def _log_window_geometry(self):
+        tk_rect = self._get_tk_window_rect()
+        rl_rect = self._rl_window_rect if isinstance(self._rl_window_rect, dict) else None
+        self._debug(
+            "WindowRects  TK="
+            f"{tk_rect}  RL={rl_rect}  canvas_offset={self._canvas_offset}"
+        )
+
+    def _debug_move_mouse(self):
+        try:
+            x = int(self.debug_x.get())
+            y = int(self.debug_y.get())
+        except Exception:
+            self._debug("Invalid X/Y input")
+            return
+
+        # absolute system coordinates (screen pixels)
+        import pyautogui
+        pyautogui.moveTo(x, y, duration=0.1)
+        self._debug(f"Moved mouse to absolute ({x}, {y})")
