@@ -439,20 +439,35 @@ def generate_predictions(
             y_pred = outputs["y_mu"].squeeze(-1)  # [B, A]
             predictions[:, :, 2] = y_pred * data_bounds["y_max"]
             
-            # [3] button: get argmax from button logits
-            button_pred = outputs["button_logits"].argmax(dim=-1)  # [B, A]
+            # Get action type predictions from event logits
+            event_pred = outputs["event_logits"].argmax(dim=-1)  # [B, A] - 0=CLICK, 1=KEY, 2=SCROLL, 3=MOVE
+            
+            # Initialize all action components to 0 (inactive)
+            button_pred = torch.zeros(B, A, device=device, dtype=torch.long)
+            key_action_pred = torch.zeros(B, A, device=device, dtype=torch.long)
+            key_id_pred = torch.zeros(B, A, device=device, dtype=torch.long)
+            scroll_pred = torch.zeros(B, A, device=device, dtype=torch.long)
+            
+            # Set action components based on predicted event type
+            # CLICK actions (event=0): set button=1, others=0
+            click_mask = (event_pred == 0)
+            button_pred[click_mask] = 1
+            
+            # KEY actions (event=1): set key_action and key_id, others=0
+            key_mask = (event_pred == 1)
+            key_action_pred[key_mask] = outputs["key_action_logits"][key_mask].argmax(dim=-1)
+            key_id_pred[key_mask] = outputs["key_id_logits"][key_mask].argmax(dim=-1)
+            
+            # SCROLL actions (event=2): set scroll_y, others=0
+            scroll_mask = (event_pred == 2)
+            scroll_pred[scroll_mask] = outputs["scroll_y_logits"][scroll_mask].argmax(dim=-1)
+            
+            # MOVE actions (event=3): all components remain 0 (default)
+            
+            # Set the predictions
             predictions[:, :, 3] = button_pred.float()
-            
-            # [4] key_action: get argmax from key_action logits
-            key_action_pred = outputs["key_action_logits"].argmax(dim=-1)  # [B, A]
             predictions[:, :, 4] = key_action_pred.float()
-            
-            # [5] key_id: get argmax from key_id logits
-            key_id_pred = outputs["key_id_logits"].argmax(dim=-1)  # [B, A]
             predictions[:, :, 5] = key_id_pred.float()
-            
-            # [6] scroll_y: get argmax from scroll_y logits
-            scroll_pred = outputs["scroll_y_logits"].argmax(dim=-1)  # [B, A]
             predictions[:, :, 6] = scroll_pred.float()
             
             # Only keep predictions where valid_mask is True
@@ -994,9 +1009,13 @@ def run_training(cfg: Config) -> Dict[str, Any]:
     print("Generating sample predictions on validation set...")
     predictions, targets, valid_masks = generate_predictions(model, val_loader, device, data_config, data_bounds)
     predictions_path = run_dir / "sample_predictions.npy"
+    targets_path = run_dir / "targets.npy"
     np.save(predictions_path, predictions)
+    np.save(targets_path, targets)
     print(f"Saved sample predictions: {predictions_path}")
+    print(f"Saved targets: {targets_path}")
     print(f"Predictions shape: {predictions.shape} (matches action_targets format [N, A, 7])")
+    print(f"Targets shape: {targets.shape} (matches action_targets format [N, A, 7])")
     
     # Generate action distribution metrics
     print("\n" + "="*80)
@@ -1174,6 +1193,7 @@ def run_training(cfg: Config) -> Dict[str, Any]:
         "run_dir": str(run_dir),
         "data_bounds": data_bounds,
         "predictions_path": str(predictions_path),
+        "targets_path": str(targets_path),
         "metrics_path": str(metrics_path),
     }
     

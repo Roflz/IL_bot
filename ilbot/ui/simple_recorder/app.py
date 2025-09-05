@@ -5,7 +5,14 @@ import threading
 import time
 import os
 from datetime import datetime
-from .main_window import SimpleRecorderWindow
+try:
+    from .main_window import SimpleRecorderWindow
+except ImportError:
+    # Fallback for when running as script directly
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
+    from ilbot.ui.simple_recorder.main_window import SimpleRecorderWindow
 
 
 def run_simple_recorder():

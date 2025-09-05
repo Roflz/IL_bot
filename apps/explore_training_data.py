@@ -791,12 +791,18 @@ class SimpleDataExplorer:
             
             run_dirs.sort(key=extract_run_number)
             
-            # Look for sample_predictions.npy in each run directory
+            # Look for prediction files in each run directory
             for run_dir in run_dirs:
+                # Add sample_predictions.npy if it exists
                 predictions_file = os.path.join(checkpoints_dir, run_dir, "sample_predictions.npy")
                 if os.path.exists(predictions_file):
-                    # Display as "run_XX/sample_predictions.npy"
                     display_name = f"{run_dir}/sample_predictions.npy"
+                    listbox.insert(tk.END, display_name)
+                
+                # Add targets.npy if it exists
+                targets_file = os.path.join(checkpoints_dir, run_dir, "targets.npy")
+                if os.path.exists(targets_file):
+                    display_name = f"{run_dir}/targets.npy"
                     listbox.insert(tk.END, display_name)
                     
         except Exception as e:
