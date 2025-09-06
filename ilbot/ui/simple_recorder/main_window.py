@@ -13,6 +13,21 @@ from tkinter.scrolledtext import ScrolledText
 
 pyautogui.FAILSAFE = True  # moving mouse to a corner aborts
 AUTO_REFRESH_MS = 100
+# How fast the auto-run tries to do things
+AUTO_RUN_TICK_MS = 250          # main auto loop tick
+ACTION_COOLDOWN_MS = 600        # minimum gap between actions
+POST_CLICK_SETTLE_MS = 350      # tiny settle after a click
+WAIT_STEP_POLL_MS = 300         # poll rate for 'wait-*' steps
+WAIT_STEP_TIMEOUT_MS = 60_000   # 60s fail-safe for waits
+
+PRE_ACTION_WAIT_MS = 250  # delay before executing a new action
+
+# --- rule-gated execution ---
+PRE_ACTION_DELAY_MS   = 250      # wait before doing any action
+RULE_WAIT_TIMEOUT_MS  = 10_000   # how long to wait for rules (pre/post)
+RULE_POLL_MS          = 150      # how often to poll rules while waiting
+
+
 
 # ---- helpers to clean RS color tags and format elapsed time ----
 _RS_TAG_RE = re.compile(r'</?col(?:=[0-9a-fA-F]+)?>')
@@ -470,7 +485,6 @@ def _build_action_plan(payload: dict, phase: str) -> dict:
     return plan
 
 
-
 class SimpleRecorderWindow(ttk.Frame):
     def __init__(self, root):
         super().__init__(root, padding=12)
@@ -486,6 +500,12 @@ class SimpleRecorderWindow(ttk.Frame):
         self.input_enabled = False  # safety toggle
         self._canvas_offset = (0-8, 23-8)  # only use if your coords are CANVAS-relative
         self._rl_window_rect = None  # optional: set this in detect_window() if you find RuneLite's rect
+        self.run_enabled = False
+        self._run_var = tk.BooleanVar(value=self.run_enabled)
+        self._last_action_time_ms = 0
+        self._auto_run_after_id = None
+        self._plan_ready_ms = 0  # don’t act until now (used for pre-action wait)
+        self._step_state = None  # {'step': dict, 'stage': 'prewait'|'acting'|'postwait', 't0': int}
 
         # overall grid (two columns)
         self.grid(sticky="nsew")
@@ -733,6 +753,19 @@ class SimpleRecorderWindow(ttk.Frame):
         self.debug_text = ScrolledText(logf, height=6)
         self.debug_text.grid(row=0, column=0, sticky="nsew")
 
+        # Auto-run row
+        runrow = ttk.Frame(right, padding=(10, 0, 10, 10))
+        runrow.grid(row=4, column=0, sticky="ew")
+        runrow.grid_columnconfigure(0, weight=1)
+
+        self.run_chk = ttk.Checkbutton(
+            runrow,
+            text="Auto-Run (loop actions)",
+            variable=self._run_var,
+            command=self._on_run_check
+        )
+        self.run_chk.grid(row=0, column=0, sticky="w")
+
     # ---------------- Actions / hooks ----------------
 
     def detect_window(self):
@@ -976,6 +1009,11 @@ class SimpleRecorderWindow(ttk.Frame):
         # Determine Phase
         phase = _compute_phase(payload, craft_recent)
         action = _decide_action_from_phase(phase)
+
+        prev_phase = getattr(self, "_prev_phase_for_wait", None)
+        if phase != prev_phase:
+            self._plan_ready_ms = _now_ms() + PRE_ACTION_WAIT_MS
+            self._prev_phase_for_wait = phase
 
         # Build standardized plan (no side-effects)
         plan = _build_action_plan(payload, phase)
@@ -1396,3 +1434,256 @@ class SimpleRecorderWindow(ttk.Frame):
         import pyautogui
         pyautogui.moveTo(x, y, duration=0.1)
         self._debug(f"Moved mouse to absolute ({x}, {y})")
+
+    def _on_run_check(self):
+        self.run_enabled = bool(self._run_var.get())
+        # start or stop the loop
+        if self.run_enabled:
+            # kick the loop
+            self._schedule_auto_run_tick()
+            self._plan_ready_ms = _now_ms() + PRE_ACTION_WAIT_MS
+        else:
+            if self._auto_run_after_id:
+                try:
+                    self.root.after_cancel(self._auto_run_after_id)
+                except Exception:
+                    pass
+                self._auto_run_after_id = None
+
+    def _schedule_auto_run_tick(self):
+        # Always reschedule; guard against re-entrancy
+        if not self.run_enabled:
+            return
+        try:
+            self._auto_run_tick()
+        except Exception as e:
+            self._debug(f"auto_run_tick error: {e}")
+        finally:
+            self._auto_run_after_id = self.root.after(AUTO_RUN_TICK_MS, self._schedule_auto_run_tick)
+
+    def _auto_run_tick(self):
+        # keep the UI fresh
+        try:
+            self.refresh_gamestate_info()
+        except Exception as e:
+            self._debug(f"refresh during auto-run error: {e}")
+
+        if not self.input_enabled or not self._action_ready():
+            return
+
+        plan = getattr(self, "_last_action_plan", None)
+        if not plan or not isinstance(plan, dict):
+            return
+        steps = plan.get("steps") or []
+        if not steps:
+            return
+
+        # Ensure we have a step in progress
+        if not self._step_state:
+            self._begin_step(steps[0])
+
+        # Advance the step state machine (prewait -> acting -> postwait)
+        done = self._advance_step_state()
+        # (When done, next tick will pick up the next freshly-built plan step)
+
+    def _handle_wait_step(self, step: dict):
+        """
+        For 'wait-crafting-complete':
+          Poll until inventory sapphires==0 or gold bars==0, or timeout.
+        """
+        name = (step.get("action") or "").lower()
+        t0 = self._now_ms_local()
+
+        def _poll():
+            # stop conditions
+            if not self.run_enabled:
+                return
+            if (self._now_ms_local() - t0) > WAIT_STEP_TIMEOUT_MS:
+                self._debug("wait-step timeout reached")
+                # let loop continue; don't block future actions forever
+                self._mark_action_done()
+                return
+
+            # Refresh state and re-evaluate condition
+            try:
+                self.refresh_gamestate_info()
+            except Exception as e:
+                self._debug(f"wait poll refresh error: {e}")
+
+            # Rebuild a tiny view on inventory
+            try:
+                # last payload is inside the table refresh path; pull from newest json again:
+                f = self._latest_gamestate_file()
+                if not f:
+                    self._auto_run_after_id = self.root.after(WAIT_STEP_POLL_MS, _poll)
+                    return
+                root = json.loads(f.read_text(encoding="utf-8"))
+                data = root.get("data", {})
+                sapp = _inv_count(data, "Sapphire")
+                gold = _inv_count(data, "Gold bar")
+                done = (sapp == 0) or (gold == 0)
+            except Exception:
+                done = False
+
+            if done:
+                self._debug("wait-step complete: materials consumed")
+                self._mark_action_done()
+                # fall through; main auto-run tick will kick again
+            else:
+                # keep polling
+                self._auto_run_after_id = self.root.after(WAIT_STEP_POLL_MS, _poll)
+
+        # Kick the poller
+        _poll()
+
+    def _now_ms_local(self) -> int:
+        return int(time.time() * 1000)
+
+    def _action_ready(self) -> bool:
+        return (self._now_ms_local() - self._last_action_time_ms) >= ACTION_COOLDOWN_MS
+
+    def _mark_action_done(self, extra_ms: int = 0):
+        self._last_action_time_ms = self._now_ms_local() + extra_ms
+
+    def _latest_payload(self) -> dict:
+        """Read the newest JSON and return data{} (or {})."""
+        f = self._latest_gamestate_file()
+        if not f:
+            return {}
+        try:
+            root = json.loads(f.read_text(encoding="utf-8"))
+            return root.get("data", {}) or {}
+        except Exception:
+            return {}
+
+    def _eval_rule(self, rule: str, data: dict) -> bool:
+        """Evaluate a single rule string against the latest data dict."""
+        rule = (rule or "").strip()
+
+        # allow simple OR
+        if " OR " in rule:
+            return any(self._eval_rule(part, data) for part in rule.split(" OR "))
+
+        # normalize helpers
+        def _bool(path):
+            if path == "bankOpen":
+                return bool((data.get("bank") or {}).get("bankOpen", False))
+            if path == "craftingInterfaceOpen":
+                return bool(data.get("craftingInterfaceOpen", False))
+            if path == "crafting in progress":
+                anim = int((data.get("player") or {}).get("animation", -1))
+                return anim in _CRAFT_ANIMS or bool(data.get("craftingInterfaceOpen", False))
+            return False
+
+        # simple booleans:  bankOpen == true/false
+        m = re.fullmatch(r"(bankOpen|craftingInterfaceOpen)\s*==\s*(true|false)", rule, re.I)
+        if m:
+            key, val = m.group(1), m.group(2).lower() == "true"
+            return _bool(key) == val
+
+        # player.animation == 899
+        m = re.fullmatch(r"player\.animation\s*==\s*(-?\d+)", rule, re.I)
+        if m:
+            want = int(m.group(1))
+            anim = int((data.get("player") or {}).get("animation", -1))
+            return anim == want
+
+        # inventory contains 'Item'
+        m = re.fullmatch(r"inventory\s+contains\s+'(.+)'", rule, re.I)
+        if m:
+            return _inv_has(data, m.group(1))
+
+        # inventory does not contain 'Item'
+        m = re.fullmatch(r"inventory\s+does\s+not\s+contain\s+'(.+)'", rule, re.I)
+        if m:
+            return not _inv_has(data, m.group(1))
+
+        # inventory count('Item') <op> N
+        m = re.fullmatch(r"inventory\s+count\('(.+)'\)\s*(==|>=|<=|>|<)\s*(\d+)", rule, re.I)
+        if m:
+            item, op, n = m.group(1), m.group(2), int(m.group(3))
+            c = _inv_count(data, item)
+            return {
+                "==": c == n, ">=": c >= n, "<=": c <= n, ">": c > n, "<": c < n
+            }[op]
+
+        # crafting in progress (standalone)
+        if rule.lower().strip() == "crafting in progress":
+            return _bool("crafting in progress")
+
+        # Unknown rule => be conservative (treat as False)
+        self._debug(f"Unknown rule: {rule}")
+        return False
+
+    def _rules_ok(self, rules: list[str] | None, data: dict) -> bool:
+        if not rules:
+            return True
+        return all(self._eval_rule(r, data) for r in rules if isinstance(r, str) and r.strip())
+
+    def _begin_step(self, step: dict):
+        self._step_state = {"step": step, "stage": "prewait", "t0": self._now_ms_local()}
+        self._debug(f"step begin → {step.get('action')}")
+
+    def _advance_step_state(self):
+        """
+        Drives one step through:
+          prewait (rules+pre-delay) -> acting -> postwait (rules or retry on timeout)
+        Returns True when the step is fully finished, else False.
+        """
+        if not self._step_state:
+            return True
+
+        st = self._step_state
+        step = st["step"]
+        stage = st["stage"]
+        t0 = st["t0"]
+
+        now = self._now_ms_local()
+        data = self._latest_payload()
+
+        # 1) PREWAIT: wait until preconditions true AND pre-action delay elapsed
+        if stage == "prewait":
+            pre_ok = self._rules_ok(step.get("preconditions"), data)
+            delay_ok = (now - t0) >= PRE_ACTION_DELAY_MS
+            if pre_ok and delay_ok:
+                # advance to acting
+                st["stage"] = "acting"
+                return False
+            # timeout? execute anyway
+            if (now - t0) >= RULE_WAIT_TIMEOUT_MS:
+                self._debug("prewait timeout → executing anyway")
+                st["stage"] = "acting"
+                return False
+            # keep waiting
+            return False
+
+        # 2) ACTING: perform once, then go to postwait
+        if stage == "acting":
+            self._execute_next_action()  # already refreshes
+            st["stage"] = "postwait"
+            st["t0"] = now
+            return False
+
+        # 3) POSTWAIT: wait for postconditions; on timeout, retry the action
+        if stage == "postwait":
+            post_ok = self._rules_ok(step.get("postconditions"), data)
+            if post_ok:
+                self._debug("postconditions satisfied")
+                self._step_state = None
+                # give a tiny settle so we don't spam
+                self._mark_action_done(extra_ms=POST_CLICK_SETTLE_MS)
+                return True
+
+            if (now - t0) >= RULE_WAIT_TIMEOUT_MS:
+                self._debug("postwait timeout → retrying action")
+                # retry the action and restart the postwait timer
+                self._execute_next_action()
+                st["t0"] = now
+                return False
+
+            # keep waiting
+            return False
+
+        # unknown stage: finish
+        self._step_state = None
+        return True
