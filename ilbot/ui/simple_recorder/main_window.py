@@ -10,27 +10,75 @@ from pathlib import Path
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
+from contextlib import suppress
+try:
+    import pygetwindow as gw
+except Exception:
+    gw = None
+
+
 
 pyautogui.FAILSAFE = True  # moving mouse to a corner aborts
 AUTO_REFRESH_MS = 100
-# How fast the auto-run tries to do things
-AUTO_RUN_TICK_MS = 250          # main auto loop tick
-ACTION_COOLDOWN_MS = 600        # minimum gap between actions
-POST_CLICK_SETTLE_MS = 350      # tiny settle after a click
-WAIT_STEP_POLL_MS = 300         # poll rate for 'wait-*' steps
-WAIT_STEP_TIMEOUT_MS = 60_000   # 60s fail-safe for waits
-
-PRE_ACTION_WAIT_MS = 250  # delay before executing a new action
-
-# --- rule-gated execution ---
-PRE_ACTION_DELAY_MS   = 250      # wait before doing any action
-RULE_WAIT_TIMEOUT_MS  = 10_000   # how long to wait for rules (pre/post)
-RULE_POLL_MS          = 150      # how often to poll rules while waiting
-
-
+# --- timings (simplified) ---
+AUTO_RUN_TICK_MS     = 250    # scheduler tick for the UI/auto loop
+PRE_ACTION_DELAY_MS  = 250    # delay before performing any action (click/key)
+RULE_WAIT_TIMEOUT_MS = 10_000 # how long to wait for pre/post conditions before retry
 
 # ---- helpers to clean RS color tags and format elapsed time ----
 _RS_TAG_RE = re.compile(r'</?col(?:=[0-9a-fA-F]+)?>')
+
+import socket
+import json
+import time
+
+class RuneLiteIPC:
+    def __init__(self, host="127.0.0.1", port=17000, pre_action_ms=250, timeout_s=2.0):
+        self.host = host
+        self.port = port
+        self.pre_action_ms = pre_action_ms
+        self.timeout_s = timeout_s
+
+    def _send(self, obj: dict) -> dict:
+        data = (json.dumps(obj) + "\n").encode("utf-8")
+        try:
+            with socket.create_connection((self.host, self.port), timeout=self.timeout_s) as s:
+                s.sendall(data)
+                s.shutdown(socket.SHUT_WR)
+                resp = s.makefile("r", encoding="utf-8").readline().strip()
+                return json.loads(resp) if resp else {"ok": False, "err": "empty-response"}
+        except socket.timeout:
+            return {"ok": False, "err": "timeout"}
+        except ConnectionRefusedError:
+            return {"ok": False, "err": "connection-refused"}
+        except Exception as e:
+            return {"ok": False, "err": f"{type(e).__name__}: {e}"}
+
+    def ping(self) -> bool:
+        try:
+            r = self._send({"cmd":"ping"})
+            return bool(r.get("ok"))
+        except Exception:
+            return False
+
+    def focus(self):
+        try:
+            self._send({"cmd":"focus"})
+        except Exception:
+            pass
+
+    def click_canvas(self, x:int, y:int, button:int=1, pre_ms: int | None = None):
+        # pre-action delay here (you asked for this explicitly)
+        delay = self.pre_action_ms if pre_ms is None else pre_ms
+        if delay > 0:
+            time.sleep(delay / 1000.0)
+        return self._send({"cmd":"click", "x": int(x), "y": int(y), "button": int(button)})
+
+    def key(self, k:str, pre_ms: int | None = None):
+        delay = self.pre_action_ms if pre_ms is None else pre_ms
+        if delay > 0:
+            time.sleep(delay / 1000.0)
+        return self._send({"cmd":"key", "k": str(k)})
 
 def _clean_rs(s: str | None) -> str:
     if not s:
@@ -491,6 +539,8 @@ class SimpleRecorderWindow(ttk.Frame):
         self.root = root
         self.root.title("Simple Bot Recorder")
         self.root.minsize(1100, 600)
+        self._rl_window_rect = None  # {'x': int, 'y': int, 'width': int, 'height': int}
+        self._rl_window_title = None
 
         # state
         self.session_dir: Path | None = None
@@ -498,7 +548,7 @@ class SimpleRecorderWindow(ttk.Frame):
         self._after_id = None
         self._last_crafting_ms = 0  # last time we observed crafting (anim or UI)
         self.input_enabled = False  # safety toggle
-        self._canvas_offset = (0-8, 23-8)  # only use if your coords are CANVAS-relative
+        self._canvas_offset = (0, 8)  # only use if your coords are CANVAS-relative
         self._rl_window_rect = None  # optional: set this in detect_window() if you find RuneLite's rect
         self.run_enabled = False
         self._run_var = tk.BooleanVar(value=self.run_enabled)
@@ -540,16 +590,51 @@ class SimpleRecorderWindow(ttk.Frame):
         win = ttk.LabelFrame(left, text="Window Detection")
         win.grid(row=1, column=0, sticky="ew", pady=6)
         win.grid_columnconfigure(0, weight=1)
+        win.grid_columnconfigure(1, weight=0)
 
-        self.detect_button = ttk.Button(win, text="Detect Runelite Window", command=self.detect_window)
-        self.detect_button.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
+        # Combobox to pick 'RuneLite - <username>'
+        ttk.Label(win, text="Target window:").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 0))
+        self.window_combo = ttk.Combobox(win, state="readonly", values=[])
+        self.window_combo.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
+        self.window_combo.bind("<<ComboboxSelected>>", self._on_window_select)
 
-        self.window_status = ttk.Label(win, text="No window detected", foreground="#2c7a7b")
-        self.window_status.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
+        # Refresh/Detect button
+        self.detect_button = ttk.Button(win, text="Refresh Windows", command=self.detect_window)
+        self.detect_button.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 6))
+
+        self.window_status = ttk.Label(win, text="No window selected", foreground="#2c7a7b")
+        self.window_status.grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 6))
+
+        # IPC / Port Picker
+        ipc = ttk.LabelFrame(left, text="IPC (RuneLite Plugin)")
+        ipc.grid(row=2, column=0, sticky="ew", pady=6)
+        ipc.grid_columnconfigure(0, weight=1)
+        ipc.grid_columnconfigure(1, weight=0)
+
+        ttk.Label(ipc, text="Port:").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 0))
+        self.ipc_port_var = tk.StringVar(value="17000")
+        self.ipc_combo = ttk.Combobox(ipc, state="readonly", textvariable=self.ipc_port_var, values=["17000"])
+        self.ipc_combo.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
+
+        btns = ttk.Frame(ipc)
+        btns.grid(row=1, column=1, sticky="e", padx=(0, 8), pady=(0, 6))
+        ttk.Button(btns, text="Scan", command=self._ipc_scan_ports).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(btns, text="Ping", command=self._ipc_ping).grid(row=0, column=1)
+        self.ipc_status = ttk.Label(ipc, text="Not tested", foreground="#6b7280")
+        self.ipc_status.grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 6))
+
+        # Input mode toggle
+        self.input_mode_var = getattr(self, "input_mode_var", None) or tk.StringVar(value="ipc")
+        ttk.Label(ipc, text="Input mode:").grid(row=3, column=0, sticky="w", padx=8, pady=(4, 0))
+        mode_row = ttk.Frame(ipc)
+        mode_row.grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
+        ttk.Radiobutton(mode_row, text="IPC", variable=self.input_mode_var, value="ipc").grid(row=0, column=0, padx=(0, 12))
+        ttk.Radiobutton(mode_row, text="pyautogui", variable=self.input_mode_var, value="pyautogui").grid(row=0, column=1)
+
 
         # Session Management
         sess = ttk.LabelFrame(left, text="Session Management")
-        sess.grid(row=2, column=0, sticky="ew", pady=6)
+        sess.grid(row=3, column=0, sticky="ew", pady=6)
         sess.grid_columnconfigure(0, weight=1)
         sess.grid_columnconfigure(1, weight=1)
 
@@ -565,7 +650,7 @@ class SimpleRecorderWindow(ttk.Frame):
 
         # Recording Controls
         rec = ttk.LabelFrame(left, text="Recording Controls")
-        rec.grid(row=3, column=0, sticky="ew", pady=6)
+        rec.grid(row=4, column=0, sticky="ew", pady=6)
         for c in range(3):
             rec.grid_columnconfigure(c, weight=1)
 
@@ -582,11 +667,11 @@ class SimpleRecorderWindow(ttk.Frame):
         self.end_button.state(["disabled"])
 
         self.recording_status = ttk.Label(left, text="Recording paused", foreground="#d69e2e")
-        self.recording_status.grid(row=4, column=0, sticky="w", pady=(4, 0))
+        self.recording_status.grid(row=5, column=0, sticky="w", pady=(4, 0))
 
         # ---- Debug Mouse Move ----
         dbg = ttk.LabelFrame(left, text="Debug Mouse Move")
-        dbg.grid(row=5, column=0, sticky="ew", pady=6, padx=6)
+        dbg.grid(row=6, column=0, sticky="ew", pady=6, padx=6)
         for c in range(3):
             dbg.grid_columnconfigure(c, weight=1)
 
@@ -769,9 +854,28 @@ class SimpleRecorderWindow(ttk.Frame):
     # ---------------- Actions / hooks ----------------
 
     def detect_window(self):
-        # TODO: your existing detection
-        self.window_status.config(text="Window detected")
-        # (no change to info panel)
+        """
+        Refresh the list of RuneLite user windows ('RuneLite - <username>')
+        and auto-select the current choice if present.
+        """
+        self._populate_window_combo()
+
+        # If user had a selection, re-apply it after refresh
+        sel = getattr(self, "_window_selected_title", None)
+        if sel and sel in (self.window_combo["values"] or ()):
+            try:
+                idx = list(self.window_combo["values"]).index(sel)
+                self.window_combo.current(idx)
+                self._on_window_select()
+            except Exception:
+                pass
+
+        # Debug dump of what we found
+        titles = [t for t, _ in getattr(self, "_window_scan", [])]
+        if titles:
+            self._debug("Detected RuneLite windows:\n  - " + "\n  - ".join(titles))
+        else:
+            self._debug("Detected RuneLite windows: (none)")
 
     def create_session(self):
         """
@@ -1012,7 +1116,7 @@ class SimpleRecorderWindow(ttk.Frame):
 
         prev_phase = getattr(self, "_prev_phase_for_wait", None)
         if phase != prev_phase:
-            self._plan_ready_ms = _now_ms() + PRE_ACTION_WAIT_MS
+            self._plan_ready_ms = _now_ms() + PRE_ACTION_DELAY_MS
             self._prev_phase_for_wait = phase
 
         # Build standardized plan (no side-effects)
@@ -1044,6 +1148,15 @@ class SimpleRecorderWindow(ttk.Frame):
         # (Optional) Keep the full plan around for debugging / future UI
         self._last_action_plan = plan
         self._last_phase = phase
+
+        # Track current plan head to detect changes between ticks
+        try:
+            steps = (plan.get("steps") or []) if isinstance(plan, dict) else []
+            head_action = (steps[0].get("action") if steps else None)
+        except Exception:
+            head_action = None
+        self._plan_head_action = head_action
+        self._plan_phase = phase
 
         # Push to table rows
         self._table_set("bank_open",        "Open" if bank_open else "Closed")
@@ -1255,13 +1368,102 @@ class SimpleRecorderWindow(ttk.Frame):
         ox, oy = self._canvas_offset
         return (int(x) + int(ox), int(y) + int(oy))
 
+    def _ensure_ipc(self):
+        # helper: keep RuneLiteIPC in sync with the UI selection
+        try:
+            port = int(self.ipc_port_var.get().strip())
+        except Exception:
+            port = 17000
+        if not hasattr(self, "ipc"):
+            self.ipc = RuneLiteIPC(port=port, pre_action_ms=250, timeout_s=2.0)
+        else:
+            self.ipc.port = port
+
     def _do_click_point(self, x: int, y: int, button: str = "left", move_ms: int = 80):
-        # tiny movement for human-like behavior
-        pyautogui.moveTo(x, y, duration=max(0.0, move_ms / 1000.0))
-        pyautogui.click(x=x, y=y, button=button)
+        mode = self.input_mode_var.get() if hasattr(self, "input_mode_var") else "ipc"
+
+        # compute system coords once (used for logging, and for pyautogui mode)
+        sys_x, sys_y = self._canvas_to_system(int(x), int(y))
+        title = self._rl_window_title or "?"
+        rl_rect = self._rl_window_rect
+
+        if mode == "pyautogui":
+            try:
+                dur = max(0.0, float(move_ms) / 1000.0)
+            except Exception:
+                dur = 0.0
+            try:
+                pyautogui.moveTo(int(sys_x), int(sys_y), duration=dur)
+                if button == "left":
+                    pyautogui.click()
+                elif button == "right":
+                    pyautogui.click(button="right")
+                else:
+                    pyautogui.click()
+                self._debug(
+                    f"PYAUTOGUI click -> canvas=({int(x)},{int(y)}) system=({sys_x},{sys_y}) "
+                    f"window='{title}' RLRect={rl_rect}"
+                )
+            except Exception as e:
+                self._debug(f"PYAUTOGUI click error: {type(e).__name__}: {e}")
+            return
+
+        # ----- IPC mode -----
+        self._ensure_ipc()
+        # preflight ping so we fail fast with a clear message
+        pong = self.ipc._send({"cmd": "ping"})
+        if not (isinstance(pong, dict) and pong.get("ok")):
+            try:
+                self.ipc_status.config(text=f"Preflight fail @ {self.ipc.port}: {pong}", foreground="#b91c1c")
+            except Exception:
+                pass
+            self._debug(f"IPC preflight failed on port {self.ipc.port}: {pong}")
+            return
+
+        btn = 1 if button == "left" else (3 if button == "right" else 1)
+        self.ipc.focus()
+        resp = self.ipc.click_canvas(int(x), int(y), button=btn)
+        self._debug(
+            f"IPC click (port={self.ipc.port}) -> canvas=({int(x)},{int(y)}) system=({sys_x},{sys_y}) "
+            f"window='{title}' RLRect={rl_rect} resp={resp}"
+        )
+        try:
+            self.ipc_status.config(text=f"Click resp @ {self.ipc.port}: {resp}", foreground="#065f46" if resp.get("ok") else "#b91c1c")
+        except Exception:
+            pass
+
 
     def _do_press_key(self, key: str):
-        pyautogui.press(key)
+        mode = self.input_mode_var.get() if hasattr(self, "input_mode_var") else "ipc"
+
+        if mode == "pyautogui":
+            try:
+                pyautogui.press(str(key))
+                self._debug(f"PYAUTOGUI key -> '{key}'")
+            except Exception as e:
+                self._debug(f"PYAUTOGUI key error: {type(e).__name__}: {e}")
+            return
+
+        # ----- IPC mode -----
+        self._ensure_ipc()
+        pong = self.ipc._send({"cmd": "ping"})
+        if not (isinstance(pong, dict) and pong.get("ok")):
+            try:
+                self.ipc_status.config(text=f"Preflight fail @ {self.ipc.port}: {pong}", foreground="#b91c1c")
+            except Exception:
+                pass
+            self._debug(f"IPC preflight failed on port {self.ipc.port}: {pong}")
+            return
+
+        self.ipc.focus()
+        title = self._rl_window_title or "?"
+        rl_rect = self._rl_window_rect
+        resp = self.ipc.key(key)
+        self._debug(f"IPC key (port={self.ipc.port}) -> '{key}' window='{title}' RLRect={rl_rect} resp={resp}")
+        try:
+            self.ipc_status.config(text=f"Key resp @ {self.ipc.port}: {resp}", foreground="#065f46" if resp.get("ok") else "#b91c1c")
+        except Exception:
+            pass
 
     def _execute_next_action(self):
         if not self.input_enabled:
@@ -1381,10 +1583,16 @@ class SimpleRecorderWindow(ttk.Frame):
         tname = tgt.get("name") or tgt.get("domain") or "target"
         phase = getattr(self, "_last_phase", "?")
         rect_src = "bounds" if "bounds" in tgt else ("clickbox" if "clickbox" in tgt else "point")
+
+        sys_planned = self._canvas_to_system(px, py)
+        win_title = self._rl_window_title or "?"
+        rl_rect = self._rl_window_rect
+
         self._debug(
             f"Phase='{phase}' action='{step.get('action')}' target='{tname}' "
-            f"type={ctype} planned=({px},{py}) rectSrc={rect_src} rect={rect} "
-            f"offset={used_offset} sysBefore={sys_before} sysAfter={sys_after} {note}"
+            f"type={ctype} canvas=({px},{py}) system={sys_planned} rectSrc={rect_src} rect={rect} "
+            f"offset={used_offset} window='{win_title}' RLRect={rl_rect} "
+            f"sysBefore={sys_before} sysAfter={sys_after} {note}"
         )
 
     # --- Windows cursor position (absolute screen coords) ---
@@ -1441,7 +1649,8 @@ class SimpleRecorderWindow(ttk.Frame):
         if self.run_enabled:
             # kick the loop
             self._schedule_auto_run_tick()
-            self._plan_ready_ms = _now_ms() + PRE_ACTION_WAIT_MS
+            self._plan_ready_ms = _now_ms() + PRE_ACTION_DELAY_MS
+
         else:
             if self._auto_run_after_id:
                 try:
@@ -1468,6 +1677,19 @@ class SimpleRecorderWindow(ttk.Frame):
         except Exception as e:
             self._debug(f"refresh during auto-run error: {e}")
 
+        data = self._latest_payload()
+        bank_open = bool((data.get("bank") or {}).get("bankOpen", False))
+        if bank_open:
+            sapp = self._bank_count(data, "Sapphire")
+            gold = self._bank_count(data, "Gold bar")
+            # Stop as soon as either is out
+            if sapp <= 0 or gold <= 0:
+                missing = []
+                if sapp <= 0: missing.append("Sapphires")
+                if gold <= 0: missing.append("Gold bars")
+                self._stop_auto_run(f"Out of {', '.join(missing)} in bank")
+                return
+
         if not self.input_enabled or not self._action_ready():
             return
 
@@ -1477,6 +1699,24 @@ class SimpleRecorderWindow(ttk.Frame):
         steps = plan.get("steps") or []
         if not steps:
             return
+
+        # If the plan/phase head changed since we started the current step, reset it
+        if self._step_state:
+            curr_action = self._step_state.get("step", {}).get("action")
+            new_action = steps[0].get("action") if steps else None
+            curr_phase = self._step_state.get("phase")
+            new_phase = getattr(self, "_plan_phase", None)
+
+            if (new_phase is not None and curr_phase != new_phase) or (new_action != curr_action):
+                self._debug(
+                    f"plan/phase changed → reset step (from '{curr_action}' to '{new_action}', phase '{curr_phase}'→'{new_phase}')")
+                self._step_state = None
+                # optionally seed pre-action delay so we don't hammer immediately
+                self._mark_action_done()
+
+        # Ensure we have a step in progress
+        if not self._step_state and steps:
+            self._begin_step(steps[0])
 
         # Ensure we have a step in progress
         if not self._step_state:
@@ -1498,9 +1738,8 @@ class SimpleRecorderWindow(ttk.Frame):
             # stop conditions
             if not self.run_enabled:
                 return
-            if (self._now_ms_local() - t0) > WAIT_STEP_TIMEOUT_MS:
+            if (self._now_ms_local() - t0) > RULE_WAIT_TIMEOUT_MS:
                 self._debug("wait-step timeout reached")
-                # let loop continue; don't block future actions forever
                 self._mark_action_done()
                 return
 
@@ -1515,7 +1754,7 @@ class SimpleRecorderWindow(ttk.Frame):
                 # last payload is inside the table refresh path; pull from newest json again:
                 f = self._latest_gamestate_file()
                 if not f:
-                    self._auto_run_after_id = self.root.after(WAIT_STEP_POLL_MS, _poll)
+                    self._auto_run_after_id = self.root.after(RULE_WAIT_TIMEOUT_MS, _poll)
                     return
                 root = json.loads(f.read_text(encoding="utf-8"))
                 data = root.get("data", {})
@@ -1531,7 +1770,7 @@ class SimpleRecorderWindow(ttk.Frame):
                 # fall through; main auto-run tick will kick again
             else:
                 # keep polling
-                self._auto_run_after_id = self.root.after(WAIT_STEP_POLL_MS, _poll)
+                self._auto_run_after_id = self.root.after(AUTO_RUN_TICK_MS, _poll)
 
         # Kick the poller
         _poll()
@@ -1540,10 +1779,16 @@ class SimpleRecorderWindow(ttk.Frame):
         return int(time.time() * 1000)
 
     def _action_ready(self) -> bool:
-        return (self._now_ms_local() - self._last_action_time_ms) >= ACTION_COOLDOWN_MS
+        """Ready to launch next action after pre-action delay expires."""
+        return self._now_ms_local() >= getattr(self, "_plan_ready_ms", 0)
 
-    def _mark_action_done(self, extra_ms: int = 0):
-        self._last_action_time_ms = self._now_ms_local() + extra_ms
+    def _mark_action_done(self, delay_ms: int | None = None):
+        """
+        Schedule the next moment when an action is allowed.
+        If delay_ms is None, use PRE_ACTION_DELAY_MS.
+        """
+        d = PRE_ACTION_DELAY_MS if delay_ms is None else int(delay_ms)
+        self._plan_ready_ms = self._now_ms_local() + max(0, d)
 
     def _latest_payload(self) -> dict:
         """Read the newest JSON and return data{} (or {})."""
@@ -1621,44 +1866,118 @@ class SimpleRecorderWindow(ttk.Frame):
         return all(self._eval_rule(r, data) for r in rules if isinstance(r, str) and r.strip())
 
     def _begin_step(self, step: dict):
-        self._step_state = {"step": step, "stage": "prewait", "t0": self._now_ms_local()}
-        self._debug(f"step begin → {step.get('action')}")
+        self._step_state = {
+            "step": step,
+            "stage": "prewait",
+            "t0": self._now_ms_local(),
+            "phase": getattr(self, "_plan_phase", None),
+        }
+        self._debug(f"step begin → {step.get('action')} (phase={getattr(self, '_plan_phase', None)})")
 
     def _advance_step_state(self):
         """
         Drives one step through:
-          prewait (rules+pre-delay) -> acting -> postwait (rules or retry on timeout)
+          prewait (pre-delay only) -> acting -> postwait (rules or retry on timeout)
         Returns True when the step is fully finished, else False.
         """
         if not self._step_state:
             return True
 
-        st = self._step_state
+        st   = self._step_state
         step = st["step"]
-        stage = st["stage"]
-        t0 = st["t0"]
+        stage= st["stage"]
+        t0   = st["t0"]
 
-        now = self._now_ms_local()
+        now  = self._now_ms_local()
         data = self._latest_payload()
 
-        # 1) PREWAIT: wait until preconditions true AND pre-action delay elapsed
+        # --- local probe for readable rule status (mirrors _eval_rule patterns) ---
+        def _probe_rule(rule: str) -> str:
+            r = (rule or "").strip()
+            # OR support: show each part
+            if " OR " in r:
+                parts = [p.strip() for p in r.split(" OR ") if p.strip()]
+                statuses = [self._eval_rule(p, data) for p in parts]
+                probes = [ _probe_rule(p) for p in parts ]
+                return f"{' OR '.join(probes)}  => {any(statuses)}"
+
+            # booleans
+            m = re.fullmatch(r"(bankOpen|craftingInterfaceOpen)\s*==\s*(true|false)", r, re.I)
+            if m:
+                key, want = m.group(1), (m.group(2).lower()=="true")
+                cur = bool((data.get("bank") or {}).get("bankOpen", False)) if key=="bankOpen" \
+                      else bool(data.get("craftingInterfaceOpen", False))
+                return f"{key}=={str(want).lower()}  (now {cur})  => {cur==want}"
+
+            # crafting in progress / animation
+            if r.lower().strip() == "crafting in progress":
+                anim = int((data.get("player") or {}).get("animation", -1))
+                cip  = bool(data.get("craftingInterfaceOpen", False))
+                ok   = (anim in _CRAFT_ANIMS) or cip
+                return f"crafting in progress  (anim={anim}, craftingUI={cip})  => {ok}"
+
+            m = re.fullmatch(r"player\.animation\s*==\s*(-?\d+)", r, re.I)
+            if m:
+                want = int(m.group(1))
+                anim = int((data.get("player") or {}).get("animation", -1))
+                return f"player.animation=={want}  (now {anim})  => {anim==want}"
+
+            # inventory contains / not contains
+            m = re.fullmatch(r"inventory\s+contains\s+'(.+)'", r, re.I)
+            if m:
+                name = m.group(1)
+                cnt = _inv_count(data, name)
+                ok  = cnt > 0
+                return f"inventory contains '{name}'  (count={cnt})  => {ok}"
+
+            m = re.fullmatch(r"inventory\s+does\s+not\s+contain\s+'(.+)'", r, re.I)
+            if m:
+                name = m.group(1)
+                cnt = _inv_count(data, name)
+                ok  = cnt == 0
+                return f"inventory does not contain '{name}'  (count={cnt})  => {ok}"
+
+            # inventory count('Item') <op> N
+            m = re.fullmatch(r"inventory\s+count\('(.+)'\)\s*(==|>=|<=|>|<)\s*(\d+)", r, re.I)
+            if m:
+                item, op, n = m.group(1), m.group(2), int(m.group(3))
+                c = _inv_count(data, item)
+                res = {"==": c == n, ">=": c >= n, "<=": c <= n, ">": c > n, "<": c < n}[op]
+                return f"inventory count('{item}') {op} {n}  (now {c})  => {res}"
+
+            # fallback: just show boolean result
+            ok = self._eval_rule(r, data)
+            return f"{r}  => {ok}"
+
+        def _dump_rules(prefix: str, rules: list[str] | None):
+            if not rules:
+                self._debug(f"{prefix}: (none)")
+                return
+            lines = [ _probe_rule(r) for r in rules if isinstance(r, str) and r.strip() ]
+            if lines:
+                self._debug(f"{prefix}:\n  - " + "\n  - ".join(lines))
+            else:
+                self._debug(f"{prefix}: (none)")
+
+        # 1) PREWAIT: ONLY honor pre-action delay, do NOT block on preconditions.
         if stage == "prewait":
-            pre_ok = self._rules_ok(step.get("preconditions"), data)
             delay_ok = (now - t0) >= PRE_ACTION_DELAY_MS
-            if pre_ok and delay_ok:
-                # advance to acting
+            pre = step.get("preconditions")
+            pre_defined = bool(pre)
+            pre_ok = self._rules_ok(pre, data) if pre_defined else True
+
+            self._debug(f"PREWAIT stage='{stage}' action='{step.get('action')}' "
+                        f"delay_ok={delay_ok} elapsed={now - t0}ms")
+            if pre_defined:
+                _dump_rules("preconditions status", pre)
+
+            if delay_ok:
                 st["stage"] = "acting"
-                return False
-            # timeout? execute anyway
-            if (now - t0) >= RULE_WAIT_TIMEOUT_MS:
-                self._debug("prewait timeout → executing anyway")
-                st["stage"] = "acting"
-                return False
-            # keep waiting
             return False
 
         # 2) ACTING: perform once, then go to postwait
         if stage == "acting":
+            self._debug(f"ACTING action='{step.get('action')}'")
             self._execute_next_action()  # already refreshes
             st["stage"] = "postwait"
             st["t0"] = now
@@ -1666,17 +1985,22 @@ class SimpleRecorderWindow(ttk.Frame):
 
         # 3) POSTWAIT: wait for postconditions; on timeout, retry the action
         if stage == "postwait":
-            post_ok = self._rules_ok(step.get("postconditions"), data)
+            post = step.get("postconditions")
+            post_ok = self._rules_ok(post, data)
+            remain = max(0, RULE_WAIT_TIMEOUT_MS - (now - t0))
+
+            self._debug(f"POSTWAIT action='{step.get('action')}' post_ok={post_ok} "
+                        f"elapsed={now - t0}ms remaining_to_retry={remain}ms")
+            _dump_rules("postconditions status", post)
+
             if post_ok:
-                self._debug("postconditions satisfied")
+                self._debug("postconditions satisfied → advance")
                 self._step_state = None
-                # give a tiny settle so we don't spam
-                self._mark_action_done(extra_ms=POST_CLICK_SETTLE_MS)
+                self._mark_action_done()  # uses PRE_ACTION_DELAY_MS
                 return True
 
             if (now - t0) >= RULE_WAIT_TIMEOUT_MS:
-                self._debug("postwait timeout → retrying action")
-                # retry the action and restart the postwait timer
+                self._debug("postwait timeout → retrying action now")
                 self._execute_next_action()
                 st["t0"] = now
                 return False
@@ -1685,5 +2009,202 @@ class SimpleRecorderWindow(ttk.Frame):
             return False
 
         # unknown stage: finish
+        self._debug(f"Unknown stage '{stage}' → finishing step")
         self._step_state = None
         return True
+
+    def _set_runelite_window_rect(self, x: int, y: int, width: int, height: int):
+        self._rl_window_rect = {"x": int(x), "y": int(y), "width": int(width), "height": int(height)}
+
+    def _canvas_to_system(self, cx: int | None, cy: int | None) -> tuple[int | None, int | None]:
+        """
+        Convert canvas/client-area coords to absolute screen coords using the
+        detected RuneLite window and current canvas_offset.
+        """
+        if cx is None or cy is None:
+            return (None, None)
+
+        # 1) apply your known canvas_offset (titlebar/insets, etc.)
+        ox, oy = self._canvas_offset if hasattr(self, "_canvas_offset") else (0, 0)
+        rx, ry = int(cx) + int(ox), int(cy) + int(oy)
+
+        # 2) add window origin if we have it
+        rl = self._rl_window_rect if isinstance(self._rl_window_rect, dict) else None
+        if not rl:
+            return (rx, ry)
+        return (int(rl["x"]) + rx, int(rl["y"]) + ry)
+
+    def _scan_runelite_windows(self):
+        """
+        Return a list of (title, window_obj) for windows whose title matches
+        'RuneLite - <username>' (case-insensitive, tolerant of spacing).
+        We don't rely on .isVisible (pygetwindow can misreport); we only skip minimized or 0x0.
+        """
+        if gw is None:
+            self._debug("pygetwindow not available; install: pip install pygetwindow")
+            return []
+
+        try:
+            # pull everything once; titles may include IDEs etc.
+            wins = gw.getAllWindows()
+        except Exception as e:
+            self._debug(f"scan windows error: {e}")
+            return []
+
+        out = []
+        pat = re.compile(r"^rune?lite\s*-\s*(.+)$", re.IGNORECASE)  # RuneLite / Runelite
+        for w in wins:
+            try:
+                title = (w.title or "").strip()
+                if not title:
+                    continue
+                m = pat.match(title)
+                if not m:
+                    continue
+                # basic sanity: skip minimized/0-sized
+                if getattr(w, "isMinimized", False):
+                    continue
+                if int(getattr(w, "width", 0)) <= 0 or int(getattr(w, "height", 0)) <= 0:
+                    continue
+                out.append((title, w))
+            except Exception:
+                continue
+
+        # sort stable by title
+        out.sort(key=lambda tw: tw[0].lower())
+        return out
+
+    def _populate_window_combo(self):
+        items = self._scan_runelite_windows()
+        titles = [t for t, _ in items]
+        self._window_scan = items  # keep the (title, window) tuples
+
+        # Update combo list
+        try:
+            self.window_combo["values"] = titles
+        except Exception:
+            pass
+
+        if titles:
+            # auto-select the first if nothing selected yet
+            if not getattr(self, "_window_selected_title", None):
+                self.window_combo.current(0)
+                self._on_window_select()
+            self.window_status.config(text=f"Found {len(titles)} RuneLite user window(s)")
+        else:
+            self.window_status.config(text="No RuneLite 'username' windows found")
+            self._rl_window_rect = None
+            self._rl_window_title = None
+
+    def _on_window_select(self, *_):
+        """
+        Called when user picks a 'RuneLite - <username>' entry in the combo.
+        Caches rect/title for coord translation and debug.
+        """
+        try:
+            sel = self.window_combo.get().strip()
+        except Exception:
+            sel = ""
+
+        self._window_selected_title = sel or None
+
+        # find the matching tuple
+        target = None
+        for title, w in getattr(self, "_window_scan", []):
+            if title == sel:
+                target = (title, w)
+                break
+
+        if not target:
+            self.window_status.config(text="Pick a RuneLite window from the list")
+            self._rl_window_rect = None
+            self._rl_window_title = None
+            return
+
+        title, w = target
+        try:
+            # pygetwindow returns .left/.top/.width/.height
+            self._set_runelite_window_rect(w.left, w.top, w.width, w.height)
+            self._rl_window_title = title
+            self.window_status.config(
+                text=f"Using: {title} @ ({w.left},{w.top},{w.width}x{w.height})"
+            )
+            self._log_window_geometry()
+            self._debug(f"Selected RL window: '{title}' handle={getattr(w, 'hWnd', None)}")
+        except Exception as e:
+            self._debug(f"select window error: {e}")
+            self.window_status.config(text="Failed to read window geometry")
+
+    def _ipc_scan_ports(self, start=17000, end=17020, timeout_s=0.5):
+        """
+        Probe a small range of ports for a responding IPC plugin by sending {"cmd":"ping"}.
+        Populates the combobox with responsive ports.
+        """
+        import socket, json
+        found = []
+
+        def try_ping(port):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=timeout_s) as s:
+                    s.sendall((json.dumps({"cmd": "ping"}) + "\n").encode("utf-8"))
+                    s.shutdown(socket.SHUT_WR)
+                    line = s.makefile("r", encoding="utf-8").readline().strip()
+                    if line:
+                        return json.loads(line)
+            except Exception:
+                return None
+            return None
+
+        for p in range(start, end + 1):
+            resp = try_ping(p)
+            if isinstance(resp, dict) and resp.get("ok"):
+                found.append(str(p))
+
+        if found:
+            try:
+                self.ipc_combo["values"] = found
+                if self.ipc_port_var.get() not in found:
+                    self.ipc_port_var.set(found[0])
+            except Exception:
+                pass
+            self.ipc_status.config(text=f"Found {len(found)} IPC port(s): {', '.join(found)}", foreground="#065f46")
+            self._debug("IPC scan found ports: " + ", ".join(found))
+        else:
+            self.ipc_status.config(text="No IPC listeners found in 17000-17020", foreground="#b91c1c")
+            self._debug("IPC scan: none found (is the plugin enabled?)")
+
+    def _ipc_ping(self):
+        try:
+            port = int(self.ipc_port_var.get().strip())
+        except Exception:
+            self.ipc_status.config(text="Invalid port", foreground="#b91c1c")
+            return
+
+        if not hasattr(self, "ipc"):
+            self.ipc = RuneLiteIPC(port=port, pre_action_ms=PRE_ACTION_DELAY_MS, timeout_s=1.0)
+        else:
+            self.ipc.port = port
+            self.ipc.timeout_s = 1.0
+
+        pong = self.ipc._send({"cmd": "ping"})
+        ok = isinstance(pong, dict) and pong.get("ok")
+        self.ipc_status.config(text=f"Ping {port}: {pong}", foreground="#065f46" if ok else "#b91c1c")
+        self._debug(f"IPC ping@{port} => {pong}")
+
+    def _bank_count(self, payload: dict, name: str) -> int:
+        n = _norm_name(name)
+        return sum(
+            int(s.get("quantity") or 0)
+            for s in _bank_slots(payload)
+            if _norm_name(s.get("itemName")) == n
+        )
+
+    def _stop_auto_run(self, reason: str):
+        """Disable the Auto-Run checkbox and cancel the scheduler."""
+        self._debug(f"AUTO-RUN STOPPED: {reason}")
+        try:
+            self._run_var.set(False)
+        except Exception:
+            pass
+        # this will cancel self._auto_run_after_id if needed
+        self._on_run_check()
