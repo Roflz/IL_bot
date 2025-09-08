@@ -45,6 +45,7 @@ class MultiInstanceHost(ttk.Frame):
 
     def add_instance(self):
         self._counter += 1
+        idx = self._counter - 1  # 0-based
         tab = ttk.Frame(self.nb)
         tab.grid_rowconfigure(0, weight=1)
         tab.grid_columnconfigure(0, weight=1)
@@ -52,7 +53,7 @@ class MultiInstanceHost(ttk.Frame):
         self.nb.add(tab, text=label)
 
         # Build your full UI inside this tab
-        instance = SimpleRecorderWindow(tab)
+        instance = SimpleRecorderWindow(tab, instance_index=idx)
         instance.grid(row=0, column=0, sticky="nsew")
         self._instances.append(instance)
 

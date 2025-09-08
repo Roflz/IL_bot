@@ -68,10 +68,15 @@ from .action_plans import (
     _norm_name,
 )
 
+from .session_ports import (
+    _username_from_title,
+    _session_dir_for_username,
+    _autofill_port_for_username,
+)
 
 
 class SimpleRecorderWindow(ttk.Frame):
-    def __init__(self, root):
+    def __init__(self, root, instance_index: int = 0):
         # Distinguish between a window host and an embedded container
         if isinstance(root, (tk.Tk, tk.Toplevel)):
             host = root
@@ -86,6 +91,7 @@ class SimpleRecorderWindow(ttk.Frame):
         # Build into the container, keep a handle to the real toplevel as self.root
         super().__init__(container, padding=12)
         self.root = host
+        self.instance_index = int(instance_index)
 
         # Preserve your existing top-level setup
         try:
@@ -248,21 +254,24 @@ class SimpleRecorderWindow(ttk.Frame):
 
         self.plan_combo.bind("<<ComboboxSelected>>", _on_plan_change)
 
-        # Session Management
-        sess = ttk.LabelFrame(left, text="Session Management")
+        # --- Session Management ---
+        sess = ttk.LabelFrame(left, text="Session")
         sess.grid(row=4, column=0, sticky="ew", pady=6)
         sess.grid_columnconfigure(0, weight=1)
         sess.grid_columnconfigure(1, weight=1)
 
-        self.create_session_button = ttk.Button(sess, text="Create Session", command=self.create_session)
-        self.create_session_button.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
+        # read-only path display
+        self.session_path_var = tk.StringVar(value="")
+        ttk.Label(sess, text="Dir:").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 0))
+        self.session_path_entry = ttk.Entry(sess, textvariable=self.session_path_var, state="readonly")
+        self.session_path_entry.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 6))
 
         self.copy_path_button = ttk.Button(sess, text="Copy Gamestates Path", command=self.copy_gamestates_path)
-        self.copy_path_button.grid(row=0, column=1, sticky="ew", padx=8, pady=6)
+        self.copy_path_button.grid(row=2, column=0, sticky="ew", padx=8, pady=6)
         self.copy_path_button.state(["disabled"])
 
         self.session_status = ttk.Label(sess, text="No session", foreground="#2f855a")
-        self.session_status.grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 6))
+        self.session_status.grid(row=2, column=1, sticky="w", padx=10, pady=6)
 
         # Recording Controls
         rec = ttk.LabelFrame(left, text="Recording Controls")
@@ -1629,10 +1638,6 @@ class SimpleRecorderWindow(ttk.Frame):
             self._rl_window_title = None
 
     def _on_window_select(self, *_):
-        """
-        Called when user picks a 'RuneLite - <username>' entry in the combo.
-        Caches rect/title for coord translation and debug AND updates the left status panel.
-        """
         try:
             sel = self.window_combo.get().strip()
         except Exception:
@@ -1640,7 +1645,7 @@ class SimpleRecorderWindow(ttk.Frame):
 
         self._window_selected_title = sel or None
 
-        # find the matching tuple
+        # locate selected window tuple
         target = None
         for title, w in getattr(self, "_window_scan", []):
             if title == sel:
@@ -1651,19 +1656,46 @@ class SimpleRecorderWindow(ttk.Frame):
             self.window_status.config(text="Pick a RuneLite window from the list")
             self._rl_window_rect = None
             self._rl_window_title = None
-            self.set_window_title("(none)")
             return
 
         title, w = target
         try:
-            # pygetwindow returns .left/.top/.width/.height
             self._set_runelite_window_rect(w.left, w.top, w.width, w.height)
             self._rl_window_title = title
-            self.set_window_title(title)  # <-- keep left panel in sync
             self.window_status.config(
                 text=f"Using: {title} @ ({w.left},{w.top},{w.width}x{w.height})"
             )
+            # ------- NEW: derive username → session dir -------
+            username = _username_from_title(title)
+            if username:
+                p = _session_dir_for_username(username)
+                self.session_dir = p
+                self.session_dir_var.set(str(p))  # if you still bind in your status panel
+                self.session_path_var.set(str(p))  # read-only field in Session section
+                self.copy_path_button.state(["!disabled"])
+                self.session_status.config(text=f"Session: {username}")
+
+                # ------- NEW: auto-fill IPC port -------
+                # 1) best: probe ports by username (requires 'info' support in IPC plugin)
+                port = _autofill_port_for_username(username)
+                # 2) fallback: instance-index based mapping
+                if port is None:
+                    idx = getattr(self, "instance_index", 0)  # ensure your InstancesManager sets this
+                    port = 17000 + int(idx)
+
+                # only set if empty or different (don't fight user edits)
+                try:
+                    cur = int(self.ipc_port_var.get().strip())
+                except Exception:
+                    cur = None
+                if cur != port:
+                    self.ipc_port_var.set(str(port))
+                    # also keep self.ipc in sync if already constructed
+                    if hasattr(self, "ipc"):
+                        self.ipc.port = port
+
             self._debug(f"Selected RL window: '{title}' handle={getattr(w, 'hWnd', None)}")
+
         except Exception as e:
             self._debug(f"select window error: {e}")
             self.window_status.config(text="Failed to read window geometry")
