@@ -224,7 +224,7 @@ class SimpleRecorderWindow(ttk.Frame):
 
         ttk.Label(planf, text="Plan:").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 0))
         from .action_plans import PLAN_REGISTRY  # top-level import is also fine
-        plan_names = [("SAPPHIRE_RINGS", "Sapphire Rings"), ("GOLD_RINGS", "Gold Rings")]
+        plan_names = [("SAPPHIRE_RINGS", "Sapphire Rings"), ("GOLD_RINGS", "Gold Rings"), ("EMERALD_RINGS", "Emerald Rings")]
         self.plan_combo = ttk.Combobox(
             planf,
             state="readonly",

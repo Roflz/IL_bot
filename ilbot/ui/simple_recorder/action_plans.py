@@ -1,6 +1,7 @@
 # action_plans.py
 import re
 from typing import Dict, Callable
+from .nav_simple import choose_tile_toward
 
 # ---------------- shared helpers (minimal copies to stay decoupled) ----------------
 _RS_TAG_RE = re.compile(r'</?col(?:=[0-9a-fA-F]+)?>')
@@ -488,10 +489,302 @@ class GoldRingsPlan(Plan):
                               "preconditions":[],"postconditions":[],"confidence":0.0})
         return plan
 
+class EmeraldRingsPlan(Plan):
+    id = "EMERALD_RINGS"
+    label = "Emerald Rings"
+
+    def compute_phase(self, payload: dict, craft_recent: bool) -> str:
+        bank_open   = bool((payload.get("bank") or {}).get("bankOpen", False))
+        craft_open  = bool(payload.get("craftingInterfaceOpen", False))
+        has_mould   = _inv_has(payload, "Ring mould")
+        has_gold    = _inv_count(payload, "Gold bar") > 0
+        has_emerald = _inv_count(payload, "Emerald") > 0
+        out_of_mats = (not has_gold) or (not has_emerald) or (not has_mould)
+
+        if bank_open:
+            return "Banking"
+        if (craft_open or craft_recent):
+            return "Crafting" if not out_of_mats else "Moving to bank"
+        if out_of_mats:
+            return "Moving to bank"
+        return "Moving to furnace"
+
+    def build_action_plan(self, payload: dict, phase: str) -> dict:
+        plan = {"phase": phase, "steps": []}
+
+        if phase == "Moving to bank":
+            obj = _closest_object_by_names(payload, ["bank booth", "banker"])
+            if obj:
+                rect = _unwrap_rect(obj.get("clickbox"))
+                step = {
+                    "action": "click-bank",
+                    "description": "Click nearest bank booth",
+                    "click": ({"type": "rect-center"} if rect else
+                              {"type": "point", "x": int(obj.get("canvasX") or 0), "y": int(obj.get("canvasY") or 0)}),
+                    "target": {
+                        "domain": "object", "name": obj.get("name"), "id": obj.get("id"),
+                        "clickbox": rect,
+                        "canvas": {"x": obj.get("canvasX"), "y": obj.get("canvasY")}
+                    },
+                    "preconditions": ["bankOpen == false"],
+                    "postconditions": ["bankOpen == true"],
+                    "confidence": 0.92 if rect else 0.6
+                }
+                plan["steps"].append(step)
+            return plan
+
+        if phase == "Banking":
+            TARGET_EME  = 13
+            TARGET_GOLD = 13
+            inv_emerald = _inv_count(payload, "Emerald")
+            inv_gold    = _inv_count(payload, "Gold bar")
+            has_mould   = _inv_has(payload, "Ring mould")
+            inv_ring    = _first_inv_slot(payload, "Emerald ring")
+
+            # Deposit outputs first
+            if inv_ring:
+                rect = _unwrap_rect(inv_ring.get("bounds"))
+                plan["steps"].append({
+                    "action": "deposit-inventory-item",
+                    "description": "Deposit Emerald ring from inventory",
+                    "click": {"type": "rect-center"} if rect else {"type": "none"},
+                    "target": {"domain": "inventory", "name": "Emerald ring",
+                               "slotId": inv_ring.get("slotId"), "bounds": rect},
+                    "preconditions": ["bankOpen == true", "inventory contains 'Emerald ring'"],
+                    "postconditions": ["inventory does not contain 'Emerald ring'"],
+                    "confidence": 0.9 if rect else 0.4,
+                })
+                return plan
+
+            # Top off Emeralds
+            if inv_emerald < TARGET_EME:
+                bank_emerald = _first_bank_slot(payload, "Emerald")
+                if bank_emerald:
+                    rect = _unwrap_rect(bank_emerald.get("bounds"))
+                    plan["steps"].append({
+                        "action": "withdraw-item",
+                        "description": f"Withdraw Emeralds (need {TARGET_EME - inv_emerald} more)",
+                        "click": {"type": "rect-center"} if rect else {"type": "none"},
+                        "target": {"domain": "bank", "name": "Emerald",
+                                   "slotId": bank_emerald.get("slotId"), "bounds": rect},
+                        "preconditions": ["bankOpen == true", f"inventory count('Emerald') < {TARGET_EME}"],
+                        "postconditions": [f"inventory count('Emerald') >= {TARGET_EME}"],
+                        "confidence": 0.9 if rect else 0.4,
+                    })
+                    return plan
+                else:
+                    plan["steps"].append({
+                        "action": "withdraw-item",
+                        "description": "Could not find Emeralds in bank",
+                        "click": {"type": "none"},
+                        "target": {"domain": "bank", "name": "Emerald"},
+                        "preconditions": ["bankOpen == true"],
+                        "postconditions": [],
+                        "confidence": 0.0
+                    })
+                    return plan
+
+            # Top off Gold bars
+            if inv_gold < TARGET_GOLD:
+                bank_gold = _first_bank_slot(payload, "Gold bar")
+                if bank_gold:
+                    rect = _unwrap_rect(bank_gold.get("bounds"))
+                    plan["steps"].append({
+                        "action": "withdraw-item",
+                        "description": f"Withdraw Gold bars (need {TARGET_GOLD - inv_gold} more)",
+                        "click": {"type": "rect-center"} if rect else {"type": "none"},
+                        "target": {"domain": "bank", "name": "Gold bar",
+                                   "slotId": bank_gold.get("slotId"), "bounds": rect},
+                        "preconditions": ["bankOpen == true", f"inventory count('Gold bar') < {TARGET_GOLD}"],
+                        "postconditions": [f"inventory count('Gold bar') >= {TARGET_GOLD}"],
+                        "confidence": 0.9 if rect else 0.4,
+                    })
+                    return plan
+                else:
+                    plan["steps"].append({
+                        "action": "withdraw-item",
+                        "description": "Could not find Gold bars in bank",
+                        "click": {"type": "none"},
+                        "target": {"domain": "bank", "name": "Gold bar"},
+                        "preconditions": ["bankOpen == true"],
+                        "postconditions": [],
+                        "confidence": 0.0
+                    })
+                    return plan
+
+            # Ensure Ring mould
+            if not has_mould:
+                bank_mould = _first_bank_slot(payload, "Ring mould")
+                if bank_mould:
+                    rect = _unwrap_rect(bank_mould.get("bounds"))
+                    plan["steps"].append({
+                        "action": "withdraw-item",
+                        "description": "Withdraw Ring mould",
+                        "click": {"type": "rect-center"} if rect else {"type": "none"},
+                        "target": {"domain": "bank", "name": "Ring mould",
+                                   "slotId": bank_mould.get("slotId"), "bounds": rect},
+                        "preconditions": ["bankOpen == true", "inventory does not contain 'Ring mould'"],
+                        "postconditions": ["inventory contains 'Ring mould'"],
+                        "confidence": 0.9 if rect else 0.4,
+                    })
+                    return plan
+
+            # Close bank when ready
+            plan["steps"].append({
+                "action": "close-bank",
+                "description": "Close bank with ESC",
+                "click": {"type": "key", "key": "ESC"},
+                "target": {"domain": "widget", "name": "bank_close"},
+                "preconditions": [
+                    "bankOpen == true",
+                    "inventory contains 'Ring mould'",
+                    f"inventory count('Emerald') >= {TARGET_EME}",
+                    f"inventory count('Gold bar') >= {TARGET_GOLD}",
+                    "inventory does not contain 'Emerald ring'",
+                ],
+                "postconditions": ["bankOpen == false"],
+                "confidence": 0.95
+            })
+            return plan
+
+        if phase == "Moving to furnace":
+            obj = _closest_object_by_names(payload, ["furnace"])
+            if obj:
+                rect = _unwrap_rect(obj.get("clickbox"))
+                step = {
+                    "action": "click-furnace",
+                    "description": "Click nearest furnace",
+                    "click": ({"type": "rect-center"} if rect else
+                              {"type": "point", "x": int(obj.get("canvasX") or 0), "y": int(obj.get("canvasY") or 0)}),
+                    "target": {
+                        "domain": "object", "name": obj.get("name"), "id": obj.get("id"),
+                        "clickbox": rect, "canvas": {"x": obj.get("canvasX"), "y": obj.get("canvasY")}
+                    },
+                    "preconditions": [
+                        "bankOpen == false",
+                        "inventory contains 'Ring mould'",
+                        "inventory count('Emerald') > 0",
+                        "inventory count('Gold bar') > 0"
+                    ],
+                    "postconditions": ["craftingInterfaceOpen == true"],
+                    "confidence": 0.92 if rect else 0.6
+                }
+                plan["steps"].append(step)
+            return plan
+
+        if phase == "Crafting":
+            make_rect = _craft_widget_rect(payload, "make_emerald_rings")
+            plan["steps"].append({
+                "action": "click-make-widget",
+                "description": "Click the 'Make emerald rings' button",
+                "click": {"type": "rect-center"} if make_rect else {"type": "none"},
+                "target": {"domain": "widget", "name": "make_emerald_rings", "bounds": make_rect},
+                "preconditions": [
+                    "craftingInterfaceOpen == true",
+                    "inventory count('Emerald') > 0",
+                    "inventory count('Gold bar') > 0"
+                ],
+                "postconditions": [
+                    "player.animation == 899 OR crafting in progress"
+                ],
+                "confidence": 0.95 if make_rect else 0.4
+            })
+            plan["steps"].append({
+                "action": "wait-crafting-complete",
+                "description": "Wait until emeralds and gold bars are consumed",
+                "click": {"type": "none"},
+                "target": {"domain": "none", "name": "crafting_wait"},
+                "preconditions": [
+                    "inventory count('Emerald') > 0",
+                    "inventory count('Gold bar') > 0"
+                ],
+                "postconditions": [
+                    "inventory count('Emerald') == 0 OR inventory count('Gold bar') == 0"
+                ],
+                "confidence": 1.0
+            })
+            return plan
+
+        plan["steps"].append({
+            "action": "idle",
+            "description": "No actionable step for this phase",
+            "click": {"type": "none"},
+            "target": {"domain": "none", "name": "n/a"},
+            "preconditions": [],
+            "postconditions": [],
+            "confidence": 0.0
+        })
+        return plan
+
+class GoToGEPlan:
+    NAME = "Go to GE"
+
+    def __call__(self, payload: dict) -> dict:
+        return self.build(payload)
+
+    def build(self, payload: dict) -> dict:
+            # read player and GE coords
+            player = (payload.get("player") or {})
+            p_wx, p_wy = int(player.get("worldX", 0)), int(player.get("worldY", 0))
+            ge = (payload.get("grand_exchange") or {})
+            ge_wx, ge_wy = int(ge.get("worldX", 0)), int(ge.get("worldY", 0))
+
+            if p_wx == 0 and p_wy == 0:
+                return {
+                    "phase": "Navigate→GE",
+                    "steps": [{
+                        "action": "idle",
+                        "description": "No player coords",
+                        "click": {"type":"none"},
+                        "target": {"domain":"none","name":"n/a"},
+                        "preconditions": [], "postconditions": [], "confidence": 0.0
+                    }]
+                }
+
+            # close enough? (loose threshold)
+            if abs(p_wx - ge_wx) + abs(p_wy - ge_wy) <= 4:
+                return {
+                    "phase": "Navigate→GE",
+                    "steps": [{
+                        "action": "idle",
+                        "description": "At GE (≈)",
+                        "click": {"type":"none"},
+                        "target": {"domain":"none","name":"n/a"},
+                        "preconditions": [], "postconditions": [], "confidence": 1.0
+                    }]
+                }
+
+            vis = payload.get("visibleTiles") or []
+            tile = choose_tile_toward(p_wx, p_wy, ge_wx, ge_wy, vis)
+            if not tile:
+                return {
+                    "phase": "Navigate→GE",
+                    "steps": [{
+                        "action": "idle",
+                        "description": "No good visible tile toward GE",
+                        "click": {"type":"none"},
+                        "target": {"domain":"none","name":"n/a"},
+                        "preconditions": [], "postconditions": [], "confidence": 0.0
+                    }]
+                }
+
+            cx, cy = int(tile["canvas"]["x"]), int(tile["canvas"]["y"])
+            return {
+                "phase": "Navigate→GE",
+                "steps": [{
+                    "action": "walk-toward-ge",
+                    "description": "Step toward GE",
+                    "click": {"type": "point", "x": cx, "y": cy},
+                    "target": {"domain": "tile", "name": f"{tile['worldX']},{tile['worldY']}"},
+                    "preconditions": [], "postconditions": [], "confidence": 0.9
+                }]
+            }
+
 # ------------- Registry & accessors -------------
 PLAN_REGISTRY: Dict[str, Plan] = {
     SapphireRingsPlan.id: SapphireRingsPlan(),
     GoldRingsPlan.id:     GoldRingsPlan(),
+    EmeraldRingsPlan.id: EmeraldRingsPlan(),
 }
 
 def get_plan(plan_id: str) -> Plan:
