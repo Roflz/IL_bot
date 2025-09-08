@@ -28,6 +28,40 @@ RULE_WAIT_TIMEOUT_MS = 10_000 # how long to wait for pre/post conditions before 
 # ---- helpers to clean RS color tags and format elapsed time ----
 _RS_TAG_RE = re.compile(r'</?col(?:=[0-9a-fA-F]+)?>')
 
+import tkinter as tk
+from tkinter import ttk, filedialog
+
+class InstanceStatusPanel(ttk.LabelFrame):
+    """
+    Left-side status panel showing:
+      - Selected Window title
+      - Gamestate directory (pickable)
+      - IPC Port (editable)
+    """
+    def __init__(self, master, *, on_choose_dir, window_title_var, session_dir_var, ipc_port_var):
+        super().__init__(master, text="Instance")
+        self.grid_columnconfigure(1, weight=1)
+
+        # Window
+        ttk.Label(self, text="Window:").grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
+        self._window_lbl = ttk.Label(self, textvariable=window_title_var, width=36)
+        self._window_lbl.grid(row=0, column=1, sticky="ew", padx=6, pady=(6, 2))
+
+        # Gamestate dir
+        ttk.Label(self, text="Gamestate Dir:").grid(row=1, column=0, sticky="w", padx=6, pady=2)
+        gs_frame = ttk.Frame(self)
+        gs_frame.grid(row=1, column=1, sticky="ew", padx=6, pady=2)
+        gs_frame.grid_columnconfigure(0, weight=1)
+        self._gs_entry = ttk.Entry(gs_frame, textvariable=session_dir_var)
+        self._gs_entry.grid(row=0, column=0, sticky="ew")
+        ttk.Button(gs_frame, text="Browse", command=on_choose_dir).grid(row=0, column=1, padx=(6,0))
+
+        # IPC port (free text)
+        ttk.Label(self, text="IPC Port:").grid(row=2, column=0, sticky="w", padx=6, pady=(2,8))
+        self._port_entry = ttk.Entry(self, textvariable=ipc_port_var, width=12)
+        self._port_entry.grid(row=2, column=1, sticky="w", padx=6, pady=(2,8))
+
+
 import socket
 import json
 import time
@@ -535,12 +569,56 @@ def _build_action_plan(payload: dict, phase: str) -> dict:
 
 class SimpleRecorderWindow(ttk.Frame):
     def __init__(self, root):
-        super().__init__(root, padding=12)
-        self.root = root
-        self.root.title("Simple Bot Recorder")
-        self.root.minsize(1100, 600)
+        # Distinguish between a window host and an embedded container
+        if isinstance(root, (tk.Tk, tk.Toplevel)):
+            host = root
+            container = root
+        else:
+            try:
+                host = root.winfo_toplevel()
+            except Exception:
+                host = root
+            container = root
+
+        # Build into the container, keep a handle to the real toplevel as self.root
+        super().__init__(container, padding=12)
+        self.root = host
+
+        # Preserve your existing top-level setup
+        try:
+            self.root.title("Simple Bot Recorder")
+        except Exception:
+            pass
+        try:
+            self.root.minsize(1100, 600)
+        except Exception:
+            pass
         self._rl_window_rect = None  # {'x': int, 'y': int, 'width': int, 'height': int}
         self._rl_window_title = None
+
+        # These are per-instance state holders:
+        self.window_title_var = tk.StringVar(value="(none)")
+        self.session_dir_var = tk.StringVar(value="")  # per-instance gamestate dir (editable)
+        self.ipc_port_var = tk.StringVar(value="")  # free text, no scan required
+
+        # If you had a pre-existing self.session_dir, keep it in sync:
+        self.session_dir = None  # or your existing default Path/str
+
+        def _choose_session_dir():
+            start_dir = self.session_dir_var.get() or os.getcwd()
+            chosen = filedialog.askdirectory(initialdir=start_dir, title="Choose gamestate directory")
+            if chosen:
+                self.set_session_dir(chosen)
+
+        # LEFT PANE: put the status panel at the top of your controls column (col=0)
+        self.status_panel = InstanceStatusPanel(
+            self,
+            on_choose_dir=_choose_session_dir,
+            window_title_var=self.window_title_var,
+            session_dir_var=self.session_dir_var,
+            ipc_port_var=self.ipc_port_var
+        )
+        self.status_panel.grid(row=0, column=0, sticky="nsew", padx=(8, 8), pady=(8, 8))
 
         # state
         self.session_dir: Path | None = None
@@ -606,31 +684,35 @@ class SimpleRecorderWindow(ttk.Frame):
         self.window_status.grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 6))
 
         # IPC / Port Picker
+        # IPC / Port Picker (free-text, no Scan)
         ipc = ttk.LabelFrame(left, text="IPC (RuneLite Plugin)")
         ipc.grid(row=2, column=0, sticky="ew", pady=6)
         ipc.grid_columnconfigure(0, weight=1)
         ipc.grid_columnconfigure(1, weight=0)
 
         ttk.Label(ipc, text="Port:").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 0))
-        self.ipc_port_var = tk.StringVar(value="17000")
-        self.ipc_combo = ttk.Combobox(ipc, state="readonly", textvariable=self.ipc_port_var, values=["17000"])
-        self.ipc_combo.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
+        # keep existing self.ipc_port_var (created in __init__)
+        if not isinstance(getattr(self, "ipc_port_var", None), tk.StringVar):
+            self.ipc_port_var = tk.StringVar(value="17000")
+
+        self.ipc_port_entry = ttk.Entry(ipc, textvariable=self.ipc_port_var)
+        self.ipc_port_entry.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
 
         btns = ttk.Frame(ipc)
         btns.grid(row=1, column=1, sticky="e", padx=(0, 8), pady=(0, 6))
-        ttk.Button(btns, text="Scan", command=self._ipc_scan_ports).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(btns, text="Ping", command=self._ipc_ping).grid(row=0, column=1)
+        ttk.Button(btns, text="Ping", command=self._ipc_ping).grid(row=0, column=0)
         self.ipc_status = ttk.Label(ipc, text="Not tested", foreground="#6b7280")
         self.ipc_status.grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 6))
 
-        # Input mode toggle
+        # Input mode toggle stays the same
         self.input_mode_var = getattr(self, "input_mode_var", None) or tk.StringVar(value="ipc")
         ttk.Label(ipc, text="Input mode:").grid(row=3, column=0, sticky="w", padx=8, pady=(4, 0))
         mode_row = ttk.Frame(ipc)
         mode_row.grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
-        ttk.Radiobutton(mode_row, text="IPC", variable=self.input_mode_var, value="ipc").grid(row=0, column=0, padx=(0, 12))
-        ttk.Radiobutton(mode_row, text="pyautogui", variable=self.input_mode_var, value="pyautogui").grid(row=0, column=1)
-
+        ttk.Radiobutton(mode_row, text="IPC", variable=self.input_mode_var, value="ipc").grid(row=0, column=0,
+                                                                                              padx=(0, 12))
+        ttk.Radiobutton(mode_row, text="pyautogui", variable=self.input_mode_var, value="pyautogui").grid(row=0,
+                                                                                                          column=1)
 
         # Session Management
         sess = ttk.LabelFrame(left, text="Session Management")
@@ -879,16 +961,17 @@ class SimpleRecorderWindow(ttk.Frame):
 
     def create_session(self):
         """
-        Set the session dir (where gamestate .json files are written).
-        Keep your existing logic; this version just creates a dated folder under ./data/recording_sessions/
+        Create a new per-instance session dir under your standard base,
+        and sync the left status with set_session_dir().
         """
-        from pathlib import Path
-
-        base = Path(r"D:\\repos\\bot_runelite_IL\\data\\recording_sessions")
+        base = Path(r"D:\repos\bot_runelite_IL\data\recording_sessions")
         base.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        self.session_dir = base / stamp / "gamestates"
-        self.session_dir.mkdir(parents=True, exist_ok=True)
+        session_dir = base / stamp / "gamestates"
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        self.set_session_dir(str(session_dir))  # <-- sync left panel + internal state
+
         self.session_status.config(text=f"Session created: {stamp}")
         self.copy_path_button.state(["!disabled"])
         self.start_button.state(["!disabled"])
@@ -939,25 +1022,25 @@ class SimpleRecorderWindow(ttk.Frame):
             self._after_id = self.root.after(AUTO_REFRESH_MS, self._schedule_auto_refresh)
 
     def _latest_gamestate_file(self) -> Path | None:
-        search_dirs: list[Path] = []
-
-        if self.session_dir and self.session_dir.exists():
-            search_dirs.append(self.session_dir)
-
-        base = Path(r"D:\repos\bot_runelite_IL\data\recording_sessions")
-        if base.exists():
-            for run in sorted(base.glob(r"*/gamestates"), key=os.path.getmtime, reverse=True):
-                search_dirs.append(run)
+        """
+        Return the newest *.json file **only** from THIS INSTANCE'S session_dir.
+        No cross-instance/global fallback.
+        """
+        d = self.session_dir
+        if not d:
+            return None
+        d = Path(d)
+        if not d.exists() or not d.is_dir():
+            return None
 
         newest: tuple[float, Path] | None = None
-        for d in search_dirs:
-            for f in d.glob("*.json"):
-                try:
-                    ts = f.stat().st_mtime
-                except FileNotFoundError:
-                    continue  # file got pruned between glob and stat – skip it
-                if newest is None or ts > newest[0]:
-                    newest = (ts, f)
+        for f in d.glob("*.json"):
+            try:
+                ts = f.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if newest is None or ts > newest[0]:
+                newest = (ts, f)
         return newest[1] if newest else None
 
     def refresh_gamestate_info(self):
@@ -1368,16 +1451,25 @@ class SimpleRecorderWindow(ttk.Frame):
         ox, oy = self._canvas_offset
         return (int(x) + int(ox), int(y) + int(oy))
 
-    def _ensure_ipc(self):
-        # helper: keep RuneLiteIPC in sync with the UI selection
-        try:
-            port = int(self.ipc_port_var.get().strip())
-        except Exception:
-            port = 17000
+    def _ensure_ipc(self) -> bool:
+        """
+        Ensure self.ipc is configured using the **typed** port.
+        Returns True if ready, False otherwise (and sets a red status).
+        """
+        port = self.get_ipc_port()
+        if port is None or port <= 0 or port > 65535:
+            try:
+                self.ipc_status.config(text="Enter a valid IPC port (e.g., 17001)", foreground="#b91c1c")
+            except Exception:
+                pass
+            return False
+
         if not hasattr(self, "ipc"):
-            self.ipc = RuneLiteIPC(port=port, pre_action_ms=250, timeout_s=2.0)
+            self.ipc = RuneLiteIPC(port=port, pre_action_ms=PRE_ACTION_DELAY_MS, timeout_s=2.0)
         else:
             self.ipc.port = port
+            self.ipc.timeout_s = 2.0
+        return True
 
     def _do_click_point(self, x: int, y: int, button: str = "left", move_ms: int = 80):
         mode = self.input_mode_var.get() if hasattr(self, "input_mode_var") else "ipc"
@@ -1409,7 +1501,9 @@ class SimpleRecorderWindow(ttk.Frame):
             return
 
         # ----- IPC mode -----
-        self._ensure_ipc()
+        if not self._ensure_ipc():
+            self._debug("IPC not ready: invalid or missing port")
+            return
         # preflight ping so we fail fast with a clear message
         pong = self.ipc._send({"cmd": "ping"})
         if not (isinstance(pong, dict) and pong.get("ok")):
@@ -1445,7 +1539,9 @@ class SimpleRecorderWindow(ttk.Frame):
             return
 
         # ----- IPC mode -----
-        self._ensure_ipc()
+        if not self._ensure_ipc():
+            self._debug("IPC not ready: invalid or missing port")
+            return
         pong = self.ipc._send({"cmd": "ping"})
         if not (isinstance(pong, dict) and pong.get("ok")):
             try:
@@ -2099,7 +2195,7 @@ class SimpleRecorderWindow(ttk.Frame):
     def _on_window_select(self, *_):
         """
         Called when user picks a 'RuneLite - <username>' entry in the combo.
-        Caches rect/title for coord translation and debug.
+        Caches rect/title for coord translation and debug AND updates the left status panel.
         """
         try:
             sel = self.window_combo.get().strip()
@@ -2119,6 +2215,7 @@ class SimpleRecorderWindow(ttk.Frame):
             self.window_status.config(text="Pick a RuneLite window from the list")
             self._rl_window_rect = None
             self._rl_window_title = None
+            self.set_window_title("(none)")
             return
 
         title, w = target
@@ -2126,6 +2223,7 @@ class SimpleRecorderWindow(ttk.Frame):
             # pygetwindow returns .left/.top/.width/.height
             self._set_runelite_window_rect(w.left, w.top, w.width, w.height)
             self._rl_window_title = title
+            self.set_window_title(title)  # <-- keep left panel in sync
             self.window_status.config(
                 text=f"Using: {title} @ ({w.left},{w.top},{w.width}x{w.height})"
             )
@@ -2208,3 +2306,28 @@ class SimpleRecorderWindow(ttk.Frame):
             pass
         # this will cancel self._auto_run_after_id if needed
         self._on_run_check()
+
+    def set_session_dir(self, path_str: str):
+        """Set the per-instance gamestate directory and sync UI."""
+        self.session_dir = path_str
+        self.session_dir_var.set(path_str)
+        # If your table auto-refresh relies on a watcher/timer, trigger or mark dirty here:
+        try:
+            self._mark_gamestate_dir_changed()  # optional: if you have such a method
+        except Exception:
+            pass
+
+    def set_window_title(self, title: str):
+        """Reflect chosen target window."""
+        self._rl_window_title = title
+        self.window_title_var.set(title)
+
+    def get_ipc_port(self) -> int | None:
+        """Read the port as int from the free-text field; return None if invalid/empty."""
+        s = (self.ipc_port_var.get() or "").strip()
+        if not s:
+            return None
+        try:
+            return int(s)
+        except ValueError:
+            return None
