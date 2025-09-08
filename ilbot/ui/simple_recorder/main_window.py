@@ -1,572 +1,73 @@
-import json
+# --- stdlib / third-party ---
 import os
 import re
+import json
 import time
 import random
-import pyautogui
-import tkinter as tk
 import ctypes
 from pathlib import Path
-from tkinter import ttk
+
+import tkinter as tk
+from tkinter import ttk, filedialog
 from tkinter.scrolledtext import ScrolledText
-from .action_plans import get_plan  # and PLAN_REGISTRY if you prefer
 
-
-from contextlib import suppress
 try:
     import pygetwindow as gw
 except Exception:
     gw = None
 
-
-
+import pyautogui
 pyautogui.FAILSAFE = True  # moving mouse to a corner aborts
-AUTO_REFRESH_MS = 100
-# --- timings (simplified) ---
-AUTO_RUN_TICK_MS     = 250    # scheduler tick for the UI/auto loop
-PRE_ACTION_DELAY_MS  = 250    # delay before performing any action (click/key)
-RULE_WAIT_TIMEOUT_MS = 10_000 # how long to wait for pre/post conditions before retry
 
-# ---- helpers to clean RS color tags and format elapsed time ----
-_RS_TAG_RE = re.compile(r'</?col(?:=[0-9a-fA-F]+)?>')
+# --- project modules (split out; no behavior changes) ---
+# constants
+from .constants import (
+    AUTO_REFRESH_MS,
+    AUTO_RUN_TICK_MS,
+    PRE_ACTION_DELAY_MS,
+    RULE_WAIT_TIMEOUT_MS,
+)
 
-import tkinter as tk
-from tkinter import ttk, filedialog
+# small text/time helpers that table updates rely on
+from .utils.common import (
+    _clean_rs,
+    _fmt_age_ms,
+    _norm_name,
+    _now_ms,
+)
 
-class InstanceStatusPanel(ttk.LabelFrame):
-    """
-    Left-side status panel showing:
-      - Selected Window title
-      - Gamestate directory (pickable)
-      - IPC Port (editable)
-    """
-    def __init__(self, master, *, on_choose_dir, window_title_var, session_dir_var, ipc_port_var):
-        super().__init__(master, text="Instance")
-        self.grid_columnconfigure(1, weight=1)
+# rect/geometry helpers used across click resolution and table rendering
+from .utils.rects import (
+    _mk_rect,
+    _rect_contains,
+    _center_distance,
+    _unwrap_rect,
+    _rect_center_xy,
+)
 
-        # Window
-        ttk.Label(self, text="Window:").grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
-        self._window_lbl = ttk.Label(self, textvariable=window_title_var, width=36)
-        self._window_lbl.grid(row=0, column=1, sticky="ew", padx=6, pady=(6, 2))
+# Win32 POINT struct (used by cursor helpers)
+from .utils.win32 import POINT
 
-        # Gamestate dir
-        ttk.Label(self, text="Gamestate Dir:").grid(row=1, column=0, sticky="w", padx=6, pady=2)
-        gs_frame = ttk.Frame(self)
-        gs_frame.grid(row=1, column=1, sticky="ew", padx=6, pady=2)
-        gs_frame.grid_columnconfigure(0, weight=1)
-        self._gs_entry = ttk.Entry(gs_frame, textvariable=session_dir_var)
-        self._gs_entry.grid(row=0, column=0, sticky="ew")
-        ttk.Button(gs_frame, text="Browse", command=on_choose_dir).grid(row=0, column=1, padx=(6,0))
+# IPC client (used by click/key execution)
+from .services.ipc_client import RuneLiteIPC
 
-        # IPC port (free text)
-        ttk.Label(self, text="IPC Port:").grid(row=2, column=0, sticky="w", padx=6, pady=(2,8))
-        self._port_entry = ttk.Entry(self, textvariable=ipc_port_var, width=12)
-        self._port_entry.grid(row=2, column=1, sticky="w", padx=6, pady=(2,8))
+# left-side status UI (window, gamestate dir, ipc port)
+from .ui.status_panel import InstanceStatusPanel
 
+# action plan selector/registry
+from .action_plans import get_plan, _CRAFT_ANIMS
+# Plans + helper primitives (re-exported here for UI/rules)
+from .action_plans import (
+    Plan,
+    PLAN_REGISTRY,
+    get_plan,
+    _is_crafting_anim,
+    _inv_has,
+    _inv_count,
+    _bank_slots,
+    _norm_name,
+)
 
-import socket
-import json
-import time
-
-class RuneLiteIPC:
-    def __init__(self, host="127.0.0.1", port=17000, pre_action_ms=250, timeout_s=2.0):
-        self.host = host
-        self.port = port
-        self.pre_action_ms = pre_action_ms
-        self.timeout_s = timeout_s
-
-    def _send(self, obj: dict) -> dict:
-        data = (json.dumps(obj) + "\n").encode("utf-8")
-        try:
-            with socket.create_connection((self.host, self.port), timeout=self.timeout_s) as s:
-                s.sendall(data)
-                s.shutdown(socket.SHUT_WR)
-                resp = s.makefile("r", encoding="utf-8").readline().strip()
-                return json.loads(resp) if resp else {"ok": False, "err": "empty-response"}
-        except socket.timeout:
-            return {"ok": False, "err": "timeout"}
-        except ConnectionRefusedError:
-            return {"ok": False, "err": "connection-refused"}
-        except Exception as e:
-            return {"ok": False, "err": f"{type(e).__name__}: {e}"}
-
-    def ping(self) -> bool:
-        try:
-            r = self._send({"cmd":"ping"})
-            return bool(r.get("ok"))
-        except Exception:
-            return False
-
-    def focus(self):
-        try:
-            self._send({"cmd":"focus"})
-        except Exception:
-            pass
-
-    def click_canvas(self, x:int, y:int, button:int=1, pre_ms: int | None = None):
-        # pre-action delay here (you asked for this explicitly)
-        delay = self.pre_action_ms if pre_ms is None else pre_ms
-        if delay > 0:
-            time.sleep(delay / 1000.0)
-        return self._send({"cmd":"click", "x": int(x), "y": int(y), "button": int(button)})
-
-    def key(self, k:str, pre_ms: int | None = None):
-        delay = self.pre_action_ms if pre_ms is None else pre_ms
-        if delay > 0:
-            time.sleep(delay / 1000.0)
-        return self._send({"cmd":"key", "k": str(k)})
-
-def _clean_rs(s: str | None) -> str:
-    if not s:
-        return ""
-    return _RS_TAG_RE.sub('', s)
-
-def _fmt_age_ms(ms_ago: int) -> str:
-    # ms -> human short string
-    if ms_ago < 1000:
-        return f"{ms_ago} ms ago"
-    s = ms_ago / 1000.0
-    if s < 60:
-        return f"{s:.1f}s ago"
-    m = int(s // 60)
-    s = int(s % 60)
-    return f"{m}m {s}s ago"
-
-def _mk_rect(d):
-    """
-    Accepts any dict like {"x":..., "y":..., "width":..., "height":...}
-    Returns (x, y, w, h) or None if invalid.
-    """
-    if not isinstance(d, dict):
-        return None
-    try:
-        x = int(d.get("x"))
-        y = int(d.get("y"))
-        w = int(d.get("width"))
-        h = int(d.get("height"))
-        if w <= 0 or h <= 0:
-            return None
-        return (x, y, w, h)
-    except Exception:
-        return None
-
-def _rect_contains(rect, px, py):
-    """rect=(x,y,w,h), point=(px,py)"""
-    if rect is None:
-        return False
-    x, y, w, h = rect
-    return (px >= x) and (py >= y) and (px < x + w) and (py < y + h)
-
-def _center_distance(rect, px, py):
-    """smaller is closer to the center of the rect"""
-    if rect is None:
-        return 1e18
-    x, y, w, h = rect
-    cx, cy = x + w / 2.0, y + h / 2.0
-    dx, dy = (px - cx), (py - cy)
-    return (dx * dx + dy * dy) ** 0.5
-
-def _compute_phase(payload: dict, craft_recent: bool) -> str:
-    bank_open   = bool((payload.get("bank") or {}).get("bankOpen", False))
-    craft_open  = bool(payload.get("craftingInterfaceOpen", False))
-
-    has_mould   = _inv_has(payload, "Ring mould")
-    has_gold    = _inv_count(payload, "Gold bar") > 0
-    has_sapph   = _inv_count(payload, "Sapphire") > 0
-
-    out_of_mats = (not has_gold) or (not has_sapph) or (not has_mould)
-
-    # Your rules, with clear precedence:
-
-    # Banking: highest precedence when open
-    if bank_open:
-        return "Banking"
-
-    # Crafting: when UI is open OR recently crafting, until mats are gone
-    if (craft_open or craft_recent):
-        if not out_of_mats:
-            return "Crafting"
-        # no materials -> next trip is bank
-        return "Moving to bank"
-
-    # Moving to bank: missing mats (or no mould)
-    if out_of_mats:
-        return "Moving to bank"
-
-    # Otherwise we're transitioning toward furnace
-    return "Moving to furnace"
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
-
-# Extendable list of known crafting animations
-_CRAFT_ANIMS = {899}  # add more if you discover them
-
-def _is_crafting_anim(anim_id: int) -> bool:
-    return anim_id in _CRAFT_ANIMS
-
-def _decide_action_from_phase(phase: str) -> str:
-    if phase == "Moving to bank":
-        return "→ Walk to nearest bank"
-    elif phase == "Banking":
-        return "→ Deposit outputs, withdraw materials"
-    elif phase == "Moving to furnace":
-        return "→ Walk to nearest furnace"
-    elif phase == "Crafting":
-        return "→ Click Make-All / wait for crafting"
-    return "—"
-
-def _norm_name(s: str | None) -> str:
-    return _clean_rs(s or "").strip().lower()
-
-def _inv_slots(payload: dict) -> list[dict]:
-    return (payload.get("inventory", {}) or {}).get("slots", []) or []
-
-def _inv_has(payload: dict, name: str) -> bool:
-    n = _norm_name(name)
-    return any(_norm_name(s.get("itemName")) == n for s in _inv_slots(payload))
-
-def _inv_count(payload: dict, name: str) -> int:
-    n = _norm_name(name)
-    return sum(int(s.get("quantity") or 0) for s in _inv_slots(payload)
-               if _norm_name(s.get("itemName")) == n)
-
-def _first_inv_slot(payload: dict, name: str) -> dict | None:
-    n = _norm_name(name)
-    for s in _inv_slots(payload):
-        if _norm_name(s.get("itemName")) == n:
-            return s
-    return None
-
-def _bank_slots(payload: dict) -> list[dict]:
-    return (payload.get("bank", {}) or {}).get("slots", []) or []
-
-def _first_bank_slot(payload: dict, name: str) -> dict | None:
-    n = _norm_name(name)
-    best = None
-    for s in _bank_slots(payload):
-        if _norm_name(s.get("itemName")) == n:
-            # Prefer highest quantity or lowest slotId for determinism
-            if best is None:
-                best = s
-            else:
-                q1 = int(s.get("quantity") or 0)
-                q2 = int(best.get("quantity") or 0)
-                if q1 > q2 or (q1 == q2 and int(s.get("slotId") or 9_999) < int(best.get("slotId") or 9_999)):
-                    best = s
-    return best
-
-def _unwrap_rect(maybe_rect_dict: dict | None) -> dict | None:
-    """
-    Inventory/bank slots export as {"bounds": {...}} inside 'bounds'.
-    Widgets export as {"bounds": {...}} directly.
-    Objects export as 'clickbox' directly.
-    This normalizes to a plain {"x","y","width","height"} or None.
-    """
-    if not isinstance(maybe_rect_dict, dict):
-        return None
-    # common cases
-    if {"x","y","width","height"} <= set(maybe_rect_dict.keys()):
-        return maybe_rect_dict
-    inner = maybe_rect_dict.get("bounds")
-    if isinstance(inner, dict) and {"x","y","width","height"} <= set(inner.keys()):
-        return inner
-    return None
-
-def _rect_center_xy(rect: dict | None) -> tuple[int | None, int | None]:
-    if not rect:
-        return None, None
-    try:
-        return int(rect["x"] + rect["width"]/2), int(rect["y"] + rect["height"]/2)
-    except Exception:
-        return None, None
-
-def _closest_object_by_names(payload: dict, names: list[str]) -> dict | None:
-    wanted = [n.lower() for n in names]
-    for obj in (payload.get("closestGameObjects") or []):
-        nm = _norm_name(obj.get("name"))
-        if any(w in nm for w in wanted):
-            return obj
-    return None
-
-def _craft_widget_rect(payload: dict, key: str) -> dict | None:
-    w = (payload.get("crafting_widgets", {}) or {}).get(key)
-    return _unwrap_rect((w or {}).get("bounds") if isinstance(w, dict) else None)
-
-# --- Windows POINT struct (module-level) ---
-class POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-
-def _build_action_plan(payload: dict, phase: str) -> dict:
-    """
-    Returns a structured plan:
-    {
-      "phase": "Crafting",
-      "steps": [ {action-object}, ... ]
-    }
-    No side-effects. Purely derives targets from gamestate.
-    """
-    plan = {"phase": phase, "steps": []}
-
-    # ---------- MOVING TO BANK ----------
-    if phase == "Moving to bank":
-        obj = _closest_object_by_names(payload, ["bank booth", "banker"])
-        if obj:
-            rect = _unwrap_rect(obj.get("clickbox"))
-            cx, cy = _rect_center_xy(rect)
-            step = {
-                "action": "click-bank",
-                "description": "Click nearest bank booth",
-                "click": (
-                    {"type": "rect-center"}
-                    if rect else
-                    {"type": "point", "x": int(obj.get("canvasX") or 0), "y": int(obj.get("canvasY") or 0)}
-                ),
-                "target": {
-                    "domain": "object",
-                    "name": obj.get("name"),
-                    "id": obj.get("id"),
-                    "clickbox": rect,
-                    "canvas": {"x": obj.get("canvasX"), "y": obj.get("canvasY")}
-                },
-                "preconditions": ["bankOpen == false"],
-                "postconditions": ["bankOpen == true"],
-                "confidence": 0.92 if rect else 0.6
-            }
-            plan["steps"].append(step)
-        return plan
-
-    # ---------- BANKING ----------
-    if phase == "Banking":
-        # Target counts (tune to taste)
-        TARGET_SAPP = 13
-        TARGET_GOLD = 13
-
-        inv_sapp = _inv_count(payload, "Sapphire")
-        inv_gold = _inv_count(payload, "Gold bar")
-        has_mould = _inv_has(payload, "Ring mould")
-        inv_ring = _first_inv_slot(payload, "Sapphire ring")
-
-        # B1: Deposit outputs first
-        if inv_ring:
-            rect = _unwrap_rect(inv_ring.get("bounds"))
-            plan["steps"].append({
-                "action": "deposit-inventory-item",
-                "description": "Deposit Sapphire ring from inventory",
-                "click": {"type": "rect-center"} if rect else {"type": "none"},
-                "target": {
-                    "domain": "inventory",
-                    "name": "Sapphire ring",
-                    "slotId": inv_ring.get("slotId"),
-                    "bounds": rect
-                },
-                "preconditions": ["bankOpen == true", "inventory contains 'Sapphire ring'"],
-                "postconditions": ["inventory does not contain 'Sapphire ring'"],
-                "confidence": 0.9 if rect else 0.4,
-            })
-            return plan  # single-step plan
-
-        # B2: Top off Sapphires to TARGET_SAPP
-        if inv_sapp < TARGET_SAPP:
-            bank_sapp = _first_bank_slot(payload, "Sapphire")
-            if bank_sapp:
-                rect = _unwrap_rect(bank_sapp.get("bounds"))
-                plan["steps"].append({
-                    "action": "withdraw-item",
-                    "description": f"Withdraw Sapphires (need {TARGET_SAPP - inv_sapp} more)",
-                    "click": {"type": "rect-center"} if rect else {"type": "none"},
-                    "target": {
-                        "domain": "bank",
-                        "name": "Sapphire",
-                        "slotId": bank_sapp.get("slotId"),
-                        "bounds": rect
-                    },
-                    "preconditions": ["bankOpen == true", f"inventory count('Sapphire') < {TARGET_SAPP}"],
-                    "postconditions": [f"inventory count('Sapphire') >= {TARGET_SAPP}"],
-                    "confidence": 0.9 if rect else 0.4,
-                })
-                return plan
-            else:
-                plan["steps"].append({
-                    "action": "withdraw-item",
-                    "description": "Could not find Sapphires in bank (scroll/search may be required)",
-                    "click": {"type": "none"},
-                    "target": {"domain": "bank", "name": "Sapphire"},
-                    "preconditions": ["bankOpen == true"],
-                    "postconditions": [],
-                    "confidence": 0.0
-                })
-                return plan
-
-        # B3: Top off Gold bars to TARGET_GOLD
-        if inv_gold < TARGET_GOLD:
-            bank_gold = _first_bank_slot(payload, "Gold bar")
-            if bank_gold:
-                rect = _unwrap_rect(bank_gold.get("bounds"))
-                plan["steps"].append({
-                    "action": "withdraw-item",
-                    "description": f"Withdraw Gold bars (need {TARGET_GOLD - inv_gold} more)",
-                    "click": {"type": "rect-center"} if rect else {"type": "none"},
-                    "target": {
-                        "domain": "bank",
-                        "name": "Gold bar",
-                        "slotId": bank_gold.get("slotId"),
-                        "bounds": rect
-                    },
-                    "preconditions": ["bankOpen == true", f"inventory count('Gold bar') < {TARGET_GOLD}"],
-                    "postconditions": [f"inventory count('Gold bar') >= {TARGET_GOLD}"],
-                    "confidence": 0.9 if rect else 0.4,
-                })
-                return plan
-            else:
-                plan["steps"].append({
-                    "action": "withdraw-item",
-                    "description": "Could not find Gold bars in bank (scroll/search may be required)",
-                    "click": {"type": "none"},
-                    "target": {"domain": "bank", "name": "Gold bar"},
-                    "preconditions": ["bankOpen == true"],
-                    "postconditions": [],
-                    "confidence": 0.0
-                })
-                return plan
-
-        # B4: Ensure Ring mould present
-        if not has_mould:
-            bank_mould = _first_bank_slot(payload, "Ring mould")
-            if bank_mould:
-                rect = _unwrap_rect(bank_mould.get("bounds"))
-                plan["steps"].append({
-                    "action": "withdraw-item",
-                    "description": "Withdraw Ring mould",
-                    "click": {"type": "rect-center"} if rect else {"type": "none"},
-                    "target": {
-                        "domain": "bank",
-                        "name": "Ring mould",
-                        "slotId": bank_mould.get("slotId"),
-                        "bounds": rect
-                    },
-                    "preconditions": ["bankOpen == true", "inventory does not contain 'Ring mould'"],
-                    "postconditions": ["inventory contains 'Ring mould'"],
-                    "confidence": 0.9 if rect else 0.4,
-                })
-                return plan
-            else:
-                plan["steps"].append({
-                    "action": "withdraw-item",
-                    "description": "Could not find Ring mould in bank (scroll/search may be required)",
-                    "click": {"type": "none"},
-                    "target": {"domain": "bank", "name": "Ring mould"},
-                    "preconditions": ["bankOpen == true"],
-                    "postconditions": [],
-                    "confidence": 0.0
-                })
-                return plan
-
-        # B5: Close bank when all conditions satisfied
-        steps = {
-            "action": "close-bank",
-            "description": "Close bank with ESC",
-            "click": {"type": "key", "key": "ESC"},
-            "target": {"domain": "widget", "name": "bank_close"},
-            "preconditions": [
-                "bankOpen == true",
-                "inventory contains 'Ring mould'",
-                f"inventory count('Sapphire') >= {TARGET_SAPP}",
-                f"inventory count('Gold bar') >= {TARGET_GOLD}",
-                "inventory does not contain 'Sapphire ring'"
-            ],
-            "postconditions": ["bankOpen == false"],
-            "confidence": 0.95
-        }
-        plan["steps"].append(steps)
-        return plan
-
-    # ---------- MOVING TO FURNACE ----------
-    if phase == "Moving to furnace":
-        obj = _closest_object_by_names(payload, ["furnace"])
-        if obj:
-            rect = _unwrap_rect(obj.get("clickbox"))
-            cx, cy = _rect_center_xy(rect)
-            step = {
-                "action": "click-furnace",
-                "description": "Click nearest furnace",
-                "click": (
-                    {"type": "rect-center"}
-                    if rect else
-                    {"type": "point", "x": int(obj.get("canvasX") or 0), "y": int(obj.get("canvasY") or 0)}
-                ),
-                "target": {
-                    "domain": "object",
-                    "name": obj.get("name"),
-                    "id": obj.get("id"),
-                    "clickbox": rect,
-                    "canvas": {"x": obj.get("canvasX"), "y": obj.get("canvasY")}
-                },
-                "preconditions": [
-                    "bankOpen == false",
-                    "inventory contains 'Ring mould'",
-                    "inventory count('Sapphire') > 0",
-                    "inventory count('Gold bar') > 0"
-                ],
-                "postconditions": ["craftingInterfaceOpen == true"],
-                "confidence": 0.92 if rect else 0.6
-            }
-            plan["steps"].append(step)
-        return plan
-
-    # ---------- CRAFTING ----------
-    if phase == "Crafting":
-        # C1: click make widget (when visible)
-        make_rect = _craft_widget_rect(payload, "make_sapphire_rings")
-        plan["steps"].append({
-            "action": "click-make-widget",
-            "description": "Click the 'Make sapphire rings' button",
-            "click": {"type": "rect-center"} if make_rect else {"type": "none"},
-            "target": {
-                "domain": "widget",
-                "name": "make_sapphire_rings",
-                "bounds": make_rect
-            },
-            "preconditions": [
-                "craftingInterfaceOpen == true",
-                "inventory count('Sapphire') > 0",
-                "inventory count('Gold bar') > 0"
-            ],
-            "postconditions": [
-                "player.animation == 899 OR crafting in progress"
-            ],
-            "confidence": 0.95 if make_rect else 0.4
-        })
-
-        # C2: wait until materials gone
-        plan["steps"].append({
-            "action": "wait-crafting-complete",
-            "description": "Wait until sapphires and gold bars are consumed",
-            "click": {"type": "none"},
-            "target": {"domain": "none", "name": "crafting_wait"},
-            "preconditions": [
-                "inventory count('Sapphire') > 0",
-                "inventory count('Gold bar') > 0"
-            ],
-            "postconditions": [
-                "inventory count('Sapphire') == 0 OR inventory count('Gold bar') == 0"
-            ],
-            "confidence": 1.0
-        })
-        return plan
-
-    # Fallback (unknown phase)
-    plan["steps"].append({
-        "action": "idle",
-        "description": "No actionable step for this phase",
-        "click": {"type": "none"},
-        "target": {"domain": "none", "name": "n/a"},
-        "preconditions": [],
-        "postconditions": [],
-        "confidence": 0.0
-    })
-    return plan
 
 
 class SimpleRecorderWindow(ttk.Frame):
@@ -1517,10 +1018,6 @@ class SimpleRecorderWindow(ttk.Frame):
                     pyautogui.click(button="right")
                 else:
                     pyautogui.click()
-                self._debug(
-                    f"PYAUTOGUI click -> canvas=({int(x)},{int(y)}) system=({sys_x},{sys_y}) "
-                    f"window='{title}' RLRect={rl_rect}"
-                )
             except Exception as e:
                 self._debug(f"PYAUTOGUI click error: {type(e).__name__}: {e}")
             return
@@ -1542,10 +1039,6 @@ class SimpleRecorderWindow(ttk.Frame):
         btn = 1 if button == "left" else (3 if button == "right" else 1)
         self.ipc.focus()
         resp = self.ipc.click_canvas(int(x), int(y), button=btn)
-        self._debug(
-            f"IPC click (port={self.ipc.port}) -> canvas=({int(x)},{int(y)}) system=({sys_x},{sys_y}) "
-            f"window='{title}' RLRect={rl_rect} resp={resp}"
-        )
         try:
             self.ipc_status.config(text=f"Click resp @ {self.ipc.port}: {resp}", foreground="#065f46" if resp.get("ok") else "#b91c1c")
         except Exception:
@@ -1558,7 +1051,6 @@ class SimpleRecorderWindow(ttk.Frame):
         if mode == "pyautogui":
             try:
                 pyautogui.press(str(key))
-                self._debug(f"PYAUTOGUI key -> '{key}'")
             except Exception as e:
                 self._debug(f"PYAUTOGUI key error: {type(e).__name__}: {e}")
             return
@@ -1580,7 +1072,6 @@ class SimpleRecorderWindow(ttk.Frame):
         title = self._rl_window_title or "?"
         rl_rect = self._rl_window_rect
         resp = self.ipc.key(key)
-        self._debug(f"IPC key (port={self.ipc.port}) -> '{key}' window='{title}' RLRect={rl_rect} resp={resp}")
         try:
             self.ipc_status.config(text=f"Key resp @ {self.ipc.port}: {resp}", foreground="#065f46" if resp.get("ok") else "#b91c1c")
         except Exception:
@@ -1604,9 +1095,6 @@ class SimpleRecorderWindow(ttk.Frame):
         ctype = click.get("type")
 
         try:
-            # log geometry each action
-            self._log_window_geometry()
-
             if ctype in ("rect-center", "rect-random"):
                 rect = target.get("bounds") or target.get("clickbox")
                 rect = rect if isinstance(rect, dict) else None
@@ -1616,37 +1104,20 @@ class SimpleRecorderWindow(ttk.Frame):
 
                 if px is None:
                     self._table_set("next_action", "No rect available for click")
-                    self._log_click_debug(step, ctype, None, None, rect, self._canvas_offset,
-                                          sys_before=self._get_system_cursor_pos(),
-                                          sys_after=None,
-                                          note="(no rect)")
                     return
-
-                sys_before = self._get_system_cursor_pos()
                 self._do_click_point(px, py)
-                sys_after = self._get_system_cursor_pos()
 
-                self._log_click_debug(step, ctype, px, py, rect, self._canvas_offset,
-                                      sys_before=sys_before, sys_after=sys_after,
-                                      note=f"(jitter={jitter_px})" if jitter_px else "")
 
             elif ctype == "point":
                 px, py = click.get("x"), click.get("y")
                 px, py = self._apply_canvas_offset(px, py)
                 if not isinstance(px, (int, float)) or not isinstance(py, (int, float)):
                     self._table_set("next_action", "Invalid point for click")
-                    self._log_click_debug(step, ctype, None, None, None, self._canvas_offset,
-                                          sys_before=self._get_system_cursor_pos(),
-                                          sys_after=None,
-                                          note="(invalid point)")
                     return
 
                 sys_before = self._get_system_cursor_pos()
                 self._do_click_point(int(px), int(py))
                 sys_after = self._get_system_cursor_pos()
-
-                self._log_click_debug(step, ctype, int(px), int(py), None, self._canvas_offset,
-                                      sys_before=sys_before, sys_after=sys_after)
 
             elif ctype == "key":
                 key = (click.get("key") or "").lower()
@@ -1656,17 +1127,10 @@ class SimpleRecorderWindow(ttk.Frame):
                     return
 
                 sys_before = self._get_system_cursor_pos()
-                self._debug(
-                    f"Phase='{getattr(self, '_last_phase', '?')}' action='{step.get('action')}' press key='{key}' "
-                    f"sysBefore={sys_before}")
                 self._do_press_key(key)
-                sys_after = self._get_system_cursor_pos()
-                # also log window rects for key actions
-                self._log_window_geometry()
 
             else:
                 self._table_set("next_action", f"Unsupported click.type: {ctype}")
-                self._debug(f"Unsupported click.type: {ctype}")
                 return
 
             # After action, refresh so next step is proposed
@@ -1698,28 +1162,6 @@ class SimpleRecorderWindow(ttk.Frame):
             dt.insert("end", line)
             dt.see("end")
 
-    def _log_click_debug(self, step, ctype, px=None, py=None, rect=None, used_offset=(0, 0),
-                         sys_before=None, sys_after=None, note=""):
-        tgt = (step.get("target") or {})
-        tname = tgt.get("name") or tgt.get("domain") or "target"
-        phase = getattr(self, "_last_phase", "?")
-        rect_src = "bounds" if "bounds" in tgt else ("clickbox" if "clickbox" in tgt else "point")
-
-        sys_planned = self._canvas_to_system(px, py)
-        win_title = self._rl_window_title or "?"
-        rl_rect = self._rl_window_rect
-
-        self._debug(
-            f"Phase='{phase}' action='{step.get('action')}' target='{tname}' "
-            f"type={ctype} canvas=({px},{py}) system={sys_planned} rectSrc={rect_src} rect={rect} "
-            f"offset={used_offset} window='{win_title}' RLRect={rl_rect} "
-            f"sysBefore={sys_before} sysAfter={sys_after} {note}"
-        )
-
-    # --- Windows cursor position (absolute screen coords) ---
-    class _POINT(ctypes.Structure):
-        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
     def _get_system_cursor_pos(self) -> tuple[int | None, int | None]:
         pt = POINT()
         ok = ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
@@ -1741,15 +1183,6 @@ class SimpleRecorderWindow(ttk.Frame):
     # optional setter you can call from detect_window() if you locate RuneLite
     def _set_runelite_window_rect(self, x: int, y: int, w: int, h: int):
         self._rl_window_rect = {"x": int(x), "y": int(y), "width": int(w), "height": int(h)}
-
-    # --- Debug dump of window geometry + offsets ---
-    def _log_window_geometry(self):
-        tk_rect = self._get_tk_window_rect()
-        rl_rect = self._rl_window_rect if isinstance(self._rl_window_rect, dict) else None
-        self._debug(
-            "WindowRects  TK="
-            f"{tk_rect}  RL={rl_rect}  canvas_offset={self._canvas_offset}"
-        )
 
     def _debug_move_mouse(self):
         try:
@@ -1829,8 +1262,6 @@ class SimpleRecorderWindow(ttk.Frame):
             new_phase = getattr(self, "_plan_phase", None)
 
             if (new_phase is not None and curr_phase != new_phase) or (new_action != curr_action):
-                self._debug(
-                    f"plan/phase changed → reset step (from '{curr_action}' to '{new_action}', phase '{curr_phase}'→'{new_phase}')")
                 self._step_state = None
                 # optionally seed pre-action delay so we don't hammer immediately
                 self._mark_action_done()
@@ -1993,7 +1424,6 @@ class SimpleRecorderWindow(ttk.Frame):
             "t0": self._now_ms_local(),
             "phase": getattr(self, "_plan_phase", None),
         }
-        self._debug(f"step begin → {step.get('action')} (phase={getattr(self, '_plan_phase', None)})")
 
     def _advance_step_state(self):
         """
@@ -2083,14 +1513,6 @@ class SimpleRecorderWindow(ttk.Frame):
         # 1) PREWAIT: ONLY honor pre-action delay, do NOT block on preconditions.
         if stage == "prewait":
             delay_ok = (now - t0) >= PRE_ACTION_DELAY_MS
-            pre = step.get("preconditions")
-            pre_defined = bool(pre)
-            pre_ok = self._rules_ok(pre, data) if pre_defined else True
-
-            self._debug(f"PREWAIT stage='{stage}' action='{step.get('action')}' "
-                        f"delay_ok={delay_ok} elapsed={now - t0}ms")
-            if pre_defined:
-                _dump_rules("preconditions status", pre)
 
             if delay_ok:
                 st["stage"] = "acting"
@@ -2098,7 +1520,6 @@ class SimpleRecorderWindow(ttk.Frame):
 
         # 2) ACTING: perform once, then go to postwait
         if stage == "acting":
-            self._debug(f"ACTING action='{step.get('action')}'")
             self._execute_next_action()  # already refreshes
             st["stage"] = "postwait"
             st["t0"] = now
@@ -2108,20 +1529,13 @@ class SimpleRecorderWindow(ttk.Frame):
         if stage == "postwait":
             post = step.get("postconditions")
             post_ok = self._rules_ok(post, data)
-            remain = max(0, RULE_WAIT_TIMEOUT_MS - (now - t0))
-
-            self._debug(f"POSTWAIT action='{step.get('action')}' post_ok={post_ok} "
-                        f"elapsed={now - t0}ms remaining_to_retry={remain}ms")
-            _dump_rules("postconditions status", post)
 
             if post_ok:
-                self._debug("postconditions satisfied → advance")
                 self._step_state = None
                 self._mark_action_done()  # uses PRE_ACTION_DELAY_MS
                 return True
 
             if (now - t0) >= RULE_WAIT_TIMEOUT_MS:
-                self._debug("postwait timeout → retrying action now")
                 self._execute_next_action()
                 st["t0"] = now
                 return False
@@ -2130,7 +1544,6 @@ class SimpleRecorderWindow(ttk.Frame):
             return False
 
         # unknown stage: finish
-        self._debug(f"Unknown stage '{stage}' → finishing step")
         self._step_state = None
         return True
 
@@ -2162,14 +1575,12 @@ class SimpleRecorderWindow(ttk.Frame):
         We don't rely on .isVisible (pygetwindow can misreport); we only skip minimized or 0x0.
         """
         if gw is None:
-            self._debug("pygetwindow not available; install: pip install pygetwindow")
             return []
 
         try:
             # pull everything once; titles may include IDEs etc.
             wins = gw.getAllWindows()
         except Exception as e:
-            self._debug(f"scan windows error: {e}")
             return []
 
         out = []
@@ -2252,7 +1663,6 @@ class SimpleRecorderWindow(ttk.Frame):
             self.window_status.config(
                 text=f"Using: {title} @ ({w.left},{w.top},{w.width}x{w.height})"
             )
-            self._log_window_geometry()
             self._debug(f"Selected RL window: '{title}' handle={getattr(w, 'hWnd', None)}")
         except Exception as e:
             self._debug(f"select window error: {e}")
