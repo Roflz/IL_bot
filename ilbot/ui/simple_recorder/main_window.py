@@ -9,6 +9,8 @@ import ctypes
 from pathlib import Path
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
+from .action_plans import get_plan  # and PLAN_REGISTRY if you prefer
+
 
 from contextlib import suppress
 try:
@@ -600,6 +602,7 @@ class SimpleRecorderWindow(ttk.Frame):
         self.window_title_var = tk.StringVar(value="(none)")
         self.session_dir_var = tk.StringVar(value="")  # per-instance gamestate dir (editable)
         self.ipc_port_var = tk.StringVar(value="")  # free text, no scan required
+        self.plan_var = tk.StringVar(value="SAPPHIRE_RINGS")  # per-instance plan
 
         # If you had a pre-existing self.session_dir, keep it in sync:
         self.session_dir = None  # or your existing default Path/str
@@ -713,10 +716,40 @@ class SimpleRecorderWindow(ttk.Frame):
                                                                                               padx=(0, 12))
         ttk.Radiobutton(mode_row, text="pyautogui", variable=self.input_mode_var, value="pyautogui").grid(row=0,
                                                                                                           column=1)
+        # --- Action Plan picker ---
+        planf = ttk.LabelFrame(left, text="Action Plan")
+        planf.grid(row=3, column=0, sticky="ew", pady=6)
+        planf.grid_columnconfigure(0, weight=1)
+
+        ttk.Label(planf, text="Plan:").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 0))
+        from .action_plans import PLAN_REGISTRY  # top-level import is also fine
+        plan_names = [("SAPPHIRE_RINGS", "Sapphire Rings"), ("GOLD_RINGS", "Gold Rings")]
+        self.plan_combo = ttk.Combobox(
+            planf,
+            state="readonly",
+            values=[label for _, label in plan_names]
+        )
+        # map label->id and id->label
+        self._plan_label_to_id = {label: pid for pid, label in plan_names}
+        self._plan_id_to_label = {pid: label for pid, label in plan_names}
+        # default select
+        self.plan_combo.set(self._plan_id_to_label[self.plan_var.get()])
+        self.plan_combo.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
+
+        def _on_plan_change(*_):
+            sel_label = self.plan_combo.get()
+            self.plan_var.set(self._plan_label_to_id.get(sel_label, "SAPPHIRE_RINGS"))
+            # optional: force a table refresh to reflect different head step summaries
+            try:
+                self.refresh_gamestate_info()
+            except Exception:
+                pass
+
+        self.plan_combo.bind("<<ComboboxSelected>>", _on_plan_change)
 
         # Session Management
         sess = ttk.LabelFrame(left, text="Session Management")
-        sess.grid(row=3, column=0, sticky="ew", pady=6)
+        sess.grid(row=4, column=0, sticky="ew", pady=6)
         sess.grid_columnconfigure(0, weight=1)
         sess.grid_columnconfigure(1, weight=1)
 
@@ -732,7 +765,7 @@ class SimpleRecorderWindow(ttk.Frame):
 
         # Recording Controls
         rec = ttk.LabelFrame(left, text="Recording Controls")
-        rec.grid(row=4, column=0, sticky="ew", pady=6)
+        rec.grid(row=5, column=0, sticky="ew", pady=6)
         for c in range(3):
             rec.grid_columnconfigure(c, weight=1)
 
@@ -749,11 +782,11 @@ class SimpleRecorderWindow(ttk.Frame):
         self.end_button.state(["disabled"])
 
         self.recording_status = ttk.Label(left, text="Recording paused", foreground="#d69e2e")
-        self.recording_status.grid(row=5, column=0, sticky="w", pady=(4, 0))
+        self.recording_status.grid(row=6, column=0, sticky="w", pady=(4, 0))
 
         # ---- Debug Mouse Move ----
         dbg = ttk.LabelFrame(left, text="Debug Mouse Move")
-        dbg.grid(row=6, column=0, sticky="ew", pady=6, padx=6)
+        dbg.grid(row=7, column=0, sticky="ew", pady=6, padx=6)
         for c in range(3):
             dbg.grid_columnconfigure(c, weight=1)
 
@@ -1193,17 +1226,9 @@ class SimpleRecorderWindow(ttk.Frame):
         # Use the persisted text (won’t disappear on later refreshes)
         last_action = self._last_action_text
 
-        # Determine Phase
-        phase = _compute_phase(payload, craft_recent)
-        action = _decide_action_from_phase(phase)
-
-        prev_phase = getattr(self, "_prev_phase_for_wait", None)
-        if phase != prev_phase:
-            self._plan_ready_ms = _now_ms() + PRE_ACTION_DELAY_MS
-            self._prev_phase_for_wait = phase
-
-        # Build standardized plan (no side-effects)
-        plan = _build_action_plan(payload, phase)
+        plan_impl = self._current_plan()
+        phase = plan_impl.compute_phase(payload, craft_recent)
+        plan = plan_impl.build_action_plan(payload, phase)
 
         # Compact summary for table: show first step (if any)
         if isinstance(plan, dict) and isinstance(plan.get("steps"), list) and plan["steps"]:
@@ -2331,3 +2356,6 @@ class SimpleRecorderWindow(ttk.Frame):
             return int(s)
         except ValueError:
             return None
+
+    def _current_plan(self):
+        return get_plan(self.plan_var.get())
