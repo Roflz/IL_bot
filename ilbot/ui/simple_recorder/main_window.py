@@ -11,6 +11,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 from tkinter.scrolledtext import ScrolledText
 
+from .action_plans import mark_step_done
+
 try:
     import pygetwindow as gw
 except Exception:
@@ -232,7 +234,8 @@ class SimpleRecorderWindow(ttk.Frame):
         ttk.Label(planf, text="Plan:").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 0))
         from .action_plans import PLAN_REGISTRY  # top-level import is also fine
         plan_names = [("SAPPHIRE_RINGS", "Sapphire Rings"), ("GOLD_RINGS", "Gold Rings"), ("EMERALD_RINGS", "Emerald Rings"), ("GO_TO_GE", "Go to GE"),
-                      ("OPEN_GE_BANK", "GE: Open Bank")]
+                      ("OPEN_GE_BANK", "GE: Open Bank"), ("GE_WITHDRAW_NOTED_RINGS", "GE: Withdraw Rings (notes)"), ("OPEN_GE_EXCHANGE", "GE: Open Exchange")
+]
         self.plan_combo = ttk.Combobox(
             planf,
             state="readonly",
@@ -1150,6 +1153,7 @@ class SimpleRecorderWindow(ttk.Frame):
                     return
                 self._debug(f"[DBG] rect-{('random' if jitter_px else 'center')} → px={px} py={py}")
                 self._do_click_point(px, py)
+                mark_step_done(step.get("id"))
 
             elif ctype in ("point", "canvas-point", "canvas_point"):
                 px, py = click.get("x"), click.get("y")
@@ -1163,6 +1167,7 @@ class SimpleRecorderWindow(ttk.Frame):
                 self._debug(f"[DBG] point click → canvas=({click.get('x')},{click.get('y')}) "
                             f"final=({int(px)},{int(py)}) RLRect={rl} mode={getattr(self, 'input_mode_var', None) and self.input_mode_var.get()}")
                 self._do_click_point(int(px), int(py))
+                mark_step_done(step.get("id"))
 
             elif ctype == "key":
                 key = (click.get("key") or "").lower()
@@ -1172,6 +1177,7 @@ class SimpleRecorderWindow(ttk.Frame):
                     return
                 self._debug(f"[DBG] key → '{key}'")
                 self._do_press_key(key)
+                mark_step_done(step.get("id"))
 
 
 
@@ -1259,6 +1265,7 @@ class SimpleRecorderWindow(ttk.Frame):
                     self.ipc.focus()
 
                     self.ipc.click_canvas(x, y, button=1)
+                    mark_step_done(step.get("id"))
 
                 else:
 

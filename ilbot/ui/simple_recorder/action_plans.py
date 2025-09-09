@@ -4,6 +4,45 @@ from typing import Dict, Callable
 from .nav_simple import next_tile_toward
 from .constants import GE_MIN_X, GE_MAX_X, GE_MIN_Y, GE_MAX_Y
 
+# --- tiny in-process memory to advance steps even when the plugin doesn't see IPC clicks ---
+import time
+
+_STEP_HITS: dict[str, int] = {}
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+def mark_step_done(step_id: str):
+    """Record that we just executed this step (used to advance UI flows)."""
+    if step_id:
+        _STEP_HITS[step_id] = _now_ms()
+
+def step_recent(step_id: str, max_ms: int = 1800) -> bool:
+    """True if step_id was executed in the last max_ms milliseconds."""
+    t = _STEP_HITS.get(step_id)
+    return isinstance(t, int) and (_now_ms() - t) <= max_ms
+
+
+def _bank_widget_rect(payload: dict, key: str) -> dict | None:
+    """Return screen-rect for a bank widget exported under data.bank_widgets[key]."""
+    w = ((payload.get("bank_widgets") or {}).get(key) or {})
+    b = (w.get("bounds") if isinstance(w, dict) else None)
+    if isinstance(b, dict) and all(k in b for k in ("x","y","width","height")):
+        return b
+    return None
+
+def _bank_slots_matching(payload: dict, names: list[str]) -> list[dict]:
+    """Return bank slots whose itemName matches (case-insensitive) any of names."""
+    want = { (n or "").strip().lower() for n in names if n }
+    out = []
+    for s in (payload.get("bank", {}).get("slots") or []):
+        nm = (s.get("itemName") or "").strip().lower()
+        qty = int(s.get("quantity") or 0)
+        if nm in want and qty > 0:
+            out.append(s)
+    return out
+
+
 
 # ---------------- shared helpers (minimal copies to stay decoupled) ----------------
 _RS_TAG_RE = re.compile(r'</?col(?:=[0-9a-fA-F]+)?>')
@@ -1105,6 +1144,182 @@ class OpenGEBankPlan(Plan):
         plan["steps"].append(step)
         return plan
 
+class GEWithdrawRingsAsNotesPlan(Plan):
+    id = "GE_WITHDRAW_NOTED_RINGS"
+
+    def _bank_openish(self, payload: dict) -> bool:
+        b = payload.get("bank") or {}
+        if b.get("bankOpen"):
+            return True
+        bw = payload.get("bank_widgets") or {}
+        if bw.get("withdraw_note_toggle") or bw.get("withdraw_quantity_all"):
+            return True
+        return False
+
+    def compute_phase(self, payload: dict, craft_recent: bool) -> str:
+        return "Withdraw rings as notes" if self._bank_openish(payload) else "Idle"
+
+    def build_action_plan(self, payload: dict, phase: str) -> dict:
+        plan = {"phase": phase, "steps": []}
+        if phase != "Withdraw rings as notes":
+            return plan
+
+        bw = payload.get("bank_widgets") or {}
+        note_rect = ((bw.get("withdraw_note_toggle") or {}).get("bounds") or None)
+        all_rect  = ((bw.get("withdraw_quantity_all") or {}).get("bounds") or None)
+
+        def _rect_ok(r):
+            return isinstance(r, dict) and all(k in r for k in ("x","y","width","height"))
+
+        # 1) Click NOTE once (skip if we just did it recently)
+        if _rect_ok(note_rect) and not step_recent("bank-note-toggle", 6000):
+            plan["steps"].append({
+                "id": "bank-note-toggle",
+                "action": "click",
+                "description": "Enable Withdraw as Note",
+                "target": {"name": "Withdraw as Note", "bounds": note_rect},
+                "click": {"type": "rect-center"},
+                "preconditions": ["bankOpen == true"],
+                "postconditions": [],
+            })
+            return plan
+
+        # 2) Click ALL once (skip if we just did it recently)
+        if _rect_ok(all_rect) and not step_recent("bank-qty-all", 6000):
+            plan["steps"].append({
+                "id": "bank-qty-all",
+                "action": "click",
+                "description": "Set Withdraw Quantity to All",
+                "target": {"name": "Quantity All", "bounds": all_rect},
+                "click": {"type": "rect-center"},
+                "preconditions": ["bankOpen == true"],
+                "postconditions": [],
+            })
+            return plan
+
+        # 3) Withdraw rings (one stack per tick)
+        bank_slots = (payload.get("bank") or {}).get("slots") or []
+        def _slot_bounds(slot: dict):
+            wrap = slot.get("bounds") or {}
+            return wrap.get("bounds")
+
+        ring_names = {"sapphire ring", "emerald ring", "sapphire rings", "emerald rings"}
+        for s in bank_slots:
+            nm = (s.get("itemName") or "").strip().lower()
+            qty = int(s.get("quantity") or 0)
+            if nm in ring_names and qty > 0:
+                r = _slot_bounds(s)
+                if _rect_ok(r):
+                    plan["steps"].append({
+                        "id": f"bank-withdraw-{s.get('slotId')}",
+                        "action": "click",
+                        "description": f"Withdraw all: {s.get('itemName')}",
+                        "target": {"name": s.get("itemName"), "bounds": r},
+                        "click": {"type": "rect-center"},
+                        "preconditions": ["bankOpen == true"],
+                        "postconditions": [],
+                    })
+                    return plan
+
+        # 4) Withdraw coins (one stack per tick)
+        for s in bank_slots:
+            nm = (s.get("itemName") or "").strip().lower()
+            qty = int(s.get("quantity") or 0)
+            if nm == "coins" and qty > 0:
+                r = _slot_bounds(s)
+                if _rect_ok(r):
+                    plan["steps"].append({
+                        "id": f"bank-withdraw-coins-{s.get('slotId')}",
+                        "action": "click",
+                        "description": "Withdraw all: Coins",
+                        "target": {"name": "Coins", "bounds": r},
+                        "click": {"type": "rect-center"},
+                        "preconditions": ["bankOpen == true"],
+                        "postconditions": [],
+                    })
+                    return plan
+
+        # 5) Close bank
+        plan["steps"].append({
+            "id": "bank-close-esc",
+            "action": "click",
+            "description": "Close Bank (Esc)",
+            "click": {"type": "key", "key": "esc"},
+            "preconditions": ["bankOpen == true"],
+            "postconditions": ["bankOpen == false"],
+        })
+        return plan
+
+class OpenGEExchangePlan(Plan):
+    id = "OPEN_GE_EXCHANGE"
+    label = "GE: Open via Clerk"
+
+    def compute_phase(self, payload: dict, craft_recent: bool) -> str:
+        ge_open = bool((payload.get("grand_exchange") or {}).get("open", False))
+        if ge_open:
+            return "GE already open"
+
+        clerk = self._nearest_clerk(payload)
+        return "Click GE clerk" if clerk else "No target"
+
+    def _nearest_clerk(self, payload: dict) -> dict | None:
+        me = payload.get("player") or {}
+        mx, my, mp = int(me.get("worldX") or 0), int(me.get("worldY") or 0), int(me.get("plane") or 0)
+
+        best, best_d2 = None, 1e18
+        for npc in (payload.get("closestNPCs") or []) + (payload.get("npcs") or []):
+            nm = (npc.get("name") or "").lower()
+            nid = int(npc.get("id") or -1)
+            if "grand exchange clerk" not in nm and not (2148 <= nid <= 2151):
+                continue
+            if int(npc.get("plane") or 0) != mp:
+                continue
+
+            nx, ny = int(npc.get("worldX") or 0), int(npc.get("worldY") or 0)
+            dx, dy = nx - mx, ny - my
+            d2 = dx * dx + dy * dy
+            if d2 < best_d2:
+                best, best_d2 = npc, d2
+        return best
+
+    def build_action_plan(self, payload: dict, phase: str) -> dict:
+        plan = {"phase": phase, "steps": []}
+        if phase != "Click GE clerk":
+            return plan
+
+        clerk = self._nearest_clerk(payload)
+        if not clerk:
+            return plan
+
+        canvasX = clerk.get("canvasX")
+        canvasY = clerk.get("canvasY")
+        if not isinstance(canvasX, (int, float)) or not isinstance(canvasY, (int, float)):
+            return plan
+
+        click = {"type": "point", "x": int(canvasX), "y": int(canvasY) - 8}
+
+        plan["steps"].append({
+            "id": "ge-exchange-open",
+            "action": "click",
+            "description": "Click Grand Exchange Clerk",
+            "click": click,
+            "target": {
+                "domain": "npc",
+                "name": clerk.get("name"),
+                "id": clerk.get("id"),
+                "worldX": clerk.get("worldX"),
+                "worldY": clerk.get("worldY"),
+                "plane": clerk.get("plane", 0),
+                "canvasX": canvasX,
+                "canvasY": canvasY,
+            },
+            "preconditions": ["geOpen == false"],
+            "postconditions": ["geOpen == true"],
+            "confidence": 0.95,
+        })
+        return plan
+
+
 # ------------- Registry & accessors -------------
 PLAN_REGISTRY: Dict[str, Plan] = {
     SapphireRingsPlan.id: SapphireRingsPlan(),
@@ -1112,6 +1327,8 @@ PLAN_REGISTRY: Dict[str, Plan] = {
     EmeraldRingsPlan.id: EmeraldRingsPlan(),
     GoToGEPlan.id:        GoToGEPlan(),
     OpenGEBankPlan.id:    OpenGEBankPlan(),
+    GEWithdrawRingsAsNotesPlan.id: GEWithdrawRingsAsNotesPlan(),
+    OpenGEExchangePlan.id: OpenGEExchangePlan(),
 }
 
 def get_plan(plan_id: str) -> Plan:
