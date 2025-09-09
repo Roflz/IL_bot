@@ -53,6 +53,16 @@ class RuneLiteIPC:
             time.sleep(delay / 1000.0)
         return self._send({"cmd": "key", "k": str(k)})
 
+    def type(self, text: str, enter: bool = True, per_char_ms: int = 30, focus: bool = True):
+        payload = {
+            "cmd": "type",
+            "text": str(text),
+            "enter": bool(enter),
+            "perCharMs": int(per_char_ms),
+            "focus": bool(focus),
+        }
+        return self._send(payload)
+
     def project_world_tile(self, world_x: int, world_y: int, plane: int = 0) -> dict:
         """
         Asks the IPC plugin to project a world tile into canvas coordinates.

@@ -234,7 +234,8 @@ class SimpleRecorderWindow(ttk.Frame):
         ttk.Label(planf, text="Plan:").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 0))
         from .action_plans import PLAN_REGISTRY  # top-level import is also fine
         plan_names = [("SAPPHIRE_RINGS", "Sapphire Rings"), ("GOLD_RINGS", "Gold Rings"), ("EMERALD_RINGS", "Emerald Rings"), ("GO_TO_GE", "Go to GE"),
-                      ("OPEN_GE_BANK", "GE: Open Bank"), ("GE_WITHDRAW_NOTED_RINGS", "GE: Withdraw Rings (notes)"), ("OPEN_GE_EXCHANGE", "GE: Open Exchange")
+                      ("OPEN_GE_BANK", "GE: Open Bank"), ("GE_WITHDRAW_NOTED_RINGS", "GE: Withdraw Rings (notes)"), ("OPEN_GE_EXCHANGE", "GE: Open Exchange"),
+                      ("GE_SELL_BUY", "GE: Sell Rings & Buy Mats"),
 ]
         self.plan_combo = ttk.Combobox(
             planf,
@@ -748,7 +749,7 @@ class SimpleRecorderWindow(ttk.Frame):
         # Debug what we built
         try:
             step_count = len(plan.get("steps") or []) if isinstance(plan, dict) else 0
-            self._debug(f"[PLAN] id={self.plan_var.get()} phase={phase} steps={step_count}")
+            # self._debug(f"[PLAN] id={self.plan_var.get()} phase={phase} steps={step_count}")
         except Exception:
             pass
 
@@ -756,8 +757,8 @@ class SimpleRecorderWindow(ttk.Frame):
         if not (isinstance(plan, dict) and (plan.get("steps") or [])):
             bank_open = bool(payload.get("bank", {}).get("bankOpen", False))
             ge_list = payload.get("ge_booths") or []
-            self._debug(f"[PLAN] empty: bankOpen={bank_open} ge_booths={len(ge_list)} "
-                        f"payload_ts={root.get('timestamp')}")
+            # self._debug(f"[PLAN] empty: bankOpen={bank_open} ge_booths={len(ge_list)} "
+            #             f"payload_ts={root.get('timestamp')}")
 
         # Compact summary for table: show first step (if any)
         if isinstance(plan, dict) and isinstance(plan.get("steps"), list) and plan["steps"]:
@@ -1073,13 +1074,19 @@ class SimpleRecorderWindow(ttk.Frame):
         except Exception:
             pass
 
-
     def _do_press_key(self, key: str):
         mode = self.input_mode_var.get() if hasattr(self, "input_mode_var") else "ipc"
 
         if mode == "pyautogui":
             try:
-                pyautogui.press(str(key))
+                k = (str(key) or "").strip()
+                if k == "escape":
+                    k = "esc"
+                elif k == "return":
+                    k = "enter"
+                elif k == " ":
+                    k = "space"
+                pyautogui.press(k)
             except Exception as e:
                 self._debug(f"PYAUTOGUI key error: {type(e).__name__}: {e}")
             return
@@ -1091,20 +1098,64 @@ class SimpleRecorderWindow(ttk.Frame):
         pong = self.ipc._send({"cmd": "ping"})
         if not (isinstance(pong, dict) and pong.get("ok")):
             try:
-                self.ipc_status.config(text=f"Preflight fail @ {self.ipc.port}: {pong}", foreground="#b91c1c")
+                self.ipc_status.config(
+                    text=f"Preflight fail @ {self.ipc.port}: {pong}",
+                    foreground="#b91c1c"
+                )
             except Exception:
                 pass
             self._debug(f"IPC preflight failed on port {self.ipc.port}: {pong}")
             return
 
-        self.ipc.focus()
-        title = self._rl_window_title or "?"
-        rl_rect = self._rl_window_rect
-        resp = self.ipc.key(key)
         try:
-            self.ipc_status.config(text=f"Key resp @ {self.ipc.port}: {resp}", foreground="#065f46" if resp.get("ok") else "#b91c1c")
-        except Exception:
-            pass
+            self.ipc.focus()
+        except Exception as e:
+            self._debug(f"IPC focus error: {type(e).__name__}: {e}")
+
+        # Map to IPC symbolic keys
+        raw = (str(key) or "").strip()
+        low = raw.lower()
+
+        if len(raw) == 1:
+            # Send the original char as-is (plugin uppercases for keyCode, but
+            # we want the actual typed character to match case)
+            send_key = raw
+        else:
+            SPECIAL = {
+                "enter": "ENTER",
+                "return": "ENTER",
+                "esc": "ESC",
+                "escape": "ESC",
+                "space": "SPACE",
+                " ": "SPACE",
+                "tab": "TAB",
+                "backspace": "BACK_SPACE",
+                "delete": "DELETE",
+                "up": "UP",
+                "down": "DOWN",
+                "left": "LEFT",
+                "right": "RIGHT",
+                "pageup": "PAGE_UP",
+                "pagedown": "PAGE_DOWN",
+                "home": "HOME",
+                "end": "END",
+            }
+            send_key = SPECIAL.get(low, raw.upper())
+
+        try:
+            resp = self.ipc.key(send_key)
+            ok = isinstance(resp, dict) and resp.get("ok")
+            self._debug(f"[DBG] IPC key sent '{send_key}' resp={resp}")
+            try:
+                self.ipc_status.config(
+                    text=f"Key resp @ {self.ipc.port}: {resp}",
+                    foreground="#065f46" if ok else "#b91c1c"
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            self._debug(f"IPC key error: {type(e).__name__}: {e}")
+        return
 
     def _execute_next_action(self):
         try:
@@ -1169,16 +1220,64 @@ class SimpleRecorderWindow(ttk.Frame):
                 self._do_click_point(int(px), int(py))
                 mark_step_done(step.get("id"))
 
+
+
             elif ctype == "key":
-                key = (click.get("key") or "").lower()
-                if not key:
+
+                # Keep raw key; normalize later per mode (pyautogui vs IPC)
+
+                key = (click.get("key") or "")
+
+                if not isinstance(key, str) or not key.strip():
                     self._table_set("next_action", "Invalid key")
+
                     self._debug("[DBG] keypress skipped: invalid key")
+
                     return
+
                 self._debug(f"[DBG] key → '{key}'")
+
                 self._do_press_key(key)
+
                 mark_step_done(step.get("id"))
 
+            elif ctype == "type":
+                text = (click.get("text") or "")
+                enter = bool(click.get("enter", True))
+                per_ms = int(click.get("per_char_ms", 30))
+                should_focus = bool(click.get("focus", True))
+
+                if not isinstance(text, str) or not text:
+                    self._table_set("next_action", "Invalid type text")
+                    self._debug("[DBG] type skipped: empty text")
+                    return
+
+                # IPC only (typing an entire string in pyautogui would be messy)
+                if not self._ensure_ipc():
+                    self._debug("[DBG] type skipped: IPC not ready")
+                    return
+
+                # Preflight (optional)
+                pong = self.ipc._send({"cmd": "ping"})
+                if not (isinstance(pong, dict) and pong.get("ok")):
+                    self._debug(f"[DBG] type preflight fail @ {getattr(self.ipc, 'port', None)}: {pong}")
+                    return
+
+                try:
+                    resp = self.ipc.type(text, enter=enter, per_char_ms=per_ms, focus=should_focus)
+                    self._debug(f"[DBG] IPC type '{text}' enter={enter} perMs={per_ms} resp={resp}")
+                    mark_step_done(step.get("id"))
+                except Exception as e:
+                    self._debug(f"[DBG] type error: {type(e).__name__}: {e}")
+                return
+
+            elif ctype == "wait":
+                ms = int(click.get("ms", 0))
+                if ms > 0:
+                    self._debug(f"[DBG] wait {ms}ms")
+                    time.sleep(ms / 1000.0)
+                mark_step_done(step.get("id"))
+                return
 
 
             elif ctype == "world-tile":
