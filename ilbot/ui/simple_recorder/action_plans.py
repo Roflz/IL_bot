@@ -71,11 +71,22 @@ def _rect_center_xy(rect: dict | None) -> tuple[int | None, int | None]:
 
 def _closest_object_by_names(payload: dict, names: list[str]) -> dict | None:
     wanted = [n.lower() for n in names]
+
+    # Prefer the GE-specific list your exporter writes
+    for obj in (payload.get("ge_booths") or []):
+        nm = _norm_name(obj.get("name"))
+        if any(w in nm for w in wanted):
+            return obj
+
+    # Fallback to generic nearby objects
     for obj in (payload.get("closestGameObjects") or []):
         nm = _norm_name(obj.get("name"))
         if any(w in nm for w in wanted):
             return obj
+
     return None
+
+
 
 def _craft_widget_rect(payload: dict, key: str) -> dict | None:
     w = (payload.get("crafting_widgets", {}) or {}).get(key)
@@ -129,7 +140,7 @@ class SapphireRingsPlan(Plan):
             if obj:
                 rect = _unwrap_rect(obj.get("clickbox"))
                 step = {
-                    "action": "click-bank",
+                    "action": "click",
                     "description": "Click nearest bank booth",
                     "click": ({"type": "rect-center"} if rect else
                               {"type": "point", "x": int(obj.get("canvasX") or 0), "y": int(obj.get("canvasY") or 0)}),
@@ -342,7 +353,7 @@ class GoldRingsPlan(Plan):
             if obj:
                 rect = _unwrap_rect(obj.get("clickbox"))
                 step = {
-                    "action": "click-bank",
+                    "action": "click",
                     "description": "Click nearest bank booth",
                     "click": ({"type":"rect-center"} if rect else
                               {"type":"point","x":int(obj.get("canvasX") or 0),"y":int(obj.get("canvasY") or 0)}),
@@ -515,25 +526,70 @@ class EmeraldRingsPlan(Plan):
         plan = {"phase": phase, "steps": []}
 
         if phase == "Moving to bank":
-            obj = _closest_object_by_names(payload, ["bank booth", "banker"])
-            if obj:
-                rect = _unwrap_rect(obj.get("clickbox"))
-                step = {
-                    "action": "click-bank",
-                    "description": "Click nearest bank booth",
-                    "click": ({"type": "rect-center"} if rect else
-                              {"type": "point", "x": int(obj.get("canvasX") or 0), "y": int(obj.get("canvasY") or 0)}),
-                    "target": {
-                        "domain": "object", "name": obj.get("name"), "id": obj.get("id"),
-                        "clickbox": rect,
-                        "canvas": {"x": obj.get("canvasX"), "y": obj.get("canvasY")}
-                    },
-                    "preconditions": ["bankOpen == false"],
-                    "postconditions": ["bankOpen == true"],
-                    "confidence": 0.92 if rect else 0.6
+            # ---- compute coordinates (prefer clickbox center; else world-tile; else canvas) ----
+            obj = _closest_object_by_names(payload, ["grand exchange booth"])
+            if not obj:
+                return {"phase": "No target", "steps": []}
+
+            cb = (obj.get("clickbox") or {})
+            has_rect = all(k in cb for k in ("x", "y", "width", "height")) and cb["width"] and cb["height"]
+            click = None
+            click_kind = None
+
+            if has_rect:
+                x = int(cb["x"] + cb["width"] // 2)
+                y = int(cb["y"] + cb["height"] // 2)
+                click = {"type": "point", "x": x, "y": y}
+                click_kind = "rect-center(point)"
+            elif obj.get("worldX") is not None and obj.get("worldY") is not None:
+                click = {
+                    "type": "world-tile",
+                    "worldX": int(obj.get("worldX") or 0),
+                    "worldY": int(obj.get("worldY") or 0),
+                    "plane": int(obj.get("plane") or 0),
                 }
-                plan["steps"].append(step)
-            return plan
+                click_kind = "world-tile"
+            elif obj.get("canvasX") is not None and obj.get("canvasY") is not None:
+                click = {"type": "point", "x": int(obj.get("canvasX")), "y": int(obj.get("canvasY"))}
+                click_kind = "canvas-point"
+
+            if not click:
+                return {"phase": "No target coords", "steps": []}
+
+            # Build a super explicit debug bundle we can print in the executor
+            debug_payload = {
+                "chosen_obj": {
+                    "id": obj.get("id"),
+                    "name": obj.get("name"),
+                    "worldX": obj.get("worldX"),
+                    "worldY": obj.get("worldY"),
+                    "plane": obj.get("plane"),
+                    "canvasX": obj.get("canvasX"),
+                    "canvasY": obj.get("canvasY"),
+                    "has_clickbox": bool(has_rect),
+                    "source": "ge_booths" if (obj in (payload.get("ge_booths") or [])) else "closestGameObjects",
+                },
+                "computed_click": click,
+                "click_kind": click_kind,
+            }
+
+            step = {
+                "id": "ge-bank-open",
+                "action": "click",
+                "description": "Click Grand Exchange bank booth",
+                "click": click,
+                "target": {
+                    "domain": "object",
+                    "name": obj.get("name"),
+                    "id": obj.get("id"),
+                },
+                "preconditions": ["bankOpen == false"],
+                "postconditions": ["bankOpen == true"],
+                "confidence": 0.92 if has_rect else 0.6,
+                "summary": f"GE booth: id={obj.get('id')} {click_kind} -> {click}",
+                "debug": debug_payload,  # <— add this
+            }
+            return {"phase": phase, "steps": [step]}
 
         if phase == "Banking":
             TARGET_EME  = 13
@@ -882,6 +938,172 @@ class GoToGEPlan(Plan):
             })
             return plan
 
+class OpenGEBankPlan(Plan):
+    id = "OPEN_GE_BANK"
+    label = "GE: Open Bank"
+
+    def compute_phase(self, payload: dict, craft_recent: bool) -> str:
+        bank_open = bool((payload.get("bank") or {}).get("bankOpen", False))
+        if bank_open:
+            return "Bank already open"
+        # Only target the exact GE bank booth name the user wants
+        obj = _closest_object_by_names(payload, ["grand exchange booth"])
+        return "Click GE bank" if obj else "No target"
+
+    def build_action_plan(self, payload: dict, phase: str) -> dict:
+        plan = {"phase": phase, "steps": []}
+        if phase != "Click GE bank":
+            return plan
+
+        # --- 1) Find a GE booth (for a stable canvas anchor) ---
+        booth = _closest_object_by_names(payload, ["grand exchange booth"])
+        if not booth:
+            return plan
+
+        # Pull booth canvas coords (exported by your plugin under ge_booths/closestGameObjects)
+        canvasX = booth.get("canvasX")
+        canvasY = booth.get("canvasY")
+
+        # If missing in the chosen object, try enrich from ge_booths by id+world match
+        if (not isinstance(canvasX, (int, float)) or canvasX < 0 or
+                not isinstance(canvasY, (int, float)) or canvasY < 0):
+            for ge in (payload.get("ge_booths") or []):
+                try:
+                    same = (int(ge.get("id") or -1) == int(booth.get("id") or -2) and
+                            int(ge.get("worldX") or -1) == int(booth.get("worldX") or -2) and
+                            int(ge.get("worldY") or -1) == int(booth.get("worldY") or -2))
+                except Exception:
+                    same = False
+                if same:
+                    canvasX = ge.get("canvasX", canvasX)
+                    canvasY = ge.get("canvasY", canvasY)
+                    break
+
+        # Bail if we still don’t have a usable canvas anchor
+        if not isinstance(canvasX, (int, float)) or not isinstance(canvasY, (int, float)):
+            return plan
+
+        # --- 2) Find the nearest Banker (world coords only are fine) ---
+        def _nearest_banker(payload: dict, booth_obj: dict) -> dict | None:
+            bx, by, bp = int(booth_obj.get("worldX") or 0), int(booth_obj.get("worldY") or 0), int(
+                booth_obj.get("plane") or 0)
+            best, best_d2 = None, 1e18
+            for npc in (payload.get("closestNPCs") or []):
+                nm = (npc.get("name") or "").lower()
+                if "banker" not in nm:
+                    continue
+                nx, ny, np = int(npc.get("worldX") or 0), int(npc.get("worldY") or 0), int(npc.get("plane") or 0)
+                if np != bp:
+                    continue
+                dx, dy = (nx - bx), (ny - by)
+                d2 = dx * dx + dy * dy
+                if d2 < best_d2:
+                    best, best_d2 = npc, d2
+            return best
+
+        banker = _nearest_banker(payload, booth)
+        if not banker:
+            # No banker seen? Keep your old behavior (click the booth anchor with a small lift)
+            click = {"type": "point", "x": int(canvasX), "y": int(canvasY) - 16}
+            step = {
+                "id": "ge-bank-open",
+                "action": "click",
+                "description": "Click GE booth (fallback: no banker found)",
+                "click": click,
+                "target": {
+                    "domain": "object",
+                    "name": booth.get("name"),
+                    "id": booth.get("id"),
+                    "worldX": booth.get("worldX"),
+                    "worldY": booth.get("worldY"),
+                    "plane": booth.get("plane", 0),
+                    "canvasX": canvasX, "canvasY": canvasY,
+                },
+                "preconditions": ["bankOpen == false"],
+                "postconditions": ["bankOpen == true"],
+                "confidence": 0.85,
+                "debug": {
+                    "click_kind": "canvas-point (no banker)",
+                    "chosen_booth": booth,
+                    "computed_click": click,
+                },
+            }
+            plan["steps"].append(step)
+            return plan
+
+        # --- 3) Compute a simple nudge toward the banker (pixel space) ---
+        # Convert booth->banker world delta into a small canvas offset.
+        # Tunables (pixels per world-tile influence). Start modest; adjust if needed.
+        PX_PER_TILE = 40  # coarse mapping tile→pixels at your typical zoom
+        SCALE = 0.8  # use 60% of the vector length to avoid overshoot
+        LIFT_Y = -6  # a small upward bias helps catch the banker sprite
+
+        dx_tiles = int(banker.get("worldX") or 0) - int(booth.get("worldX") or 0)
+        dy_tiles = int(banker.get("worldY") or 0) - int(booth.get("worldY") or 0)
+
+        # Map world delta to a rough screen delta; note: y sign may need flipping depending on your camera
+        # Empirically at GE with a default camera, positive worldY tends to go "up" in canvas (smaller Y).
+        # If it goes the other way for you, change dy_px to (-dy_tiles * PX_PER_TILE).
+        dx_px = int(dx_tiles * PX_PER_TILE * SCALE)
+        dy_px = int(-dy_tiles * PX_PER_TILE * SCALE) + int(LIFT_Y)
+
+        click_x = int(canvasX) + dx_px
+        click_y = int(canvasY) + dy_px
+
+        click = {
+            "type": "point",
+            "x": click_x,
+            "y": click_y,
+        }
+
+        step = {
+            "id": "ge-bank-open",
+            "action": "click",
+            "description": "Click Banker (via booth anchor nudged toward banker)",
+            "click": click,
+            "target": {
+                "domain": "npc",
+                "name": banker.get("name"),
+                "id": banker.get("id"),
+                "worldX": banker.get("worldX"),
+                "worldY": banker.get("worldY"),
+                "plane": banker.get("plane", 0),
+                # keep the booth anchor for debugging
+                "anchor": {
+                    "name": booth.get("name"),
+                    "worldX": booth.get("worldX"),
+                    "worldY": booth.get("worldY"),
+                    "plane": booth.get("plane", 0),
+                    "canvasX": canvasX, "canvasY": canvasY,
+                },
+            },
+            "preconditions": ["bankOpen == false"],
+            "postconditions": ["bankOpen == true"],
+            "confidence": 0.93,
+            "summary": f"Banker via booth anchor → click=({click_x},{click_y})",
+            "debug": {
+                "click_kind": "canvas-point toward banker",
+                "booth": {
+                    "id": booth.get("id"),
+                    "worldX": booth.get("worldX"),
+                    "worldY": booth.get("worldY"),
+                    "canvasX": canvasX, "canvasY": canvasY,
+                },
+                "banker": {
+                    "id": banker.get("id"),
+                    "name": banker.get("name"),
+                    "worldX": banker.get("worldX"),
+                    "worldY": banker.get("worldY"),
+                    "plane": banker.get("plane"),
+                },
+                "vec_world": {"dx_tiles": dx_tiles, "dy_tiles": dy_tiles},
+                "vec_canvas": {"dx_px": dx_px, "dy_px": dy_px},
+                "computed_click": click,
+            },
+        }
+
+        plan["steps"].append(step)
+        return plan
 
 # ------------- Registry & accessors -------------
 PLAN_REGISTRY: Dict[str, Plan] = {
@@ -889,6 +1111,7 @@ PLAN_REGISTRY: Dict[str, Plan] = {
     GoldRingsPlan.id:     GoldRingsPlan(),
     EmeraldRingsPlan.id: EmeraldRingsPlan(),
     GoToGEPlan.id:        GoToGEPlan(),
+    OpenGEBankPlan.id:    OpenGEBankPlan(),
 }
 
 def get_plan(plan_id: str) -> Plan:

@@ -231,7 +231,8 @@ class SimpleRecorderWindow(ttk.Frame):
 
         ttk.Label(planf, text="Plan:").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 0))
         from .action_plans import PLAN_REGISTRY  # top-level import is also fine
-        plan_names = [("SAPPHIRE_RINGS", "Sapphire Rings"), ("GOLD_RINGS", "Gold Rings"), ("EMERALD_RINGS", "Emerald Rings"), ("GO_TO_GE", "Go to GE")]
+        plan_names = [("SAPPHIRE_RINGS", "Sapphire Rings"), ("GOLD_RINGS", "Gold Rings"), ("EMERALD_RINGS", "Emerald Rings"), ("GO_TO_GE", "Go to GE"),
+                      ("OPEN_GE_BANK", "GE: Open Bank")]
         self.plan_combo = ttk.Combobox(
             planf,
             state="readonly",
@@ -741,6 +742,20 @@ class SimpleRecorderWindow(ttk.Frame):
         phase = plan_impl.compute_phase(payload, craft_recent)
         plan = plan_impl.build_action_plan(payload, phase)
 
+        # Debug what we built
+        try:
+            step_count = len(plan.get("steps") or []) if isinstance(plan, dict) else 0
+            self._debug(f"[PLAN] id={self.plan_var.get()} phase={phase} steps={step_count}")
+        except Exception:
+            pass
+
+        # If no steps, quickly probe likely reasons
+        if not (isinstance(plan, dict) and (plan.get("steps") or [])):
+            bank_open = bool(payload.get("bank", {}).get("bankOpen", False))
+            ge_list = payload.get("ge_booths") or []
+            self._debug(f"[PLAN] empty: bankOpen={bank_open} ge_booths={len(ge_list)} "
+                        f"payload_ts={root.get('timestamp')}")
+
         # Compact summary for table: show first step (if any)
         if isinstance(plan, dict) and isinstance(plan.get("steps"), list) and plan["steps"]:
             first = plan["steps"][0]
@@ -1089,6 +1104,11 @@ class SimpleRecorderWindow(ttk.Frame):
             pass
 
     def _execute_next_action(self):
+        try:
+            self.refresh_gamestate_info()
+        except Exception as e:
+            self._debug(f"pre-exec refresh error: {e}")
+
         if not self.input_enabled:
             self._table_set("next_action", "Input disabled (toggle it ON)")
             self._debug("Execute skipped: input disabled")
@@ -1100,37 +1120,22 @@ class SimpleRecorderWindow(ttk.Frame):
             self._debug("Execute skipped: no plan available")
             return
 
+        # Pull current plan & first step
         step = plan["steps"][0]
         click = step.get("click", {}) or {}
         target = step.get("target", {}) or {}
         ctype = (click.get("type") or "").lower()
 
+        # ---- STEP-LEVEL DEBUG: see exactly what we’re about to click ----
         try:
-            # pull current plan & first step
-            step = (self._last_action_plan or {}).get("steps", [])[0]
-            tgt = (step.get("target") or {})
-            dbg = (tgt.get("debug") or {})
-
-            ge = (dbg.get("ge_center") or {})
-            me = (dbg.get("player") or {})
-            vec = (dbg.get("goal_vec") or {})
-            tw = (dbg.get("chosen_tile_world") or {})
-            tc = (dbg.get("chosen_tile_canvas") or {})
-
-            if ge and me and tw and tc and vec:
+            sdbg = step.get("debug") or {}
+            if sdbg:
                 self._debug(
-                    "GE DEBUG → center=({gx},{gy})  player=({wx},{wy})  vec=({dx},{dy})  "
-                    "pick_world=({tx},{ty},p={pl})  pick_canvas=({cx},{cy})".format(
-                        gx=ge.get("x"), gy=ge.get("y"),
-                        wx=me.get("x"), wy=me.get("y"),
-                        dx=vec.get("dx"), dy=vec.get("dy"),
-                        tx=tw.get("x"), ty=tw.get("y"), pl=tw.get("plane"),
-                        cx=tc.get("x"), cy=tc.get("y"),
-                    )
-                )
+                    f"[DBG] step={step.get('id')} action={step.get('action')} click_kind={sdbg.get('click_kind')}")
+                self._debug(f"[DBG] chosen_obj={sdbg.get('chosen_obj')}")
+                self._debug(f"[DBG] computed_click={sdbg.get('computed_click')}")
         except Exception:
-            # never let debug printing break action execution
-            pass
+            pass  # never let debug printing break action execution
 
         try:
             if ctype in ("rect-center", "rect-random"):
@@ -1143,7 +1148,7 @@ class SimpleRecorderWindow(ttk.Frame):
                     self._table_set("next_action", "No rect available for click")
                     self._debug("Rect click skipped: no rect")
                     return
-                self._debug(f"CLICK rect → px={px} py={py}")
+                self._debug(f"[DBG] rect-{('random' if jitter_px else 'center')} → px={px} py={py}")
                 self._do_click_point(px, py)
 
             elif ctype in ("point", "canvas-point", "canvas_point"):
@@ -1151,50 +1156,117 @@ class SimpleRecorderWindow(ttk.Frame):
                 px, py = self._apply_canvas_offset(px, py)
                 if not isinstance(px, (int, float)) or not isinstance(py, (int, float)):
                     self._table_set("next_action", "Invalid point for click")
-                    self._debug(f"Point click skipped: invalid coords {click}")
+                    self._debug(f"[DBG] point click skipped: invalid coords {click}")
                     return
 
-                # Optional: sanity log vs RL canvas bounds
                 rl = self._rl_window_rect or {}
-                self._debug(f"CLICK point → canvas=({click.get('x')},{click.get('y')}) "
+                self._debug(f"[DBG] point click → canvas=({click.get('x')},{click.get('y')}) "
                             f"final=({int(px)},{int(py)}) RLRect={rl} mode={getattr(self, 'input_mode_var', None) and self.input_mode_var.get()}")
-
-                sys_before = self._get_system_cursor_pos()
                 self._do_click_point(int(px), int(py))
-                sys_after = self._get_system_cursor_pos()
 
             elif ctype == "key":
                 key = (click.get("key") or "").lower()
                 if not key:
                     self._table_set("next_action", "Invalid key")
-                    self._debug("Keypress skipped: invalid key")
+                    self._debug("[DBG] keypress skipped: invalid key")
                     return
-                self._debug(f"KEY → '{key}'")
-                sys_before = self._get_system_cursor_pos()
+                self._debug(f"[DBG] key → '{key}'")
                 self._do_press_key(key)
 
-            elif ctype == "world-tile":
-                wx = int(click.get("worldX"))
-                wy = int(click.get("worldY"))
-                pl = int(click.get("plane", 0))
-                # Ask IPC to project tile → canvas
-                resp = self._ipc.project_world_tile(wx, wy, pl)
-                self._log_debug(f"[GE] project {wx},{wy},{pl} -> {resp}")
-                if resp.get("ok") and resp.get("onScreen"):
-                    x, y = int(resp["x"]), int(resp["y"])
-                    self._ipc.focus()  # optional
-                    self._ipc.click_canvas(x, y, button=1)
-                else:
-                    self._log_debug(f"[GE] projection not clickable: {resp}")
-                return  # handled
 
-            else:
-                self._table_set("next_action", f"Unsupported click.type: {ctype}")
-                self._debug(f"Unsupported click type: {ctype} (step={step})")
+
+            elif ctype == "world-tile":
+
+                if not self._ensure_ipc():
+                    self._debug("[DBG] world-tile: IPC not ready")
+
+                    return
+
+                wx = int(click.get("worldX"));
+                wy = int(click.get("worldY"));
+                pl = int(click.get("plane", 0))
+
+                # try projection via IPC (your plugin doesn't support this yet)
+
+                resp = self.ipc.project_world_tile(wx, wy, pl)
+
+                self._debug(f"[DBG] world-tile → project ({wx},{wy},p={pl}) -> {resp}")
+
+                if resp.get("ok") and resp.get("onScreen"):
+
+                    x, y = int(resp["x"]), int(resp["y"])
+
+                    # optional nudge support (kept for future)
+
+                    nud = click.get("nudge") or {}
+
+                    try:
+
+                        x += int(nud.get("dx", 0));
+                        y += int(nud.get("dy", 0))
+
+                    except Exception:
+
+                        pass
+
+                    self._debug(f"[DBG] world-tile final → canvas=({x},{y}) with nudge={nud}")
+
+                    self.ipc.focus()
+
+                    self.ipc.click_canvas(x, y, button=1)
+
+                    return
+
+                # ---- FALLBACK (no 'project' cmd): click the booth's clickbox/canvas ----
+
+                sdbg = step.get("debug") or {}
+
+                obj = sdbg.get("chosen_obj") or {}
+
+                cb = obj.get("clickbox") or {}
+
+                x = y = None
+
+                # clickbox center first
+
+                if all(k in cb for k in ("x", "y", "width", "height")) and cb.get("width") and cb.get("height"):
+
+                    try:
+
+                        x = int(cb["x"] + cb["width"] // 2)
+
+                        y = int(cb["y"] + cb["height"] // 2)
+
+                        self._debug(f"[DBG] fallback → clickbox center ({x},{y})")
+
+                    except Exception:
+
+                        x = y = None
+
+                # else use canvas point from exporter
+
+                if x is None or y is None:
+
+                    cx, cy = obj.get("canvasX"), obj.get("canvasY")
+
+                    if isinstance(cx, (int, float)) and isinstance(cy, (int, float)):
+                        x, y = int(cx), int(cy)
+
+                        self._debug(f"[DBG] fallback → object canvas point ({x},{y})")
+
+                if x is not None and y is not None:
+
+                    self.ipc.focus()
+
+                    self.ipc.click_canvas(x, y, button=1)
+
+                else:
+
+                    self._debug("[DBG] fallback failed: no clickbox/canvas coords available")
+
                 return
 
-            # Refresh after action so the next step is proposed
-            self.refresh_gamestate_info()
+
 
         except Exception as e:
             self._table_set("next_action", f"Action error: {e}")
