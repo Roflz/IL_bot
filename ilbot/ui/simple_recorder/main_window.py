@@ -75,6 +75,7 @@ from .session_ports import (
 )
 
 
+
 class SimpleRecorderWindow(ttk.Frame):
     def __init__(self, root, instance_index: int = 0):
         # Distinguish between a window host and an embedded container
@@ -230,7 +231,7 @@ class SimpleRecorderWindow(ttk.Frame):
 
         ttk.Label(planf, text="Plan:").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 0))
         from .action_plans import PLAN_REGISTRY  # top-level import is also fine
-        plan_names = [("SAPPHIRE_RINGS", "Sapphire Rings"), ("GOLD_RINGS", "Gold Rings"), ("EMERALD_RINGS", "Emerald Rings")]
+        plan_names = [("SAPPHIRE_RINGS", "Sapphire Rings"), ("GOLD_RINGS", "Gold Rings"), ("EMERALD_RINGS", "Emerald Rings"), ("GO_TO_GE", "Go to GE")]
         self.plan_combo = ttk.Combobox(
             planf,
             state="readonly",
@@ -1048,6 +1049,7 @@ class SimpleRecorderWindow(ttk.Frame):
         btn = 1 if button == "left" else (3 if button == "right" else 1)
         self.ipc.focus()
         resp = self.ipc.click_canvas(int(x), int(y), button=btn)
+        self._debug(f"IPC click → port={self.ipc.port} canvas=({int(x)},{int(y)}) resp={resp}")
         try:
             self.ipc_status.config(text=f"Click resp @ {self.ipc.port}: {resp}", foreground="#065f46" if resp.get("ok") else "#b91c1c")
         except Exception:
@@ -1101,7 +1103,34 @@ class SimpleRecorderWindow(ttk.Frame):
         step = plan["steps"][0]
         click = step.get("click", {}) or {}
         target = step.get("target", {}) or {}
-        ctype = click.get("type")
+        ctype = (click.get("type") or "").lower()
+
+        try:
+            # pull current plan & first step
+            step = (self._last_action_plan or {}).get("steps", [])[0]
+            tgt = (step.get("target") or {})
+            dbg = (tgt.get("debug") or {})
+
+            ge = (dbg.get("ge_center") or {})
+            me = (dbg.get("player") or {})
+            vec = (dbg.get("goal_vec") or {})
+            tw = (dbg.get("chosen_tile_world") or {})
+            tc = (dbg.get("chosen_tile_canvas") or {})
+
+            if ge and me and tw and tc and vec:
+                self._debug(
+                    "GE DEBUG → center=({gx},{gy})  player=({wx},{wy})  vec=({dx},{dy})  "
+                    "pick_world=({tx},{ty},p={pl})  pick_canvas=({cx},{cy})".format(
+                        gx=ge.get("x"), gy=ge.get("y"),
+                        wx=me.get("x"), wy=me.get("y"),
+                        dx=vec.get("dx"), dy=vec.get("dy"),
+                        tx=tw.get("x"), ty=tw.get("y"), pl=tw.get("plane"),
+                        cx=tc.get("x"), cy=tc.get("y"),
+                    )
+                )
+        except Exception:
+            # never let debug printing break action execution
+            pass
 
         try:
             if ctype in ("rect-center", "rect-random"):
@@ -1110,19 +1139,25 @@ class SimpleRecorderWindow(ttk.Frame):
                 jitter_px = int(click.get("jitter_px") or 0) if ctype == "rect-random" else None
                 px, py = self._screen_point_from_rect(rect, jitter_px)
                 px, py = self._apply_canvas_offset(px, py)
-
                 if px is None:
                     self._table_set("next_action", "No rect available for click")
+                    self._debug("Rect click skipped: no rect")
                     return
+                self._debug(f"CLICK rect → px={px} py={py}")
                 self._do_click_point(px, py)
 
-
-            elif ctype == "point":
+            elif ctype in ("point", "canvas-point", "canvas_point"):
                 px, py = click.get("x"), click.get("y")
                 px, py = self._apply_canvas_offset(px, py)
                 if not isinstance(px, (int, float)) or not isinstance(py, (int, float)):
                     self._table_set("next_action", "Invalid point for click")
+                    self._debug(f"Point click skipped: invalid coords {click}")
                     return
+
+                # Optional: sanity log vs RL canvas bounds
+                rl = self._rl_window_rect or {}
+                self._debug(f"CLICK point → canvas=({click.get('x')},{click.get('y')}) "
+                            f"final=({int(px)},{int(py)}) RLRect={rl} mode={getattr(self, 'input_mode_var', None) and self.input_mode_var.get()}")
 
                 sys_before = self._get_system_cursor_pos()
                 self._do_click_point(int(px), int(py))
@@ -1134,15 +1169,31 @@ class SimpleRecorderWindow(ttk.Frame):
                     self._table_set("next_action", "Invalid key")
                     self._debug("Keypress skipped: invalid key")
                     return
-
+                self._debug(f"KEY → '{key}'")
                 sys_before = self._get_system_cursor_pos()
                 self._do_press_key(key)
 
+            elif ctype == "world-tile":
+                wx = int(click.get("worldX"))
+                wy = int(click.get("worldY"))
+                pl = int(click.get("plane", 0))
+                # Ask IPC to project tile → canvas
+                resp = self._ipc.project_world_tile(wx, wy, pl)
+                self._log_debug(f"[GE] project {wx},{wy},{pl} -> {resp}")
+                if resp.get("ok") and resp.get("onScreen"):
+                    x, y = int(resp["x"]), int(resp["y"])
+                    self._ipc.focus()  # optional
+                    self._ipc.click_canvas(x, y, button=1)
+                else:
+                    self._log_debug(f"[GE] projection not clickable: {resp}")
+                return  # handled
+
             else:
                 self._table_set("next_action", f"Unsupported click.type: {ctype}")
+                self._debug(f"Unsupported click type: {ctype} (step={step})")
                 return
 
-            # After action, refresh so next step is proposed
+            # Refresh after action so the next step is proposed
             self.refresh_gamestate_info()
 
         except Exception as e:

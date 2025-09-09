@@ -4,11 +4,7 @@ import socket
 import json
 from pathlib import Path
 
-try:
-    # Reuse your constants if present
-    from .constants import SESSIONS_DIR  # e.g. r"D:\repos\bot_runelite_IL\data\recording_sessions"
-except Exception:
-    SESSIONS_DIR = r"/data/recording_sessions"
+from .constants import SESSIONS_DIR  # e.g. r"D:\repos\bot_runelite_IL\data\recording_sessions"
 
 _USERNAME_PAT = re.compile(r"^rune?lite\s*-\s*(.+)$", re.I)
 

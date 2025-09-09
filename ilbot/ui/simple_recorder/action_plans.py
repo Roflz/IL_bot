@@ -1,7 +1,9 @@
 # action_plans.py
 import re
 from typing import Dict, Callable
-from .nav_simple import choose_tile_toward
+from .nav_simple import next_tile_toward
+from .constants import GE_MIN_X, GE_MAX_X, GE_MIN_Y, GE_MAX_Y
+
 
 # ---------------- shared helpers (minimal copies to stay decoupled) ----------------
 _RS_TAG_RE = re.compile(r'</?col(?:=[0-9a-fA-F]+)?>')
@@ -716,75 +718,177 @@ class EmeraldRingsPlan(Plan):
         })
         return plan
 
-class GoToGEPlan:
-    NAME = "Go to GE"
+class GoToGEPlan(Plan):
+    """
+    Chooses a ground tile from tiles_15x15 that best advances the player toward the
+    Grand Exchange world coords, and clicks it using the tile's canvas coordinates.
+    """
+    id = "GO_TO_GE"
+    label = "Go to GE"
 
-    def __call__(self, payload: dict) -> dict:
-        return self.build(payload)
+    def compute_phase(self, payload: dict, craft_recent: bool) -> str:
+        me = (payload.get("player") or {})
+        tiles = payload.get("tiles_15x15") or []
+        if not me or not tiles:
+            return "No GE/Player/Tiles"
 
-    def build(self, payload: dict) -> dict:
-            # read player and GE coords
-            player = (payload.get("player") or {})
-            p_wx, p_wy = int(player.get("worldX", 0)), int(player.get("worldY", 0))
-            ge = (payload.get("grand_exchange") or {})
-            ge_wx, ge_wy = int(ge.get("worldX", 0)), int(ge.get("worldY", 0))
+        wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
 
-            if p_wx == 0 and p_wy == 0:
-                return {
-                    "phase": "Navigate→GE",
-                    "steps": [{
-                        "action": "idle",
-                        "description": "No player coords",
-                        "click": {"type":"none"},
-                        "target": {"domain":"none","name":"n/a"},
-                        "preconditions": [], "postconditions": [], "confidence": 0.0
-                    }]
-                }
+        # Check if inside GE region
+        if GE_MIN_X <= wx <= GE_MAX_X and GE_MIN_Y <= wy <= GE_MAX_Y:
+            return "Arrived at GE"
 
-            # close enough? (loose threshold)
-            if abs(p_wx - ge_wx) + abs(p_wy - ge_wy) <= 4:
-                return {
-                    "phase": "Navigate→GE",
-                    "steps": [{
-                        "action": "idle",
-                        "description": "At GE (≈)",
-                        "click": {"type":"none"},
-                        "target": {"domain":"none","name":"n/a"},
-                        "preconditions": [], "postconditions": [], "confidence": 1.0
-                    }]
-                }
+        return "Moving to GE"
 
-            vis = payload.get("visibleTiles") or []
-            tile = choose_tile_toward(p_wx, p_wy, ge_wx, ge_wy, vis)
-            if not tile:
-                return {
-                    "phase": "Navigate→GE",
-                    "steps": [{
-                        "action": "idle",
-                        "description": "No good visible tile toward GE",
-                        "click": {"type":"none"},
-                        "target": {"domain":"none","name":"n/a"},
-                        "preconditions": [], "postconditions": [], "confidence": 0.0
-                    }]
-                }
+    # inside GoToGEPlan
+    def _ge_center(self) -> tuple[int, int]:
+        # Center of the GE region from constants.py
+        gx = (GE_MIN_X + GE_MAX_X) // 2
+        gy = (GE_MIN_Y + GE_MAX_Y) // 2
+        return gx, gy
 
-            cx, cy = int(tile["canvas"]["x"]), int(tile["canvas"]["y"])
-            return {
-                "phase": "Navigate→GE",
-                "steps": [{
-                    "action": "walk-toward-ge",
-                    "description": "Step toward GE",
-                    "click": {"type": "point", "x": cx, "y": cy},
-                    "target": {"domain": "tile", "name": f"{tile['worldX']},{tile['worldY']}"},
-                    "preconditions": [], "postconditions": [], "confidence": 0.9
-                }]
-            }
+    def _line_to(self, x0: int, y0: int, x1: int, y1: int, max_steps: int = 14):
+        """
+        Integer grid line from (x0,y0) to (x1,y1), up to max_steps ahead (not including start).
+        Classic Bresenham; returns a list of (x,y) points along the path.
+        """
+        points = []
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1 if x0 > x1 else 0
+        sy = 1 if y0 < y1 else -1 if y0 > y1 else 0
+        x, y = x0, y0
+
+        if dx >= dy:
+            err = dx // 2
+            for _ in range(max_steps):
+                if x == x1 and y == y1:
+                    break
+                x += sx
+                err -= dy
+                if err < 0:
+                    y += sy
+                    err += dx
+                points.append((x, y))
+        else:
+            err = dy // 2
+            for _ in range(max_steps):
+                if x == x1 and y == y1:
+                    break
+                y += sy
+                err -= dx
+                if err < 0:
+                    x += sx
+                    err += dy
+                points.append((x, y))
+        return points
+
+    def _pick_tile_toward_ge(self, payload: dict) -> dict | None:
+        me = (payload.get("player") or {})
+        tiles = payload.get("tiles_15x15") or []
+
+        try:
+            wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
+        except Exception:
+            return None
+
+        # target = GE center (from constants)
+        gx, gy = self._ge_center()
+
+        # Build a fast lookup for available tiles by world coord
+        # Keep only tiles that have canvas coords (clickable now)
+        by_world = {}
+        for t in tiles:
+            try:
+                tx, ty = int(t.get("worldX")), int(t.get("worldY"))
+                cx, cy = t.get("canvasX"), t.get("canvasY")
+            except Exception:
+                continue
+            if isinstance(cx, int) and isinstance(cy, int):
+                by_world[(tx, ty)] = t
+
+        # Walk the straight line from player to GE center (up to 14 steps ahead),
+        # pick the FARTHEST point along that line that actually exists in tiles_15x15.
+        path = self._line_to(wx, wy, gx, gy, max_steps=14)
+        pick = None
+        for pt in reversed(path):  # farthest first
+            if pt in by_world:
+                pick = by_world[pt]
+                break
+
+        return pick
+
+    def build_action_plan(self, payload: dict, phase: str) -> dict:
+        plan = {"phase": phase, "steps": []}
+
+        if phase == "Arrived at GE":
+            plan["steps"].append({
+                "action": "idle",
+                "description": "Player is inside GE region, no further movement",
+                "click": {"type": "none"},
+                "target": {"domain": "none", "name": "n/a"},
+                "preconditions": [],
+                "postconditions": [],
+                "confidence": 1.0
+            })
+            return plan
+
+        if phase != "Moving to GE":
+            plan["steps"].append({
+                "action": "idle",
+                "description": "No actionable step",
+                "click": {"type": "none"},
+                "target": {"domain": "none", "name": "n/a"},
+                "preconditions": [],
+                "postconditions": [],
+                "confidence": 0.0
+            })
+            return plan
+
+        pick = self._pick_tile_toward_ge(payload)
+        if pick:
+            # player + GE center (for debug visibility)
+            me = (payload.get("player") or {})
+            wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
+            gx, gy = self._ge_center()
+
+            cx, cy = int(pick["canvasX"]), int(pick["canvasY"])
+            tx, ty = int(pick.get("worldX", 0)), int(pick.get("worldY", 0))
+            plane = int(pick.get("plane", 0))
+
+            plan["steps"].append({
+                "action": "click-ground",
+                # keep description short; the GE center is surfaced in the target name for the UI
+                "description": f"toward GE center {gx},{gy} from {wx},{wy}",
+                "click": {"type": "point", "x": cx, "y": cy},
+                "target": {
+                    "domain": "ground",
+                    # ↓↓↓ This shows up in the Next Action row: "<action> → <name> @ (x,y)"
+                    "name": f"Tile→GE_CENTER({gx},{gy})",
+                    "world": {"x": tx, "y": ty, "plane": plane},
+                    "canvas": {"x": cx, "y": cy},
+                    # optional extra debug payload if you inspect the step JSON
+                    "debug": {
+                        "player": {"x": wx, "y": wy},
+                        "ge_center": {"x": gx, "y": gy},
+                        "goal_vec": {"dx": gx - wx, "dy": gy - wy},
+                        "chosen_tile_world": {"x": tx, "y": ty, "plane": plane},
+                        "chosen_tile_canvas": {"x": cx, "y": cy},
+                    }
+                },
+                "preconditions": [],
+                "postconditions": [],
+                "confidence": 0.85
+            })
+            return plan
+
 
 # ------------- Registry & accessors -------------
 PLAN_REGISTRY: Dict[str, Plan] = {
     SapphireRingsPlan.id: SapphireRingsPlan(),
     GoldRingsPlan.id:     GoldRingsPlan(),
     EmeraldRingsPlan.id: EmeraldRingsPlan(),
+    GoToGEPlan.id:        GoToGEPlan(),
 }
 
 def get_plan(plan_id: str) -> Plan:

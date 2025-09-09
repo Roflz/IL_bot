@@ -52,3 +52,14 @@ class RuneLiteIPC:
         if delay > 0:
             time.sleep(delay / 1000.0)
         return self._send({"cmd": "key", "k": str(k)})
+
+    def project_world_tile(self, world_x: int, world_y: int, plane: int = 0) -> dict:
+        """
+        Asks the IPC plugin to project a world tile into canvas coordinates.
+        Returns dict like: {"ok":true, "x":123, "y":456, "onScreen":true}
+        If the IPC doesn't implement 'project', you'll get {"ok":false,...}.
+        """
+        try:
+            return self._send({"cmd": "project", "worldX": int(world_x), "worldY": int(world_y), "plane": int(plane)})
+        except Exception as e:
+            return {"ok": False, "err": f"{type(e).__name__}: {e}"}
