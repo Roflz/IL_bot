@@ -235,7 +235,7 @@ class SimpleRecorderWindow(ttk.Frame):
         from .action_plans import PLAN_REGISTRY  # top-level import is also fine
         plan_names = [("SAPPHIRE_RINGS", "Sapphire Rings"), ("GOLD_RINGS", "Gold Rings"), ("EMERALD_RINGS", "Emerald Rings"), ("GO_TO_GE", "Go to GE"),
                       ("OPEN_GE_BANK", "GE: Open Bank"), ("GE_WITHDRAW_NOTED_RINGS", "GE: Withdraw Rings (notes)"), ("OPEN_GE_EXCHANGE", "GE: Open Exchange"),
-                      ("GE_SELL_BUY", "GE: Sell Rings & Buy Mats"),
+                      ("GE_SELL_BUY", "GE: Sell Rings & Buy Mats"), ("GO_TO_EDGE_BANK", "Go to Edgeville"),
 ]
         self.plan_combo = ttk.Combobox(
             planf,

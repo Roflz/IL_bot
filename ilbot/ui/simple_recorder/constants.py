@@ -18,3 +18,9 @@ GE_MIN_X = 3155
 GE_MAX_X = 3173
 GE_MIN_Y = 3479
 GE_MAX_Y = 3498
+
+# Edgeville Bank bounding box (world coordinates)
+EDGE_BANK_MIN_X = 3092
+EDGE_BANK_MAX_X = 3098
+EDGE_BANK_MIN_Y = 3488
+EDGE_BANK_MAX_Y = 3498

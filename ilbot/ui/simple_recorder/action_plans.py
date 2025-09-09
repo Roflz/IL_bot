@@ -7,6 +7,12 @@ from .constants import GE_MIN_X, GE_MAX_X, GE_MIN_Y, GE_MAX_Y
 # --- tiny in-process memory to advance steps even when the plugin doesn't see IPC clicks ---
 import time
 
+from .constants import (
+    GE_MIN_X, GE_MAX_X, GE_MIN_Y, GE_MAX_Y,
+    EDGE_BANK_MIN_X, EDGE_BANK_MAX_X, EDGE_BANK_MIN_Y, EDGE_BANK_MAX_Y,
+)
+
+
 _STEP_HITS: dict[str, int] = {}
 
 # --- GE helpers ---
@@ -2119,6 +2125,183 @@ class GETradePlan(Plan):
                 return w
         return None
 
+class GoToEdgevilleBankPlan(Plan):
+    """
+    Chooses a ground tile from tiles_15x15 that best advances the player toward the
+    Edgeville bank region, and clicks it using the tile's canvas coordinates.
+    """
+    id = "GO_TO_EDGE_BANK"
+    label = "Go to Edgeville Bank"
+
+    # -------------------- PHASE LOGIC --------------------
+    def compute_phase(self, payload: dict, craft_recent: bool) -> str:
+        me = (payload.get("player") or {})
+        tiles = payload.get("tiles_15x15") or []
+        if not me or not tiles:
+            return "No Player/Tiles"
+
+        try:
+            wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
+        except Exception:
+            return "No Player/Tiles"
+
+        # Inside Edgeville bank region?
+        if EDGE_BANK_MIN_X <= wx <= EDGE_BANK_MAX_X and EDGE_BANK_MIN_Y <= wy <= EDGE_BANK_MAX_Y:
+            return "Arrived at Bank"
+
+        return "Moving to Bank"
+
+    # -------------------- HELPERS --------------------
+    def _edge_bank_center(self) -> tuple[int, int]:
+        # Center of the Edgeville bank region from constants.py
+        bx = (EDGE_BANK_MIN_X + EDGE_BANK_MAX_X) // 2
+        by = (EDGE_BANK_MIN_Y + EDGE_BANK_MAX_Y) // 2
+        return bx, by
+
+    def _line_to(self, x0: int, y0: int, x1: int, y1: int, max_steps: int = 14):
+        """
+        Integer grid line from (x0,y0) to (x1,y1), up to max_steps ahead (not including start).
+        Classic Bresenham; returns a list of (x,y) points along the path.
+        """
+        points = []
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1 if x0 > x1 else 0
+        sy = 1 if y0 < y1 else -1 if y0 > y1 else 0
+        x, y = x0, y0
+
+        if dx >= dy:
+            err = dx // 2
+            for _ in range(max_steps):
+                if x == x1 and y == y1:
+                    break
+                x += sx
+                err -= dy
+                if err < 0:
+                    y += sy
+                    err += dx
+                points.append((x, y))
+        else:
+            err = dy // 2
+            for _ in range(max_steps):
+                if x == x1 and y == y1:
+                    break
+                y += sy
+                err -= dx
+                if err < 0:
+                    x += sx
+                    err += dy
+                points.append((x, y))
+        return points
+
+    def _pick_tile_toward_edge(self, payload: dict) -> dict | None:
+        me = (payload.get("player") or {})
+        tiles = payload.get("tiles_15x15") or []
+
+        try:
+            wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
+        except Exception:
+            return None
+
+        # target = Edgeville bank center (from constants)
+        bx, by = self._edge_bank_center()
+
+        # Build a lookup of clickable tiles (must have canvas coords)
+        by_world = {}
+        for t in tiles:
+            try:
+                tx, ty = int(t.get("worldX")), int(t.get("worldY"))
+                cx, cy = t.get("canvasX"), t.get("canvasY")
+            except Exception:
+                continue
+            if isinstance(cx, int) and isinstance(cy, int):
+                by_world[(tx, ty)] = t
+
+        # Walk straight line toward bank center, pick the farthest visible tile
+        path = self._line_to(wx, wy, bx, by, max_steps=14)
+        pick = None
+        for pt in reversed(path):  # farthest first
+            if pt in by_world:
+                pick = by_world[pt]
+                break
+
+        return pick
+
+    # -------------------- ACTION BUILDER --------------------
+    def build_action_plan(self, payload: dict, phase: str) -> dict:
+        plan = {"phase": phase, "steps": []}
+
+        if phase == "Arrived at Bank":
+            plan["steps"].append({
+                "action": "idle",
+                "description": "Player is inside Edgeville bank region",
+                "click": {"type": "none"},
+                "target": {"domain": "none", "name": "n/a"},
+                "preconditions": [],
+                "postconditions": [],
+                "confidence": 1.0
+            })
+            return plan
+
+        if phase != "Moving to Bank":
+            plan["steps"].append({
+                "action": "idle",
+                "description": "No actionable step",
+                "click": {"type": "none"},
+                "target": {"domain": "none", "name": "n/a"},
+                "preconditions": [],
+                "postconditions": [],
+                "confidence": 0.0
+            })
+            return plan
+
+        pick = self._pick_tile_toward_edge(payload)
+        if pick:
+            # Debug context
+            me = (payload.get("player") or {})
+            wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
+            bx, by = self._edge_bank_center()
+
+            cx, cy = int(pick["canvasX"]), int(pick["canvasY"])
+            tx, ty = int(pick.get("worldX", 0)), int(pick.get("worldY", 0))
+            plane = int(pick.get("plane", 0))
+
+            plan["steps"].append({
+                "action": "click-ground",
+                "description": f"toward Edge bank {bx},{by} from {wx},{wy}",
+                "click": {"type": "point", "x": cx, "y": cy},
+                "target": {
+                    "domain": "ground",
+                    "name": f"Tile→EDGE_BANK({bx},{by})",
+                    "world": {"x": tx, "y": ty, "plane": plane},
+                    "canvas": {"x": cx, "y": cy},
+                    "debug": {
+                        "player": {"x": wx, "y": wy},
+                        "edge_bank_center": {"x": bx, "y": by},
+                        "goal_vec": {"dx": bx - wx, "dy": by - wy},
+                        "chosen_tile_world": {"x": tx, "y": ty, "plane": plane},
+                        "chosen_tile_canvas": {"x": cx, "y": cy},
+                    }
+                },
+                "preconditions": [],
+                "postconditions": [],
+                "confidence": 0.85
+            })
+            return plan
+
+        # No reachable tile on this tick
+        plan["steps"].append({
+            "action": "idle",
+            "description": "No clickable tile toward Edgeville bank on this tick",
+            "click": {"type": "none"},
+            "target": {"domain": "none", "name": "n/a"},
+            "preconditions": [],
+            "postconditions": [],
+            "confidence": 0.0
+        })
+        return plan
+
+
 
 # ------------- Registry & accessors -------------
 PLAN_REGISTRY: Dict[str, Plan] = {
@@ -2130,6 +2313,7 @@ PLAN_REGISTRY: Dict[str, Plan] = {
     GEWithdrawRingsAsNotesPlan.id: GEWithdrawRingsAsNotesPlan(),
     OpenGEExchangePlan.id: OpenGEExchangePlan(),
     GETradePlan.id: GETradePlan(),
+    GoToEdgevilleBankPlan.id: GoToEdgevilleBankPlan(),
 }
 
 def get_plan(plan_id: str) -> Plan:
