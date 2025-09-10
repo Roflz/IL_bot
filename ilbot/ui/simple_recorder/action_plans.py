@@ -1,11 +1,13 @@
 # action_plans.py
+import random
 import re
 from typing import Dict, Callable
 from .nav_simple import next_tile_toward
 from .constants import GE_MIN_X, GE_MAX_X, GE_MIN_Y, GE_MAX_Y
 
 # --- tiny in-process memory to advance steps even when the plugin doesn't see IPC clicks ---
-import time
+import socket, json, time
+from typing import List, Dict, Any, Tuple, Optional
 
 from .constants import (
     GE_MIN_X, GE_MAX_X, GE_MIN_Y, GE_MAX_Y,
@@ -14,6 +16,257 @@ from .constants import (
 
 
 _STEP_HITS: dict[str, int] = {}
+
+# ----------------------------------------------------------------------
+# IPC helpers
+# ----------------------------------------------------------------------
+def _ipc_path(
+    payload: dict,
+    *,
+    rect: Optional[Tuple[int, int, int, int]] = None,   # (minx, maxx, miny, maxy)
+    goal: Optional[Tuple[int, int]] = None,             # (gx, gy)
+    max_wps: int = 20,
+) -> Tuple[List[Dict[str, int]], dict]:
+    """
+    Ask the IPC plugin (unified 'path' endpoint) for consecutive waypoints.
+    Returns (waypoints, debug).
+    """
+    if rect is None and goal is None:
+        return [], {"err": "no rect/goal provided"}
+
+    if rect is not None:
+        minx, maxx, miny, maxy = rect
+        req = {"cmd": "path", "minX": minx, "maxX": maxx, "minY": miny, "maxY": maxy, "maxWps": int(max_wps)}
+    else:
+        gx, gy = goal
+        req = {"cmd": "path", "goalX": int(gx), "goalY": int(gy), "maxWps": int(max_wps)}
+
+    resp = _ipc_send(payload, req)
+    dbg = {"ipc_req": req, "ipc_resp": resp}
+    if not resp or not resp.get("ok"):
+        return [], dbg
+
+    wps = resp.get("waypoints") or []
+    # Defensive: ensure dicts with ints
+    out = []
+    for w in wps:
+        try:
+            out.append({"x": int(w["x"]), "y": int(w["y"]), "p": int(w.get("p", 0))})
+        except Exception:
+            continue
+    return out, dbg
+
+def _ipc_project_many(payload: dict, tiles_w: List[Dict[str, int]]) -> Tuple[List[Dict[str, Any]], dict]:
+    """
+    Batch project world tiles to canvas using tilexy_many.
+    Returns (list_of_results, debug). Each result ≈
+      {"world":{"x":..,"y":..,"p":..}, "projection":{...}, "canvas":{"x":..,"y":..}} when onscreen.
+    """
+    if not tiles_w:
+        return [], {"warn": "no tiles to project"}
+
+    req = {"cmd": "tilexy_many", "tiles": [{"x": int(t["x"]), "y": int(t["y"])} for t in tiles_w]}
+    resp = _ipc_send(payload, req)
+    dbg = {"ipc_req": req, "ipc_resp": resp}
+
+    out: List[Dict[str, Any]] = []
+    results = (resp or {}).get("results") or []
+    for t, r in zip(tiles_w, results):
+        item = {"world": {"x": t["x"], "y": t["y"], "p": t.get("p", 0)}, "projection": r}
+        if r and r.get("ok") and r.get("onscreen") and isinstance(r.get("canvas"), dict):
+            item["canvas"] = {"x": int(r["canvas"]["x"]), "y": int(r["canvas"]["y"])}
+        out.append(item)
+    return out, dbg
+
+import random
+
+def _ipc_walk_click_steps(
+    payload: dict,
+    label: str,
+    *,
+    rect: Optional[Tuple[int, int, int, int]] = None,
+    goal: Optional[Tuple[int, int]] = None,
+    max_wps: int = 20,
+    click_error_range: int = 5,   # choose among the last N onscreen points
+) -> Tuple[List[dict], dict]:
+    """
+    Ask plugin for path (rect or goal), project to canvas, and return one click step
+    aiming near the farthest onscreen waypoint. (One click per tick.)
+    """
+    # 1) Waypoints (consecutive) from unified 'path'
+    wps, dbg1 = _ipc_path(payload, rect=rect, goal=goal, max_wps=max_wps)
+    if not wps:
+        return [], {"label": label, "dbg_path": dbg1, "warn": "no-waypoints"}
+
+    # 2) Project those waypoints
+    proj, dbg2 = _ipc_project_many(payload, wps)
+    usable = [p for p in proj if "canvas" in p]
+
+    if not usable:
+        return [], {
+            "label": label,
+            "dbg_path": dbg1,
+            "dbg_proj": dbg2,
+            "warn": "no-onscreen-waypoints"
+        }
+
+    # 3) Prefer farthest-along onscreen; add slight randomness within last K
+    k = max(1, int(click_error_range))
+    pick_pool = usable[-k:] if len(usable) >= k else usable
+    chosen = random.choice(pick_pool)
+
+    cx, cy = chosen["canvas"]["x"], chosen["canvas"]["y"]
+    wx, wy, pl = chosen["world"]["x"], chosen["world"]["y"], chosen["world"]["p"]
+
+    steps: List[dict] = [{
+        "action": "click-ground",
+        "description": f"{label} via IPC path",
+        "click": {"type": "point", "x": cx, "y": cy},
+        "target": {
+            "domain": "ground",
+            "name": f"{label} waypoint",
+            "world": {"x": wx, "y": wy, "plane": pl},
+            "canvas": {"x": cx, "y": cy},
+        },
+        "preconditions": [],
+        "postconditions": [],
+        "confidence": 0.93,
+    }]
+
+    debug = {
+        "label": label,
+        "wps_count": len(wps),
+        "proj_count": len(proj),
+        "onscreen_count": len(usable),
+        "chosen_world": {"x": wx, "y": wy, "p": pl},
+        "chosen_canvas": {"x": cx, "y": cy},
+        "dbg_path": dbg1,
+        "dbg_proj": dbg2,
+    }
+    return steps, debug
+
+
+def _ipc_port_from_payload(payload: dict, default: int = 17000) -> int:
+    # Try a few places where you may have stored the port
+    return (payload.get("ipc_port")
+            or (payload.get("ipc") or {}).get("port")
+            or default)
+
+def _ipc_send(payload: dict, msg: dict, timeout: float = 0.35) -> Optional[dict]:
+    """
+    Send a single-line JSON command to the IPC Input plugin and return parsed JSON.
+    Returns None on connection/parse errors.
+    """
+    host = "127.0.0.1"
+    port = _ipc_port_from_payload(payload)
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            line = json.dumps(msg, separators=(",", ":"))
+            s.sendall((line + "\n").encode("utf-8"))
+            data = b""
+            # Read just one line (plugin replies with one JSON line)
+            while True:
+                ch = s.recv(1)
+                if not ch:
+                    break
+                if ch == b"\n":
+                    break
+                data += ch
+            if not data:
+                return None
+            return json.loads(data.decode("utf-8"))
+    except Exception as e:
+        # Keep it quiet at runtime; your UI can surface this in plan debug
+        return None
+
+
+# --- add near other helpers in action_plans.py ---
+def _project_many(payload: dict, world_tiles: list[tuple[int,int]]) -> list[dict]:
+    ipc = payload.get("__ipc")
+    if not ipc or not world_tiles:
+        return []
+    req = {"cmd": "tilexy_many", "tiles": [{"x": int(x), "y": int(y)} for (x,y) in world_tiles]}
+    try:
+        resp = ipc._send(req) or {}
+    except Exception:
+        return []
+    out = []
+    for (wx,wy), r in zip(world_tiles, resp.get("results") or []):
+        if r and r.get("ok") and r.get("onscreen"):
+            c = r.get("canvas") or {}
+            if isinstance(c.get("x"), int) and isinstance(c.get("y"), int):
+                out.append({"world": (wx,wy), "canvas": (c["x"], c["y"])})
+    return out
+
+
+from heapq import heappush, heappop
+
+def _ipc_mask(payload: dict, radius: int = 15) -> dict | None:
+    ipc = payload.get("__ipc")
+    if not ipc:
+        return None
+    try:
+        m = ipc._send({"cmd": "mask", "radius": int(radius)})
+        return m if isinstance(m, dict) and m.get("ok") else None
+    except Exception:
+        return None
+
+def _astar_on_rows(rows: list[str], start_rc: tuple[int,int], goal_rc: tuple[int,int]) -> list[tuple[int,int]]:
+    # rows[0] is northmost, columns left->right; r,c are indices into rows
+    R, C = len(rows), len(rows[0]) if rows else 0
+    def walkable(r,c): return 0 <= r < R and 0 <= c < C and rows[r][c] == '.'
+    sr, sc = start_rc; gr, gc = goal_rc
+    if not (walkable(sr,sc) and 0 <= gr < R and 0 <= gc < C): return []
+    # If goal blocked, search for nearest walkable in 3×3 then 5×5; else clamp later
+    if not walkable(gr,gc):
+        found = None
+        for rad in (1,2,3):
+            for rr in range(gr-rad, gr+rad+1):
+                for cc in range(gc-rad, gc+rad+1):
+                    if walkable(rr,cc): found = (rr,cc); break
+                if found: break
+            if found: break
+        if found: gr,gc = found
+
+    openh = []; heappush(openh, (0, (sr,sc)))
+    came = { (sr,sc): None }
+    gscore = { (sr,sc): 0 }
+    def h(r,c): return abs(r-gr)+abs(c-gc)
+    while openh:
+        _, (r,c) = heappop(openh)
+        if (r,c) == (gr,gc): break
+        for dr,dc in ((1,0),(-1,0),(0,1),(0,-1)):
+            nr, nc = r+dr, c+dc
+            if not walkable(nr,nc): continue
+            ng = gscore[(r,c)] + 1
+            if ng < gscore.get((nr,nc), 1e9):
+                gscore[(nr,nc)] = ng
+                came[(nr,nc)] = (r,c)
+                heappush(openh, (ng + h(nr,nc), (nr,nc)))
+    if (gr,gc) not in came: return []
+    # Reconstruct
+    path = []
+    cur = (gr,gc)
+    while cur is not None:
+        path.append(cur)
+        cur = came.get(cur)
+    path.reverse()
+    return path
+
+def _rows_to_world(mask: dict, rc_path: list[tuple[int,int]]) -> list[tuple[int,int]]:
+    """Map mask row/col indices back to world x,y."""
+    if not rc_path: return []
+    radius = int(mask["radius"])
+    origin = mask["origin"]; wx0, wy0 = int(origin["x"]), int(origin["y"])
+    # rows indexing: r=0 is wy0+radius (north), c=0 is wx0-radius (west)
+    out = []
+    for r,c in rc_path:
+        wx = (wx0 - radius) + c
+        wy = (wy0 + radius) - r
+        out.append((wx, wy))
+    return out
+
 
 # --- GE helpers ---
 def _ge_open(payload: dict) -> bool:
@@ -1089,170 +1342,6 @@ class EmeraldRingsPlan(Plan):
         })
         return plan
 
-class GoToGEPlan(Plan):
-    """
-    Chooses a ground tile from tiles_15x15 that best advances the player toward the
-    Grand Exchange world coords, and clicks it using the tile's canvas coordinates.
-    """
-    id = "GO_TO_GE"
-    label = "Go to GE"
-
-    def compute_phase(self, payload: dict, craft_recent: bool) -> str:
-        me = (payload.get("player") or {})
-        tiles = payload.get("tiles_15x15") or []
-        if not me or not tiles:
-            return "No GE/Player/Tiles"
-
-        wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
-
-        # Check if inside GE region
-        if GE_MIN_X <= wx <= GE_MAX_X and GE_MIN_Y <= wy <= GE_MAX_Y:
-            return "Arrived at GE"
-
-        return "Moving to GE"
-
-    # inside GoToGEPlan
-    def _ge_center(self) -> tuple[int, int]:
-        # Center of the GE region from constants.py
-        gx = (GE_MIN_X + GE_MAX_X) // 2
-        gy = (GE_MIN_Y + GE_MAX_Y) // 2
-        return gx, gy
-
-    def _line_to(self, x0: int, y0: int, x1: int, y1: int, max_steps: int = 14):
-        """
-        Integer grid line from (x0,y0) to (x1,y1), up to max_steps ahead (not including start).
-        Classic Bresenham; returns a list of (x,y) points along the path.
-        """
-        points = []
-        dx = abs(x1 - x0)
-        dy = abs(y1 - y0)
-        sx = 1 if x0 < x1 else -1 if x0 > x1 else 0
-        sy = 1 if y0 < y1 else -1 if y0 > y1 else 0
-        x, y = x0, y0
-
-        if dx >= dy:
-            err = dx // 2
-            for _ in range(max_steps):
-                if x == x1 and y == y1:
-                    break
-                x += sx
-                err -= dy
-                if err < 0:
-                    y += sy
-                    err += dx
-                points.append((x, y))
-        else:
-            err = dy // 2
-            for _ in range(max_steps):
-                if x == x1 and y == y1:
-                    break
-                y += sy
-                err -= dx
-                if err < 0:
-                    x += sx
-                    err += dy
-                points.append((x, y))
-        return points
-
-    def _pick_tile_toward_ge(self, payload: dict) -> dict | None:
-        me = (payload.get("player") or {})
-        tiles = payload.get("tiles_15x15") or []
-
-        try:
-            wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
-        except Exception:
-            return None
-
-        # target = GE center (from constants)
-        gx, gy = self._ge_center()
-
-        # Build a fast lookup for available tiles by world coord
-        # Keep only tiles that have canvas coords (clickable now)
-        by_world = {}
-        for t in tiles:
-            try:
-                tx, ty = int(t.get("worldX")), int(t.get("worldY"))
-                cx, cy = t.get("canvasX"), t.get("canvasY")
-            except Exception:
-                continue
-            if isinstance(cx, int) and isinstance(cy, int):
-                by_world[(tx, ty)] = t
-
-        # Walk the straight line from player to GE center (up to 14 steps ahead),
-        # pick the FARTHEST point along that line that actually exists in tiles_15x15.
-        path = self._line_to(wx, wy, gx, gy, max_steps=14)
-        pick = None
-        for pt in reversed(path):  # farthest first
-            if pt in by_world:
-                pick = by_world[pt]
-                break
-
-        return pick
-
-    def build_action_plan(self, payload: dict, phase: str) -> dict:
-        plan = {"phase": phase, "steps": []}
-
-        if phase == "Arrived at GE":
-            plan["steps"].append({
-                "action": "idle",
-                "description": "Player is inside GE region, no further movement",
-                "click": {"type": "none"},
-                "target": {"domain": "none", "name": "n/a"},
-                "preconditions": [],
-                "postconditions": [],
-                "confidence": 1.0
-            })
-            return plan
-
-        if phase != "Moving to GE":
-            plan["steps"].append({
-                "action": "idle",
-                "description": "No actionable step",
-                "click": {"type": "none"},
-                "target": {"domain": "none", "name": "n/a"},
-                "preconditions": [],
-                "postconditions": [],
-                "confidence": 0.0
-            })
-            return plan
-
-        pick = self._pick_tile_toward_ge(payload)
-        if pick:
-            # player + GE center (for debug visibility)
-            me = (payload.get("player") or {})
-            wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
-            gx, gy = self._ge_center()
-
-            cx, cy = int(pick["canvasX"]), int(pick["canvasY"])
-            tx, ty = int(pick.get("worldX", 0)), int(pick.get("worldY", 0))
-            plane = int(pick.get("plane", 0))
-
-            plan["steps"].append({
-                "action": "click-ground",
-                # keep description short; the GE center is surfaced in the target name for the UI
-                "description": f"toward GE center {gx},{gy} from {wx},{wy}",
-                "click": {"type": "point", "x": cx, "y": cy},
-                "target": {
-                    "domain": "ground",
-                    # ↓↓↓ This shows up in the Next Action row: "<action> → <name> @ (x,y)"
-                    "name": f"Tile→GE_CENTER({gx},{gy})",
-                    "world": {"x": tx, "y": ty, "plane": plane},
-                    "canvas": {"x": cx, "y": cy},
-                    # optional extra debug payload if you inspect the step JSON
-                    "debug": {
-                        "player": {"x": wx, "y": wy},
-                        "ge_center": {"x": gx, "y": gy},
-                        "goal_vec": {"dx": gx - wx, "dy": gy - wy},
-                        "chosen_tile_world": {"x": tx, "y": ty, "plane": plane},
-                        "chosen_tile_canvas": {"x": cx, "y": cy},
-                    }
-                },
-                "preconditions": [],
-                "postconditions": [],
-                "confidence": 0.85
-            })
-            return plan
-
 class OpenGEBankPlan(Plan):
     id = "OPEN_GE_BANK"
     label = "GE: Open Bank"
@@ -2125,88 +2214,61 @@ class GETradePlan(Plan):
                 return w
         return None
 
-class GoToEdgevilleBankPlan(Plan):
+class GoToGEPlan(Plan):
     """
-    Chooses a ground tile from tiles_15x15 that best advances the player toward the
-    Edgeville bank region, and clicks it using the tile's canvas coordinates.
+    Walk to the GE using collision-aware IPC path if available,
+    else fall back to farthest-visible Bresenham tile from tiles_15x15.
     """
-    id = "GO_TO_EDGE_BANK"
-    label = "Go to Edgeville Bank"
+    id = "GO_TO_GE"
+    label = "Go to GE"
 
-    # -------------------- PHASE LOGIC --------------------
     def compute_phase(self, payload: dict, craft_recent: bool) -> str:
         me = (payload.get("player") or {})
         tiles = payload.get("tiles_15x15") or []
         if not me or not tiles:
-            return "No Player/Tiles"
+            return "No GE/Player/Tiles"
+        wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
+        if GE_MIN_X <= wx <= GE_MAX_X and GE_MIN_Y <= wy <= GE_MAX_Y:
+            return "Arrived at GE"
+        return "Moving to GE"
 
-        try:
-            wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
-        except Exception:
-            return "No Player/Tiles"
+    def _ge_center(self) -> tuple[int, int]:
+        gx = (GE_MIN_X + GE_MAX_X) // 2
+        gy = (GE_MIN_Y + GE_MAX_Y) // 2
+        return gx, gy
 
-        # Inside Edgeville bank region?
-        if EDGE_BANK_MIN_X <= wx <= EDGE_BANK_MAX_X and EDGE_BANK_MIN_Y <= wy <= EDGE_BANK_MAX_Y:
-            return "Arrived at Bank"
-
-        return "Moving to Bank"
-
-    # -------------------- HELPERS --------------------
-    def _edge_bank_center(self) -> tuple[int, int]:
-        # Center of the Edgeville bank region from constants.py
-        bx = (EDGE_BANK_MIN_X + EDGE_BANK_MAX_X) // 2
-        by = (EDGE_BANK_MIN_Y + EDGE_BANK_MAX_Y) // 2
-        return bx, by
-
+    # Fallback only (kept short)
     def _line_to(self, x0: int, y0: int, x1: int, y1: int, max_steps: int = 14):
-        """
-        Integer grid line from (x0,y0) to (x1,y1), up to max_steps ahead (not including start).
-        Classic Bresenham; returns a list of (x,y) points along the path.
-        """
         points = []
-        dx = abs(x1 - x0)
-        dy = abs(y1 - y0)
+        dx = abs(x1 - x0); dy = abs(y1 - y0)
         sx = 1 if x0 < x1 else -1 if x0 > x1 else 0
         sy = 1 if y0 < y1 else -1 if y0 > y1 else 0
         x, y = x0, y0
-
         if dx >= dy:
             err = dx // 2
             for _ in range(max_steps):
-                if x == x1 and y == y1:
-                    break
-                x += sx
-                err -= dy
-                if err < 0:
-                    y += sy
-                    err += dx
+                if x == x1 and y == y1: break
+                x += sx; err -= dy
+                if err < 0: y += sy; err += dx
                 points.append((x, y))
         else:
             err = dy // 2
             for _ in range(max_steps):
-                if x == x1 and y == y1:
-                    break
-                y += sy
-                err -= dx
-                if err < 0:
-                    x += sx
-                    err += dy
+                if x == x1 and y == y1: break
+                y += sy; err -= dx
+                if err < 0: x += sx; err += dy
                 points.append((x, y))
         return points
 
-    def _pick_tile_toward_edge(self, payload: dict) -> dict | None:
+    def _pick_tile_visible_line(self, payload: dict) -> dict | None:
         me = (payload.get("player") or {})
         tiles = payload.get("tiles_15x15") or []
-
         try:
             wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
         except Exception:
             return None
+        gx, gy = self._ge_center()
 
-        # target = Edgeville bank center (from constants)
-        bx, by = self._edge_bank_center()
-
-        # Build a lookup of clickable tiles (must have canvas coords)
         by_world = {}
         for t in tiles:
             try:
@@ -2217,17 +2279,150 @@ class GoToEdgevilleBankPlan(Plan):
             if isinstance(cx, int) and isinstance(cy, int):
                 by_world[(tx, ty)] = t
 
-        # Walk straight line toward bank center, pick the farthest visible tile
-        path = self._line_to(wx, wy, bx, by, max_steps=14)
-        pick = None
-        for pt in reversed(path):  # farthest first
+        path = self._line_to(wx, wy, gx, gy, max_steps=14)
+        for pt in reversed(path):
             if pt in by_world:
-                pick = by_world[pt]
-                break
+                return by_world[pt]
+        return None
 
-        return pick
+    def build_action_plan(self, payload: dict, phase: str) -> dict:
+        plan = {"phase": phase, "steps": []}
 
-    # -------------------- ACTION BUILDER --------------------
+        if phase == "Arrived at GE":
+            plan["steps"].append({
+                "action": "idle",
+                "description": "Player is inside GE region, no further movement",
+                "click": {"type": "none"},
+                "target": {"domain": "none", "name": "n/a"},
+                "preconditions": [], "postconditions": [], "confidence": 1.0
+            })
+            return plan
+
+        if phase != "Moving to GE":
+            plan["steps"].append({
+                "action": "idle",
+                "description": "No actionable step",
+                "click": {"type": "none"},
+                "target": {"domain": "none", "name": "n/a"},
+                "preconditions": [], "postconditions": [], "confidence": 0.0
+            })
+            return plan
+
+        # Preferred: collision-aware path from IPC to GE rect
+        steps, dbg = _ipc_walk_click_steps(
+            payload, "GE",
+            rect=(GE_MIN_X, GE_MAX_X, GE_MIN_Y, GE_MAX_Y),
+        )
+        if steps:
+            plan["steps"].extend(steps)
+            plan["debug"] = {"ipc_nav": dbg}
+            return plan
+
+        # Fallback: straight-line farthest visible tile (legacy)
+        pick = self._pick_tile_visible_line(payload)
+        if pick:
+            cx, cy = int(pick["canvasX"]), int(pick["canvasY"])
+            tx, ty = int(pick.get("worldX", 0)), int(pick.get("worldY", 0))
+            gx, gy = self._ge_center()
+            plan["steps"].append({
+                "action": "click-ground",
+                "description": f"toward GE center {gx},{gy}",
+                "click": {"type": "point", "x": cx, "y": cy},
+                "target": {
+                    "domain": "ground",
+                    "name": f"Tile→GE_CENTER({gx},{gy})",
+                    "world": {"x": tx, "y": ty, "plane": int((payload.get('player') or {}).get('plane', 0))},
+                    "canvas": {"x": cx, "y": cy}
+                },
+                "preconditions": [], "postconditions": [], "confidence": 0.75
+            })
+            return plan
+
+        plan["steps"].append({
+            "action": "idle",
+            "description": "No IPC/visible path on this tick",
+            "click": {"type": "none"},
+            "target": {"domain": "none", "name": "n/a"},
+            "preconditions": [], "postconditions": [], "confidence": 0.0
+        })
+        plan["debug"] = {"ipc_nav": dbg}
+        return plan
+
+
+class GoToEdgevilleBankPlan(Plan):
+    """
+    Walk to Edgeville bank using collision-aware IPC path if available,
+    else fall back to farthest-visible Bresenham tile from tiles_15x15.
+    """
+    id = "GO_TO_EDGE_BANK"
+    label = "Go to Edgeville Bank"
+
+    def compute_phase(self, payload: dict, craft_recent: bool) -> str:
+        me = (payload.get("player") or {})
+        tiles = payload.get("tiles_15x15") or []
+        if not me or not tiles:
+            return "No Player/Tiles"
+        try:
+            wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
+        except Exception:
+            return "No Player/Tiles"
+        if EDGE_BANK_MIN_X <= wx <= EDGE_BANK_MAX_X and EDGE_BANK_MIN_Y <= wy <= EDGE_BANK_MAX_Y:
+            return "Arrived at Bank"
+        return "Moving to Bank"
+
+    def _edge_bank_center(self) -> tuple[int, int]:
+        bx = (EDGE_BANK_MIN_X + EDGE_BANK_MAX_X) // 2
+        by = (EDGE_BANK_MIN_Y + EDGE_BANK_MAX_Y) // 2
+        return bx, by
+
+    # Fallback only (kept short)
+    def _line_to(self, x0: int, y0: int, x1: int, y1: int, max_steps: int = 14):
+        points = []
+        dx = abs(x1 - x0); dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1 if x0 > x1 else 0
+        sy = 1 if y0 < y1 else -1 if y0 > y1 else 0
+        x, y = x0, y0
+        if dx >= dy:
+            err = dx // 2
+            for _ in range(max_steps):
+                if x == x1 and y == y1: break
+                x += sx; err -= dy
+                if err < 0: y += sy; err += dx
+                points.append((x, y))
+        else:
+            err = dy // 2
+            for _ in range(max_steps):
+                if x == x1 and y == y1: break
+                y += sy; err -= dx
+                if err < 0: x += sx; err += dy
+                points.append((x, y))
+        return points
+
+    def _pick_tile_visible_line(self, payload: dict) -> dict | None:
+        me = (payload.get("player") or {})
+        tiles = payload.get("tiles_15x15") or []
+        try:
+            wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
+        except Exception:
+            return None
+        bx, by = self._edge_bank_center()
+
+        by_world = {}
+        for t in tiles:
+            try:
+                tx, ty = int(t.get("worldX")), int(t.get("worldY"))
+                cx, cy = t.get("canvasX"), t.get("canvasY")
+            except Exception:
+                continue
+            if isinstance(cx, int) and isinstance(cy, int):
+                by_world[(tx, ty)] = t
+
+        path = self._line_to(wx, wy, bx, by, max_steps=14)
+        for pt in reversed(path):
+            if pt in by_world:
+                return by_world[pt]
+        return None
+
     def build_action_plan(self, payload: dict, phase: str) -> dict:
         plan = {"phase": phase, "steps": []}
 
@@ -2237,9 +2432,7 @@ class GoToEdgevilleBankPlan(Plan):
                 "description": "Player is inside Edgeville bank region",
                 "click": {"type": "none"},
                 "target": {"domain": "none", "name": "n/a"},
-                "preconditions": [],
-                "postconditions": [],
-                "confidence": 1.0
+                "preconditions": [], "postconditions": [], "confidence": 1.0
             })
             return plan
 
@@ -2249,59 +2442,49 @@ class GoToEdgevilleBankPlan(Plan):
                 "description": "No actionable step",
                 "click": {"type": "none"},
                 "target": {"domain": "none", "name": "n/a"},
-                "preconditions": [],
-                "postconditions": [],
-                "confidence": 0.0
+                "preconditions": [], "postconditions": [], "confidence": 0.0
             })
             return plan
 
-        pick = self._pick_tile_toward_edge(payload)
-        if pick:
-            # Debug context
-            me = (payload.get("player") or {})
-            wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
-            bx, by = self._edge_bank_center()
+        # Preferred: collision-aware path from IPC to Edgeville Bank rect
+        steps, dbg = _ipc_walk_click_steps(
+            payload, "EDGE_BANK",
+            rect=(EDGE_BANK_MIN_X, EDGE_BANK_MAX_X, EDGE_BANK_MIN_Y, EDGE_BANK_MAX_Y),
+        )
+        if steps:
+            plan["steps"].extend(steps)
+            plan["debug"] = {"ipc_nav": dbg}
+            return plan
 
+        # Fallback: straight-line farthest visible tile (legacy)
+        pick = self._pick_tile_visible_line(payload)
+        if pick:
             cx, cy = int(pick["canvasX"]), int(pick["canvasY"])
             tx, ty = int(pick.get("worldX", 0)), int(pick.get("worldY", 0))
-            plane = int(pick.get("plane", 0))
-
+            bx, by = self._edge_bank_center()
             plan["steps"].append({
                 "action": "click-ground",
-                "description": f"toward Edge bank {bx},{by} from {wx},{wy}",
+                "description": f"toward bank center {bx},{by}",
                 "click": {"type": "point", "x": cx, "y": cy},
                 "target": {
                     "domain": "ground",
                     "name": f"Tile→EDGE_BANK({bx},{by})",
-                    "world": {"x": tx, "y": ty, "plane": plane},
-                    "canvas": {"x": cx, "y": cy},
-                    "debug": {
-                        "player": {"x": wx, "y": wy},
-                        "edge_bank_center": {"x": bx, "y": by},
-                        "goal_vec": {"dx": bx - wx, "dy": by - wy},
-                        "chosen_tile_world": {"x": tx, "y": ty, "plane": plane},
-                        "chosen_tile_canvas": {"x": cx, "y": cy},
-                    }
+                    "world": {"x": tx, "y": ty, "plane": int((payload.get('player') or {}).get('plane', 0))},
+                    "canvas": {"x": cx, "y": cy}
                 },
-                "preconditions": [],
-                "postconditions": [],
-                "confidence": 0.85
+                "preconditions": [], "postconditions": [], "confidence": 0.75
             })
             return plan
 
-        # No reachable tile on this tick
         plan["steps"].append({
             "action": "idle",
-            "description": "No clickable tile toward Edgeville bank on this tick",
+            "description": "No IPC/visible path on this tick",
             "click": {"type": "none"},
             "target": {"domain": "none", "name": "n/a"},
-            "preconditions": [],
-            "postconditions": [],
-            "confidence": 0.0
+            "preconditions": [], "postconditions": [], "confidence": 0.0
         })
+        plan["debug"] = {"ipc_nav": dbg}
         return plan
-
-
 
 # ------------- Registry & accessors -------------
 PLAN_REGISTRY: Dict[str, Plan] = {

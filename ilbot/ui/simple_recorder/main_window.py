@@ -739,6 +739,31 @@ class SimpleRecorderWindow(ttk.Frame):
                 self._debug(f"_resolve_last_action error: {e}")
             self._last_click_epoch_ms = new_epoch
 
+        # Make the IPC client available to plans (collision-aware path/tilexy)
+        try:
+            port = int((self.ipc_port_var.get() or "").strip())
+        except Exception:
+            port = 0
+
+        ipc = None
+        if port > 0:
+            # Reuse a cached client if present; otherwise create it
+            if not hasattr(self, "ipc"):
+                try:
+                    self.ipc = RuneLiteIPC(port=port, pre_action_ms=PRE_ACTION_DELAY_MS, timeout_s=1.0)
+                except Exception:
+                    self.ipc = None
+            else:
+                # keep port fresh if user changed it in the UI
+                try:
+                    self.ipc.port = port
+                    self.ipc.timeout_s = 1.0
+                except Exception:
+                    pass
+            ipc = getattr(self, "ipc", None)
+
+        payload["__ipc"] = ipc
+
         # Use the persisted text (won’t disappear on later refreshes)
         last_action = self._last_action_text
 
@@ -1276,6 +1301,45 @@ class SimpleRecorderWindow(ttk.Frame):
                 if ms > 0:
                     self._debug(f"[DBG] wait {ms}ms")
                     time.sleep(ms / 1000.0)
+                mark_step_done(step.get("id"))
+                return
+
+            elif ctype == "ipc-path":
+                if not self._ensure_ipc():
+                    self._debug("[DBG] ipc-path: IPC not ready")
+                    return
+
+                goal_x = int(click.get("goalX")); goal_y = int(click.get("goalY"))
+                max_wps = int(click.get("maxWps") or 12)
+
+                # 1) ask the plugin for waypoints
+                resp = self.ipc._send({"cmd": "path", "goalX": goal_x, "goalY": goal_y, "maxWps": max_wps})
+                self._debug(f"[DBG] ipc-path request → goal=({goal_x},{goal_y}) maxWps={max_wps} resp.keys={list(resp.keys()) if isinstance(resp, dict) else type(resp)}")
+
+                if not (isinstance(resp, dict) and resp.get("ok") and isinstance(resp.get("waypoints"), list) and resp["waypoints"]):
+                    self._debug("[DBG] ipc-path: no waypoints")
+                    return
+
+                wps = resp["waypoints"]  # [{x,y,p}, ...] world coords near-to-far per plugin sampling
+                chosen = None
+                # 2) project farthest on-screen waypoint to a canvas point
+                for wp in reversed(wps):
+                    wx, wy = int(wp.get("x")), int(wp.get("y"))
+                    pl = int(wp.get("p", 0))
+                    proj = self.ipc.project_world_tile(wx, wy, pl)
+                    self._debug(f"[DBG] ipc-path project ({wx},{wy},p={pl}) -> {proj}")
+                    if isinstance(proj, dict) and proj.get("ok") and proj.get("onscreen"):
+                        chosen = {"wx": wx, "wy": wy, "pl": pl, "cx": int(proj["canvas"]["x"]), "cy": int(proj["canvas"]["y"])}
+                        break
+
+                if not chosen:
+                    self._debug("[DBG] ipc-path: no on-screen waypoint to click")
+                    return
+
+                self._debug(f"[DBG] ipc-path click → world=({chosen['wx']},{chosen['wy']},p={chosen['pl']}) canvas=({chosen['cx']},{chosen['cy']})")
+
+                self.ipc.focus()
+                self.ipc.click_canvas(chosen["cx"], chosen["cy"], button=1)
                 mark_step_done(step.get("id"))
                 return
 
@@ -2030,3 +2094,42 @@ class SimpleRecorderWindow(ttk.Frame):
 
     def _current_plan(self):
         return get_plan(self.plan_var.get())
+
+    # --- DEBUG: unified trace of click resolution ---
+    def _trace_click(self, *, phase: str, step: dict, click: dict, target: dict,
+                     px_py0=None, px_py=None, sys_xy=None, projection=None, extra: dict | None = None):
+        """
+        phase: 'pre' | 'post' | 'approach'
+        px_py0: (x,y) before _apply_canvas_offset
+        px_py:  (x,y) after _apply_canvas_offset  (canvas coords expected)
+        sys_xy: (sx,sy) system coords that will actually be clicked
+        projection: dict from ipc.project_world_tile (if any)
+        """
+        try:
+            rl = self._rl_window_rect or {}
+            mode = getattr(self, "input_mode_var", None) and self.input_mode_var.get()
+            tname = (target or {}).get("name") or (target or {}).get("domain") or "—"
+            cb = (target or {}).get("bounds") or (target or {}).get("clickbox") or {}
+            chosen = step.get("debug", {}).get("chosen_obj")
+
+            self._debug("[TRACE] ------------ click pipeline ------------")
+            self._debug(f"[TRACE] phase={phase}  planStep={step.get('id')}  action={step.get('action')}")
+            self._debug(f"[TRACE] click.type={str((click.get('type') or '')).lower()}  inputMode={mode}")
+            self._debug(
+                f"[TRACE] target={tname}  rect={{{'x':{cb.get('x')},'y':{cb.get('y')},'w':{cb.get('width')},'h':{cb.get('height')}}}}")
+            if chosen:
+                self._debug(f"[TRACE] chosen_obj={{{'name':{chosen.get('name')},'id':{chosen.get('id')}}}}")
+            if px_py0 is not None:
+                self._debug(f"[TRACE] raw_canvas={px_py0}")
+            if px_py is not None:
+                self._debug(f"[TRACE] offset_canvas={px_py}  canvas_offset={getattr(self, '_canvas_offset', None)}")
+            if sys_xy is not None:
+                self._debug(f"[TRACE] system_xy={sys_xy}  RLRect={rl}")
+            if isinstance(projection, dict):
+                self._debug(f"[TRACE] worldTile.project -> {projection}")
+            if extra:
+                for k, v in extra.items():
+                    self._debug(f"[TRACE] {k}={v}")
+            self._debug("[TRACE] ----------------------------------------")
+        except Exception as e:
+            self._debug(f"[TRACE] emit error: {type(e).__name__}: {e}")
