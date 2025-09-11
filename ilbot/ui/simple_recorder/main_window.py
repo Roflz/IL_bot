@@ -1245,6 +1245,39 @@ class SimpleRecorderWindow(ttk.Frame):
                 self._do_click_point(int(px), int(py))
                 mark_step_done(step.get("id"))
 
+            elif ctype == "scroll":
+                # amount > 0 = zoom in, amount < 0 = zoom out
+                try:
+                    amt = int(click.get("amount", 0))
+                except Exception:
+                    amt = 0
+
+                if not self._ensure_ipc():
+                    self._debug("[DBG] scroll skipped: IPC not ready")
+                    return
+
+                # Preflight (like other branches)
+                pong = self.ipc._send({"cmd": "ping"})
+                if not (isinstance(pong, dict) and pong.get("ok")):
+                    self._debug(f"[DBG] scroll preflight fail @ {getattr(self.ipc, 'port', None)}: {pong}")
+                    return
+
+                # (Optional) prove we can read camera scale before scrolling
+                try:
+                    probe = self.ipc._send({"cmd":"cameraScale"})
+                    self._debug(f"[DBG] cameraScale probe → {probe}")
+                except Exception as e:
+                    self._debug(f"[DBG] cameraScale probe error: {type(e).__name__}: {e}")
+
+                # Do the scroll
+                try:
+                    self.ipc.focus()
+                    resp = self.ipc.scroll(amt)
+                    self._debug(f"[DBG] IPC scroll amount={amt} resp={resp}")
+                    mark_step_done(step.get("id"))
+                except Exception as e:
+                    self._debug(f"[DBG] scroll error: {type(e).__name__}: {e}")
+                return
 
 
             elif ctype == "key":

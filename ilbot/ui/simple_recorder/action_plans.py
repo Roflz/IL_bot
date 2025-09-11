@@ -13,13 +13,266 @@ from .constants import (
     GE_MIN_X, GE_MAX_X, GE_MIN_Y, GE_MAX_Y,
     EDGE_BANK_MIN_X, EDGE_BANK_MAX_X, EDGE_BANK_MIN_Y, EDGE_BANK_MAX_Y,
 )
-
+from .services.ipc_client import RuneLiteIPC
 
 _STEP_HITS: dict[str, int] = {}
+# ---- Camera shared helpers ----
+_CAM_CENTER_TOL_PX = 120      # how far from center before we rotate
+_CAM_NUDGE_COOLDOWN_MS = 350  # avoid thrash
+_CAM_LAST_MS = 0
+
+_NAV_SCALE   = 500  # while moving across the map
+_INTERACT_SCALE = 650  # when interacting with bank/furnace/GE
+
+
+# Cache canvas size from IPC 'where' (lazy)
+_canvas_wh_cache = {"w": 520, "h": 350, "ok": False}  # sane defaults
 
 # ----------------------------------------------------------------------
 # IPC helpers
 # ----------------------------------------------------------------------
+def _preclick_camera_align(plan: dict, payload: dict, target_canvas: dict, tag: str) -> bool:
+    """
+    If target is off-screen or far from center, nudge camera and return True (meaning: we handled this tick).
+    Otherwise return False and the caller should proceed to enqueue the real click.
+    """
+    try:
+        cx, cy = int(target_canvas.get("x")), int(target_canvas.get("y"))
+    except Exception:
+        cx = cy = None
+
+    w, h = _get_canvas_wh(payload)
+    if not _camera_nudge_budget():
+        return False
+
+    # Off-screen? rotate one tap to try to bring it in view
+    if _offscreen(cx, cy, w, h):
+        plan["steps"].extend(_camera_rotate_to_view_steps(cx, cy, w, h))
+        plan["debug"] = {"camera": f"aim-{tag}", "offscreen": True}
+        return True
+
+    # On-screen but far from center: recentre
+    rec = _camera_recenter_steps(cx, w)
+    if rec:
+        plan["steps"].extend(rec)
+        plan["debug"] = {"camera": f"recenter-{tag}", "offscreen": False}
+        return True
+
+    return False
+
+def _get_canvas_wh(payload: dict) -> tuple[int,int]:
+    w = _canvas_wh_cache["w"]; h = _canvas_wh_cache["h"]
+    try:
+        if not _canvas_wh_cache["ok"]:
+            ipc = payload.get("__ipc")
+            if ipc:
+                r = ipc._send({"cmd": "where"}) or {}
+                if r.get("ok"):
+                    w = int(r.get("w", w)); h = int(r.get("h", h))
+                    _canvas_wh_cache.update({"w": w, "h": h, "ok": True})
+    except Exception:
+        pass
+    return w, h
+
+def _camera_recenter_steps(cx: int, w: int) -> list[dict]:
+    center_x = w // 2
+    if cx < center_x - _CAM_CENTER_TOL_PX:
+        return [{"action":"camera-center","click":{"type":"key","key":"LEFT"}}]
+    if cx > center_x + _CAM_CENTER_TOL_PX:
+        return [{"action":"camera-center","click":{"type":"key","key":"RIGHT"}}]
+    return []
+
+def _offscreen(cx: int|None, cy: int|None, w: int, h: int, margin: int = 4) -> bool:
+    if not isinstance(cx, int) or not isinstance(cy, int):
+        return True
+    return (cx < -margin) or (cy < -margin) or (cx > w + margin) or (cy > h + margin)
+
+def _camera_rotate_to_view_steps(cx: int|None, cy: int|None, w: int, h: int) -> list[dict]:
+    """
+    If target is off-screen, rotate one tap toward the side it's off.
+    Horizontal first; vertical pitch optional (kept simple for now).
+    """
+    if isinstance(cx, int):
+        center_x = w // 2
+        if cx < 0:  return [{"action":"camera-aim","click":{"type":"key","key":"LEFT"}}]
+        if cx > w:  return [{"action":"camera-aim","click":{"type":"key","key":"RIGHT"}}]
+        # if within [0,w], but vertically off: choose a tiny pan anyway to try revealing
+        if cx < center_x: return [{"action":"camera-aim","click":{"type":"key","key":"LEFT"}}]
+        else:             return [{"action":"camera-aim","click":{"type":"key","key":"RIGHT"}}]
+    # unknown cx: gentle nudge alternating left/right (simple)
+    import random
+    return [{"action":"camera-aim","click":{"type":"key","key": random.choice(["LEFT","RIGHT"])}}]
+
+def _camera_nudge_budget() -> bool:
+    global _CAM_LAST_MS
+    now = _now_ms()
+    if now - _CAM_LAST_MS < _CAM_NUDGE_COOLDOWN_MS:
+        return False
+    _CAM_LAST_MS = now
+    return True
+
+# Zoom goal seeking via scroll using camera.Scale from gamestate
+# You said Scale lives at payload["camera"]["Scale"]; smaller = in, larger = out (adjust target as you prefer).
+def _read_camera_scale(payload: dict) -> float|None:
+    try:
+        cam = payload.get("camera") or {}
+        sc = cam.get("Scale")
+        return float(sc) if sc is not None else None
+    except Exception:
+        return None
+
+# --- Zoom state (module-level) ---
+_ZOOM_STATE = {
+    "zooming": False,              # are we currently in a zoom adjustment loop?
+    "last_scale": None,            # last observed camera scale
+    "last_amt": 0,                 # last wheel amount we sent (+1 / -1)
+    "increases_scale": None,       # True = +1 makes scale go up; False = +1 makes scale go down; None = unknown yet
+    "last_sent_ms": 0,             # throttle
+}
+
+def _zoom_steps_toward(
+    payload: dict,
+    target_scale: float,
+    deadband_stop: float = 50.0,    # stop when inside this band
+    deadband_resume: float = 70.0,  # start/continue only when outside this band
+    max_steps: int = 2,
+    min_interval_ms: int = 120
+) -> list[dict]:
+    """
+    Higher scale = more zoomed IN.
+      cur > target -> need to zoom OUT
+      cur < target -> need to zoom IN
+    Emits 0..max_steps wheel notches with hysteresis + auto direction learning.
+    """
+    global _ZOOM_STATE
+    cur = _read_camera_scale(payload)
+    if cur is None:
+        return []
+
+    now = _now_ms()
+
+    # Learn how the wheel maps on this client (from the *previous* tick’s scroll)
+    try:
+        last_scale = _ZOOM_STATE["last_scale"]
+        last_amt   = _ZOOM_STATE["last_amt"]
+        if _ZOOM_STATE["increases_scale"] is None and last_scale is not None and last_amt != 0:
+            delta = float(cur) - float(last_scale)
+            # if +1 last time produced positive delta, then +1 increases scale
+            if abs(delta) > 0.1:  # ignore tiny noise
+                _ZOOM_STATE["increases_scale"] = (delta * last_amt) > 0
+    except Exception:
+        pass
+
+    diff = float(cur) - float(target_scale)
+    adiff = abs(diff)
+
+    # Decide hysteresis gate
+    if _ZOOM_STATE["zooming"]:
+        # we keep zooming until we are within the tighter stop band
+        if adiff <= deadband_stop:
+            _ZOOM_STATE["zooming"] = False
+            return []
+    else:
+        # we only (re)start zooming if we are outside the wider resume band
+        if adiff <= deadband_resume:
+            return []
+        _ZOOM_STATE["zooming"] = True
+
+    # Throttle
+    if (now - _ZOOM_STATE["last_sent_ms"]) < min_interval_ms:
+        return []
+
+    # Desired logical direction
+    want_in = diff < 0      # cur < target -> want zoom IN
+    want_out = diff > 0     # cur > target -> want zoom OUT
+
+    # Map to wheel notches using learned mapping; default assumption: +1 => IN (scale increases)
+    inc = _ZOOM_STATE["increases_scale"]
+    if inc is None:
+        amt = +1 if want_in else -1
+    else:
+        if inc:
+            amt = +1 if want_in else -1
+        else:
+            # inverted mapping on this machine
+            amt = -1 if want_in else +1
+
+    # Batch a little when far away
+    steps_to_send = 2 if adiff > (4 * deadband_stop) else 1
+    steps_to_send = min(steps_to_send, max_steps)
+
+    steps = []
+    for _ in range(steps_to_send):
+        steps.append({
+            "action": "camera-zoom",
+            "click": {"type": "scroll", "amount": int(amt)},
+            "debug": {
+                "camera": "zoom-nav",
+                "cur": float(cur),
+                "target": float(target_scale),
+                "diff": float(diff),
+                "amt": int(amt),
+                "adiff": float(adiff),
+                "inc_map": inc,
+                "hysteresis": {"stop": deadband_stop, "resume": deadband_resume},
+            }
+        })
+
+    # update state for next tick’s learning/throttle
+    _ZOOM_STATE["last_scale"] = float(cur)
+    _ZOOM_STATE["last_amt"] = int(amt)
+    _ZOOM_STATE["last_sent_ms"] = now
+
+    return steps
+
+
+def drag_canvas(self, from_x:int, from_y:int, to_x:int, to_y:int, button:int=2, hold_ms:int=120):
+    return self._send({"cmd":"drag","fromX":int(from_x),"fromY":int(from_y),
+                       "toX":int(to_x),"toY":int(to_y),"button":int(button),"holdMs":int(hold_ms)})
+
+def scroll(self, amount:int):
+    return self._send({"cmd":"scroll","amount":int(amount)})
+
+def camera_zoom(ipc: RuneLiteIPC, steps:int):
+    return ipc.scroll(steps)  # negative = out, positive = in
+
+# --- camera helpers (key-based) ---
+_CAM_LAST_MS = 0
+_CAM_COOLDOWN_MS = 400     # don't spam
+_CAM_KEEPALIVE_MS = 15_000 # occasional idle wiggle
+_CAM_KEEPALIVE_LAST_MS = 0
+
+def _camera_nudge_steps(now_ms: int) -> list[dict]:
+    """Return one small camera nudge as a key step."""
+    import random
+    # Prefer a gentle rotate; occasionally pitch
+    choice = random.choices(
+        population=["left","right","up","down"],
+        weights=[4,4,1,1],
+        k=1
+    )[0]
+    key = {"left":"LEFT", "right":"RIGHT", "up":"UP", "down":"DOWN"}[choice]
+    return [{
+        "action": "camera-nudge",
+        "description": f"camera {choice}",
+        "click": {"type": "key", "key": key},
+        "preconditions": [],
+        "postconditions": [],
+        "confidence": 0.9
+    }]
+
+def _camera_keepalive_steps(now_ms: int, last_ms: int) -> tuple[list[dict], int]:
+    """Occasional micro-motion to avoid static camera."""
+    if now_ms - last_ms < _CAM_KEEPALIVE_MS:
+        return [], last_ms
+    # Tiny rotate pulse (two quick taps)
+    steps = [
+        {"action":"camera-keepalive","click":{"type":"key","key":"LEFT"}},
+        {"action":"wait","click":{"type":"wait","ms":80}},
+        {"action":"camera-keepalive","click":{"type":"key","key":"LEFT"}},
+    ]
+    return steps, now_ms
+
 def _ipc_path(
     payload: dict,
     *,
@@ -103,12 +356,20 @@ def _ipc_walk_click_steps(
     usable = [p for p in proj if "canvas" in p]
 
     if not usable:
-        return [], {
+        now = _now_ms()
+        steps = []
+        global _CAM_LAST_MS
+        if now - _CAM_LAST_MS >= _CAM_COOLDOWN_MS:
+            steps = _camera_nudge_steps(now)
+            _CAM_LAST_MS = now
+        dbg = {
             "label": label,
             "dbg_path": dbg1,
             "dbg_proj": dbg2,
-            "warn": "no-onscreen-waypoints"
+            "warn": "no-onscreen-waypoints",
+            "camera_nudged": bool(steps),
         }
+        return steps, dbg
 
     # 3) Prefer farthest-along onscreen; add slight randomness within last K
     k = max(1, int(click_error_range))
@@ -152,32 +413,30 @@ def _ipc_port_from_payload(payload: dict, default: int = 17000) -> int:
             or (payload.get("ipc") or {}).get("port")
             or default)
 
+# in _ipc_send(...) inside action_plans.py
 def _ipc_send(payload: dict, msg: dict, timeout: float = 0.35) -> Optional[dict]:
-    """
-    Send a single-line JSON command to the IPC Input plugin and return parsed JSON.
-    Returns None on connection/parse errors.
-    """
     host = "127.0.0.1"
     port = _ipc_port_from_payload(payload)
+    t0 = time.time()
     try:
+        line = json.dumps(msg, separators=(",", ":"))
+        print(f"[IPC->] port={port} {line}")
         with socket.create_connection((host, port), timeout=timeout) as s:
             s.settimeout(timeout)
-            line = json.dumps(msg, separators=(",", ":"))
             s.sendall((line + "\n").encode("utf-8"))
             data = b""
-            # Read just one line (plugin replies with one JSON line)
             while True:
                 ch = s.recv(1)
-                if not ch:
-                    break
-                if ch == b"\n":
+                if not ch or ch == b"\n":
                     break
                 data += ch
-            if not data:
-                return None
-            return json.loads(data.decode("utf-8"))
+        resp = json.loads(data.decode("utf-8")) if data else None
+        dt = int((time.time() - t0)*1000)
+        print(f"[<-IPC] {resp} ({dt} ms)")
+        return resp
     except Exception as e:
-        # Keep it quiet at runtime; your UI can surface this in plan debug
+        dt = int((time.time() - t0)*1000)
+        print(f"[IPC ERR] {type(e).__name__}: {e} ({dt} ms)")
         return None
 
 
@@ -2446,6 +2705,18 @@ class GoToEdgevilleBankPlan(Plan):
             })
             return plan
 
+        # in GoToEdgevilleBankPlan.build_action_plan(...) after z = _zoom_steps_toward(...)
+        z = _zoom_steps_toward(payload, _NAV_SCALE, max_steps=1)
+        if z:
+            plan["steps"].extend(z)
+            plan.setdefault("debug", {})["camera"] = {
+                "mode": "zoom-nav",
+                "curScale": _read_camera_scale(payload),
+                "target": _NAV_SCALE,
+                "emitted_scrolls": [s["click"]["amount"] for s in z if s.get("click", {}).get("type") == "scroll"],
+            }
+        # DO NOT return here — let path/overlay keep building
+
         # Preferred: collision-aware path from IPC to Edgeville Bank rect
         steps, dbg = _ipc_walk_click_steps(
             payload, "EDGE_BANK",
@@ -2456,12 +2727,25 @@ class GoToEdgevilleBankPlan(Plan):
             plan["debug"] = {"ipc_nav": dbg}
             return plan
 
+        global _CAM_KEEPALIVE_LAST_MS
+        now = _now_ms()
+        ka_steps, _CAM_KEEPALIVE_LAST_MS = _camera_keepalive_steps(now, _CAM_KEEPALIVE_LAST_MS)
+        if ka_steps:
+            plan["steps"].extend(ka_steps)
+            # keep any existing debug you want to preserve
+            plan["debug"] = {"ipc_nav": dbg, "camera": "keepalive"}
+            return plan
+
         # Fallback: straight-line farthest visible tile (legacy)
         pick = self._pick_tile_visible_line(payload)
         if pick:
             cx, cy = int(pick["canvasX"]), int(pick["canvasY"])
             tx, ty = int(pick.get("worldX", 0)), int(pick.get("worldY", 0))
             bx, by = self._edge_bank_center()
+
+            if _preclick_camera_align(plan, payload, {"x": cx, "y": cy}, tag="ground"):
+                return plan
+
             plan["steps"].append({
                 "action": "click-ground",
                 "description": f"toward bank center {bx},{by}",

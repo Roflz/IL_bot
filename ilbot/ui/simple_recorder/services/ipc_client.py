@@ -63,6 +63,12 @@ class RuneLiteIPC:
         }
         return self._send(payload)
 
+    def scroll(self, amount: int) -> dict:
+        """
+        Mouse wheel scroll via IPC plugin (positive = zoom in, negative = zoom out).
+        """
+        return self._send({"cmd": "scroll", "amount": int(amount)})
+
     def project_world_tile(self, world_x: int, world_y: int, plane: int = 0) -> dict:
         """
         Asks the IPC plugin to project a world tile into canvas coordinates.
