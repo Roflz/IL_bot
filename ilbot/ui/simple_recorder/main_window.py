@@ -27,7 +27,7 @@ from .constants import (
     AUTO_REFRESH_MS,
     AUTO_RUN_TICK_MS,
     PRE_ACTION_DELAY_MS,
-    RULE_WAIT_TIMEOUT_MS,
+    RULE_WAIT_TIMEOUT_MS, CAM_BUFFER_X, CAM_BUFFER_Y_TOP, CAM_BUFFER_Y_BOT, CAM_YAW_HOLD_MS,
 )
 
 # small text/time helpers that table updates rely on
@@ -1231,19 +1231,69 @@ class SimpleRecorderWindow(ttk.Frame):
                 self._do_click_point(px, py)
                 mark_step_done(step.get("id"))
 
+
             elif ctype in ("point", "canvas-point", "canvas_point"):
+
                 px, py = click.get("x"), click.get("y")
+
                 px, py = self._apply_canvas_offset(px, py)
+
                 if not isinstance(px, (int, float)) or not isinstance(py, (int, float)):
                     self._table_set("next_action", "Invalid point for click")
+
                     self._debug(f"[DBG] point click skipped: invalid coords {click}")
+
+                    return
+
+                if not self._camera_face_target_if_needed(
+                        (int(px), int(py)),
+                        target,
+                        buf_x=CAM_BUFFER_X,
+                        buf_y_top=CAM_BUFFER_Y_TOP,
+                        buf_y_bot=CAM_BUFFER_Y_BOT,
+                        hold_ms=CAM_YAW_HOLD_MS
+                ):
                     return
 
                 rl = self._rl_window_rect or {}
+
                 self._debug(f"[DBG] point click → canvas=({click.get('x')},{click.get('y')}) "
+
                             f"final=({int(px)},{int(py)}) RLRect={rl} mode={getattr(self, 'input_mode_var', None) and self.input_mode_var.get()}")
+
                 self._do_click_point(int(px), int(py))
+
                 mark_step_done(step.get("id"))
+
+
+            # in the place you dispatch clicks (inside your step executor in main_window.py):
+
+            elif ctype in ("key-hold", "keyhold"):
+
+                key = (click.get("key") or "").strip()
+
+                dur = int(click.get("ms") or 180)
+
+                if not key:
+                    self._debug("[DBG] key-hold skipped: no key")
+
+                    return
+
+                self._debug(f"[DBG] key-hold → {key} for {dur}ms")
+
+                try:
+
+                    self.ipc.key_hold(key, dur)
+
+                except Exception as e:
+
+                    self._debug(f"[ERR] key-hold IPC failed: {e}")
+
+                self._table_set("next_action", f"KeyHold {key} {dur}ms")
+
+                return
+
+
 
             elif ctype == "scroll":
                 # amount > 0 = zoom in, amount < 0 = zoom out
@@ -1261,13 +1311,6 @@ class SimpleRecorderWindow(ttk.Frame):
                 if not (isinstance(pong, dict) and pong.get("ok")):
                     self._debug(f"[DBG] scroll preflight fail @ {getattr(self.ipc, 'port', None)}: {pong}")
                     return
-
-                # (Optional) prove we can read camera scale before scrolling
-                try:
-                    probe = self.ipc._send({"cmd":"cameraScale"})
-                    self._debug(f"[DBG] cameraScale probe → {probe}")
-                except Exception as e:
-                    self._debug(f"[DBG] cameraScale probe error: {type(e).__name__}: {e}")
 
                 # Do the scroll
                 try:
@@ -2166,3 +2209,124 @@ class SimpleRecorderWindow(ttk.Frame):
             self._debug("[TRACE] ----------------------------------------")
         except Exception as e:
             self._debug(f"[TRACE] emit error: {type(e).__name__}: {e}")
+
+    # main_window.py
+
+    # main_window.py
+
+    def _camera_face_target_if_needed(
+            self,
+            target_xy,
+            target_meta,
+            *,
+            buf_x: int,
+            buf_y_top: int,
+            buf_y_bot: int,
+            hold_ms: int
+    ) -> bool:
+        """
+        True  -> target within buffered window; caller may click this tick
+        False -> we issued a camera input this tick; caller should SKIP click
+
+        Rules:
+          - If y is above the TOP buffer -> pitch DOWN (key 'DOWN')
+          - Else if outside X buffer -> yaw (LEFT=clockwise, RIGHT=counter-clockwise)
+          - Else if y is below the BOTTOM buffer -> yaw toward it based on x
+          - Else inside buffered window -> allow click
+        """
+        try:
+            tx, ty = int(target_xy[0]), int(target_xy[1])
+        except Exception:
+            self._debug("[CAM] guard: invalid target coords")
+            return True
+
+        w, h = self._get_canvas_wh()
+        if w <= 0 or h <= 0:
+            return True
+
+        # Horizontal buffer
+        bx0, bx1 = buf_x, max(0, w - buf_x)
+
+        # Independent vertical buffers
+        by_top = buf_y_top
+        by_bot = max(0, h - buf_y_bot)
+
+        key = None
+        reason = ""
+
+        # 1) Too high on screen -> pitch DOWN to see farther
+        if ty < by_top:
+            key = "DOWN"
+            reason = f"above top-buffer {by_top} → pitch DOWN"
+
+        # 2) Outside X bounds -> yaw (LEFT=clockwise, RIGHT=counter-clockwise)
+        elif tx < bx0:
+            key = "RIGHT"  # target left of view → rotate CCW → RIGHT key
+            reason = f"left of x-buffer [{bx0}..{bx1}] → yaw RIGHT (ccw)"
+        elif tx > bx1:
+            key = "LEFT"  # target right of view → rotate CW → LEFT key
+            reason = f"right of x-buffer [{bx0}..{bx1}] → yaw LEFT (cw)"
+
+        # 3) Below bottom buffer -> prefer yaw toward it based on x
+        elif ty > by_bot:
+            key = "RIGHT" if tx < (w // 2) else "LEFT"
+            reason = f"below bottom-buffer {by_bot} → yaw toward target (x={tx})"
+
+        else:
+            return True  # inside buffered window
+
+        self._debug(f"[CAM] guard: target ({tx},{ty}) outside → {reason} for {hold_ms}ms")
+
+        # unified send
+        if not self._ensure_ipc():
+            self._debug("[CAM] guard: IPC not ready; skipping camera input")
+            return False
+        pong = self.ipc._send({"cmd": "ping"})
+        if not (isinstance(pong, dict) and pong.get("ok")):
+            self._debug(f"[CAM] guard: ping failed @ {getattr(self.ipc, 'port', None)}: {pong}")
+            return False
+        try:
+            self.ipc.focus()
+            self.ipc.key_hold(key, int(hold_ms))
+            time.sleep(max(0.0, (hold_ms + 60) / 1000.0))
+        except Exception as e:
+            self._debug(f"[CAM] guard: key-hold error: {type(e).__name__}: {e}")
+
+        return False
+
+    # --- Canvas size helper (IPC 'where' with caching) ---
+    def _get_canvas_wh(self):
+        """
+        Returns (w, h) for the RuneLite canvas.
+        Tries IPC 'where', falls back to last known, then generic defaults.
+        """
+        # init cache once
+        if not hasattr(self, "_canvas_wh"):
+            self._canvas_wh = {"w": 520, "h": 350, "ts": 0.0}
+
+        try:
+            # refresh periodically or when unknown
+            stale = (time.time() - float(self._canvas_wh.get("ts") or 0)) > 3.0
+            if stale and self._ensure_ipc():
+                r = self.ipc._send({"cmd": "where"})
+                if isinstance(r, dict) and r.get("ok"):
+                    w = int(r.get("w") or 0)
+                    h = int(r.get("h") or 0)
+                    if w > 0 and h > 0:
+                        self._canvas_wh.update({"w": w, "h": h, "ts": time.time()})
+                        return w, h
+        except Exception:
+            pass
+
+        # extra fallback: RL window rect if present
+        try:
+            if isinstance(self._rl_window_rect, dict):
+                w2 = int(self._rl_window_rect.get("width") or 0)
+                h2 = int(self._rl_window_rect.get("height") or 0)
+                if w2 > 0 and h2 > 0:
+                    # don’t stamp ts so we’ll still try IPC soon
+                    return w2, h2
+        except Exception:
+            pass
+
+        return int(self._canvas_wh["w"]), int(self._canvas_wh["h"])

@@ -24,3 +24,8 @@ EDGE_BANK_MIN_X = 3092
 EDGE_BANK_MAX_X = 3098
 EDGE_BANK_MIN_Y = 3488
 EDGE_BANK_MAX_Y = 3498
+
+CAM_BUFFER_X = 200
+CAM_BUFFER_Y_TOP = 50     # “too high” threshold -> press DOWN
+CAM_BUFFER_Y_BOT = 200     # “too low” (near bottom) threshold for yaw-toward
+CAM_YAW_HOLD_MS = 220

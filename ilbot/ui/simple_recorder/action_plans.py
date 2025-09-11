@@ -31,6 +31,81 @@ _canvas_wh_cache = {"w": 520, "h": 350, "ok": False}  # sane defaults
 # ----------------------------------------------------------------------
 # IPC helpers
 # ----------------------------------------------------------------------
+def _player_canvas(payload: dict) -> tuple[int | None, int | None]:
+    """
+    Return (px, py) = player's canvas coordinates.
+    Prefer tiles_15x15 (fast), fall back to IPC projection of player's world tile.
+    """
+    me = payload.get("player") or {}
+    wx = int(me.get("worldX", 0)); wy = int(me.get("worldY", 0)); p = int(me.get("plane", 0))
+
+    # Try tiles_15x15 first
+    for t in (payload.get("tiles_15x15") or []):
+        try:
+            if int(t.get("worldX")) == wx and int(t.get("worldY")) == wy:
+                cx, cy = t.get("canvasX"), t.get("canvasY")
+                if isinstance(cx, int) and isinstance(cy, int) and cx >= 0 and cy >= 0:
+                    return cx, cy
+        except Exception:
+            pass
+
+    # Fallback IPC projection
+    try:
+        resp = _ipc_send(payload, {"cmd": "tilexy_many", "tiles": [{"x": wx, "y": wy}]}) or {}
+        r = (resp.get("results") or [None])[0]
+        if r and r.get("ok") and r.get("onscreen"):
+            c = r.get("canvas") or {}
+            cx, cy = c.get("x"), c.get("y")
+            if isinstance(cx, int) and isinstance(cy, int):
+                return cx, cy
+    except Exception:
+        pass
+
+    return None, None
+
+
+def _aim_keys_vs_player(payload: dict, tgt_cx: int | None, tgt_cy: int | None, *, buffer_px: int = 200):
+    """
+    Decide which camera keys to hold based on the target’s canvas vs the player’s canvas.
+    Returns a list of (key, ms) pairs (e.g. [("LEFT",150), ("UP",100)]) or [] if no aim needed.
+
+    Rules:
+      - If target is offscreen (x<0, x>w, y<0, y>h), aim toward that edge.
+      - Else, if |target - player| > buffer_px on an axis, aim on that axis.
+      - We only return at most one horizontal and one vertical suggestion.
+    """
+    w, h = _get_canvas_wh(payload)
+    px, py = _player_canvas(payload)
+    if not isinstance(tgt_cx, int) or not isinstance(tgt_cy, int):
+        # no projection → give a gentle default nudge
+        return [("LEFT", 140)]
+
+    # If we don’t know the player’s screen pos, fall back to center semantics
+    if not isinstance(px, int) or not isinstance(py, int):
+        px, py = w // 2, h // 2
+
+    keys: list[tuple[str, int]] = []
+
+    # Offscreen checks against window edges
+    off_left   = tgt_cx < 0
+    off_right  = tgt_cx > w
+    off_top    = tgt_cy < 0
+    off_bottom = tgt_cy > h
+
+    # Horizontal
+    if off_left or (tgt_cx < px - buffer_px):
+        keys.append(("LEFT", 140))
+    elif off_right or (tgt_cx > px + buffer_px):
+        keys.append(("RIGHT", 140))
+
+    # Vertical (pitch)
+    if off_top or (tgt_cy < py - buffer_px):
+        keys.append(("UP", 100))
+    elif off_bottom or (tgt_cy > py + buffer_px):
+        keys.append(("DOWN", 100))
+
+    return keys
+
 def _preclick_camera_align(plan: dict, payload: dict, target_canvas: dict, tag: str) -> bool:
     """
     If target is off-screen or far from center, nudge camera and return True (meaning: we handled this tick).
@@ -340,22 +415,29 @@ def _ipc_walk_click_steps(
     rect: Optional[Tuple[int, int, int, int]] = None,
     goal: Optional[Tuple[int, int]] = None,
     max_wps: int = 20,
-    click_error_range: int = 5,   # choose among the last N onscreen points
+    click_error_range: int = 5,
 ) -> Tuple[List[dict], dict]:
-    """
-    Ask plugin for path (rect or goal), project to canvas, and return one click step
-    aiming near the farthest onscreen waypoint. (One click per tick.)
-    """
-    # 1) Waypoints (consecutive) from unified 'path'
+    # 1) Waypoints from IPC
     wps, dbg1 = _ipc_path(payload, rect=rect, goal=goal, max_wps=max_wps)
     if not wps:
         return [], {"label": label, "dbg_path": dbg1, "warn": "no-waypoints"}
 
     # 2) Project those waypoints
     proj, dbg2 = _ipc_project_many(payload, wps)
-    usable = [p for p in proj if "canvas" in p]
+
+    # Keep only projections that have a canvas point
+    projected = [p for p in proj if "canvas" in p]
+
+    # EXTRA HARD FILTER: drop any canvas that’s off the actual window
+    w, h = _get_canvas_wh(payload)
+    usable = []
+    for p in projected:
+        cx = p["canvas"]["x"]; cy = p["canvas"]["y"]
+        if not _offscreen(cx, cy, w, h, margin=1):
+            usable.append(p)
 
     if not usable:
+        # Nothing safely onscreen → nudge camera instead of returning a click
         now = _now_ms()
         steps = []
         global _CAM_LAST_MS
@@ -366,7 +448,9 @@ def _ipc_walk_click_steps(
             "label": label,
             "dbg_path": dbg1,
             "dbg_proj": dbg2,
-            "warn": "no-onscreen-waypoints",
+            "warn": "no-onscreen-waypoints-after-window-filter",
+            "w": w, "h": h,
+            "projected_count": len(projected),
             "camera_nudged": bool(steps),
         }
         return steps, dbg
@@ -379,6 +463,19 @@ def _ipc_walk_click_steps(
     cx, cy = chosen["canvas"]["x"], chosen["canvas"]["y"]
     wx, wy, pl = chosen["world"]["x"], chosen["world"]["y"], chosen["world"]["p"]
 
+    # FINAL SAFETY: if (somehow) chosen is offscreen, rotate instead of clicking
+    if _offscreen(cx, cy, w, h, margin=1):
+        aim = _camera_rotate_to_view_steps(cx, cy, w, h)
+        dbg = {
+            "label": label,
+            "dbg_path": dbg1,
+            "dbg_proj": dbg2,
+            "reason": "chosen-offscreen",
+            "chosen_canvas": {"x": cx, "y": cy},
+            "w": w, "h": h,
+        }
+        return aim, dbg
+
     steps: List[dict] = [{
         "action": "click-ground",
         "description": f"{label} via IPC path",
@@ -389,18 +486,17 @@ def _ipc_walk_click_steps(
             "world": {"x": wx, "y": wy, "plane": pl},
             "canvas": {"x": cx, "y": cy},
         },
-        "preconditions": [],
-        "postconditions": [],
-        "confidence": 0.93,
+        "preconditions": [], "postconditions": [], "confidence": 0.93,
     }]
 
     debug = {
         "label": label,
         "wps_count": len(wps),
         "proj_count": len(proj),
-        "onscreen_count": len(usable),
+        "projected_in_window": len(usable),
         "chosen_world": {"x": wx, "y": wy, "p": pl},
         "chosen_canvas": {"x": cx, "y": cy},
+        "w": w, "h": h,
         "dbg_path": dbg1,
         "dbg_proj": dbg2,
     }
@@ -420,7 +516,7 @@ def _ipc_send(payload: dict, msg: dict, timeout: float = 0.35) -> Optional[dict]
     t0 = time.time()
     try:
         line = json.dumps(msg, separators=(",", ":"))
-        print(f"[IPC->] port={port} {line}")
+        # print(f"[IPC->] port={port} {line}")
         with socket.create_connection((host, port), timeout=timeout) as s:
             s.settimeout(timeout)
             s.sendall((line + "\n").encode("utf-8"))
@@ -432,7 +528,7 @@ def _ipc_send(payload: dict, msg: dict, timeout: float = 0.35) -> Optional[dict]
                 data += ch
         resp = json.loads(data.decode("utf-8")) if data else None
         dt = int((time.time() - t0)*1000)
-        print(f"[<-IPC] {resp} ({dt} ms)")
+        # print(f"[<-IPC] {resp} ({dt} ms)")
         return resp
     except Exception as e:
         dt = int((time.time() - t0)*1000)
@@ -2610,77 +2706,34 @@ class GoToGEPlan(Plan):
 
 class GoToEdgevilleBankPlan(Plan):
     """
-    Walk to Edgeville bank using collision-aware IPC path if available,
-    else fall back to farthest-visible Bresenham tile from tiles_15x15.
+    Walk to Edgeville bank using IPC path if available.
+    This plan does NOT do any camera or zoom actions.
+    It only emits a ground click to the farthest on-screen waypoint.
+    Camera alignment is handled by the executor's pre-click guard.
     """
     id = "GO_TO_EDGE_BANK"
     label = "Go to Edgeville Bank"
-
-    def compute_phase(self, payload: dict, craft_recent: bool) -> str:
-        me = (payload.get("player") or {})
-        tiles = payload.get("tiles_15x15") or []
-        if not me or not tiles:
-            return "No Player/Tiles"
-        try:
-            wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
-        except Exception:
-            return "No Player/Tiles"
-        if EDGE_BANK_MIN_X <= wx <= EDGE_BANK_MAX_X and EDGE_BANK_MIN_Y <= wy <= EDGE_BANK_MAX_Y:
-            return "Arrived at Bank"
-        return "Moving to Bank"
 
     def _edge_bank_center(self) -> tuple[int, int]:
         bx = (EDGE_BANK_MIN_X + EDGE_BANK_MAX_X) // 2
         by = (EDGE_BANK_MIN_Y + EDGE_BANK_MAX_Y) // 2
         return bx, by
 
-    # Fallback only (kept short)
-    def _line_to(self, x0: int, y0: int, x1: int, y1: int, max_steps: int = 14):
-        points = []
-        dx = abs(x1 - x0); dy = abs(y1 - y0)
-        sx = 1 if x0 < x1 else -1 if x0 > x1 else 0
-        sy = 1 if y0 < y1 else -1 if y0 > y1 else 0
-        x, y = x0, y0
-        if dx >= dy:
-            err = dx // 2
-            for _ in range(max_steps):
-                if x == x1 and y == y1: break
-                x += sx; err -= dy
-                if err < 0: y += sy; err += dx
-                points.append((x, y))
-        else:
-            err = dy // 2
-            for _ in range(max_steps):
-                if x == x1 and y == y1: break
-                y += sy; err -= dx
-                if err < 0: x += sx; err += dy
-                points.append((x, y))
-        return points
-
-    def _pick_tile_visible_line(self, payload: dict) -> dict | None:
+    def compute_phase(self, payload: dict, craft_recent: bool) -> str:
         me = (payload.get("player") or {})
         tiles = payload.get("tiles_15x15") or []
+        if not me or not tiles:
+            return "No Player/Tiles"
+
         try:
             wx, wy = int(me.get("worldX", 0)), int(me.get("worldY", 0))
         except Exception:
-            return None
-        bx, by = self._edge_bank_center()
+            return "No Player/Tiles"
 
-        by_world = {}
-        for t in tiles:
-            try:
-                tx, ty = int(t.get("worldX")), int(t.get("worldY"))
-                cx, cy = t.get("canvasX"), t.get("canvasY")
-            except Exception:
-                continue
-            if isinstance(cx, int) and isinstance(cy, int):
-                by_world[(tx, ty)] = t
+        if EDGE_BANK_MIN_X <= wx <= EDGE_BANK_MAX_X and EDGE_BANK_MIN_Y <= wy <= EDGE_BANK_MAX_Y:
+            return "Arrived at Bank"
 
-        path = self._line_to(wx, wy, bx, by, max_steps=14)
-        for pt in reversed(path):
-            if pt in by_world:
-                return by_world[pt]
-        return None
+        return "Moving to Bank"
 
     def build_action_plan(self, payload: dict, phase: str) -> dict:
         plan = {"phase": phase, "steps": []}
@@ -2691,7 +2744,7 @@ class GoToEdgevilleBankPlan(Plan):
                 "description": "Player is inside Edgeville bank region",
                 "click": {"type": "none"},
                 "target": {"domain": "none", "name": "n/a"},
-                "preconditions": [], "postconditions": [], "confidence": 1.0
+                "preconditions": [], "postconditions": [], "confidence": 1.0,
             })
             return plan
 
@@ -2705,70 +2758,83 @@ class GoToEdgevilleBankPlan(Plan):
             })
             return plan
 
-        # in GoToEdgevilleBankPlan.build_action_plan(...) after z = _zoom_steps_toward(...)
-        z = _zoom_steps_toward(payload, _NAV_SCALE, max_steps=1)
-        if z:
-            plan["steps"].extend(z)
-            plan.setdefault("debug", {})["camera"] = {
-                "mode": "zoom-nav",
-                "curScale": _read_camera_scale(payload),
-                "target": _NAV_SCALE,
-                "emitted_scrolls": [s["click"]["amount"] for s in z if s.get("click", {}).get("type") == "scroll"],
-            }
-        # DO NOT return here — let path/overlay keep building
-
-        # Preferred: collision-aware path from IPC to Edgeville Bank rect
-        steps, dbg = _ipc_walk_click_steps(
-            payload, "EDGE_BANK",
+        # 1) Ask IPC for waypoints to the bank rectangle
+        wps, dbg_path = _ipc_path(
+            payload,
             rect=(EDGE_BANK_MIN_X, EDGE_BANK_MAX_X, EDGE_BANK_MIN_Y, EDGE_BANK_MAX_Y),
+            max_wps=25,
         )
-        if steps:
-            plan["steps"].extend(steps)
-            plan["debug"] = {"ipc_nav": dbg}
-            return plan
-
-        global _CAM_KEEPALIVE_LAST_MS
-        now = _now_ms()
-        ka_steps, _CAM_KEEPALIVE_LAST_MS = _camera_keepalive_steps(now, _CAM_KEEPALIVE_LAST_MS)
-        if ka_steps:
-            plan["steps"].extend(ka_steps)
-            # keep any existing debug you want to preserve
-            plan["debug"] = {"ipc_nav": dbg, "camera": "keepalive"}
-            return plan
-
-        # Fallback: straight-line farthest visible tile (legacy)
-        pick = self._pick_tile_visible_line(payload)
-        if pick:
-            cx, cy = int(pick["canvasX"]), int(pick["canvasY"])
-            tx, ty = int(pick.get("worldX", 0)), int(pick.get("worldY", 0))
-            bx, by = self._edge_bank_center()
-
-            if _preclick_camera_align(plan, payload, {"x": cx, "y": cy}, tag="ground"):
-                return plan
-
+        if not wps:
             plan["steps"].append({
-                "action": "click-ground",
-                "description": f"toward bank center {bx},{by}",
-                "click": {"type": "point", "x": cx, "y": cy},
-                "target": {
-                    "domain": "ground",
-                    "name": f"Tile→EDGE_BANK({bx},{by})",
-                    "world": {"x": tx, "y": ty, "plane": int((payload.get('player') or {}).get('plane', 0))},
-                    "canvas": {"x": cx, "y": cy}
-                },
-                "preconditions": [], "postconditions": [], "confidence": 0.75
+                "action": "idle",
+                "description": "No waypoints this tick",
+                "click": {"type": "none"},
+                "target": {"domain": "none", "name": "n/a"},
+                "preconditions": [], "postconditions": [], "confidence": 0.0
             })
+            plan["debug"] = {"ipc_nav": {"dbg_path": dbg_path}}
             return plan
 
+        # 2) Project those waypoints to canvas
+        proj, dbg_proj = _ipc_project_many(payload, wps)
+
+        # Keep only projections that have a canvas point (i.e., onscreen per plugin)
+        usable = [p for p in proj if "canvas" in p]
+
+        if not usable:
+            # Nothing onscreen to click right now; do nothing this tick.
+            # The executor cannot align camera without a click target,
+            # so we simply wait for the next tick when a waypoint comes into view.
+            plan["steps"].append({
+                "action": "idle",
+                "description": "No onscreen waypoint to click",
+                "click": {"type": "none"},
+                "target": {"domain": "none", "name": "n/a"},
+                "preconditions": [], "postconditions": [], "confidence": 0.0
+            })
+            plan["debug"] = {"ipc_nav": {"dbg_path": dbg_path, "dbg_proj": dbg_proj}}
+            return plan
+
+        # 3) Prefer farthest-along onscreen; add tiny randomness over the last K
+        import random
+        K = 5
+        tail = usable[-K:] if len(usable) >= K else usable
+        chosen = random.choice(tail)
+
+        cx, cy = int(chosen["canvas"]["x"]), int(chosen["canvas"]["y"])
+        wx, wy, pl = int(chosen["world"]["x"]), int(chosen["world"]["y"]), int(chosen["world"]["p"])
+        bx, by = self._edge_bank_center()
+
+        # 4) Emit a single ground click. The executor will:
+        #    - check canvas bounds minus buffer,
+        #    - rotate camera if needed,
+        #    - then re-attempt the click.
         plan["steps"].append({
-            "action": "idle",
-            "description": "No IPC/visible path on this tick",
-            "click": {"type": "none"},
-            "target": {"domain": "none", "name": "n/a"},
-            "preconditions": [], "postconditions": [], "confidence": 0.0
+            "action": "click-ground",
+            "description": f"toward bank center {bx},{by}",
+            "click": {"type": "point", "x": cx, "y": cy},
+            "target": {
+                "domain": "ground",
+                "name": f"Tile→EDGE_BANK({bx},{by})",
+                "world": {"x": wx, "y": wy, "plane": pl},
+                "canvas": {"x": cx, "y": cy},
+            },
+            "preconditions": [], "postconditions": [], "confidence": 0.93
         })
-        plan["debug"] = {"ipc_nav": dbg}
+
+        plan["debug"] = {
+            "ipc_nav": {
+                "wps_count": len(wps),
+                "proj_count": len(proj),
+                "projected_in_window": len(usable),
+                "chosen_world": {"x": wx, "y": wy, "p": pl},
+                "chosen_canvas": {"x": cx, "y": cy},
+                "dbg_path": dbg_path,
+                "dbg_proj": dbg_proj,
+            }
+        }
         return plan
+
 
 # ------------- Registry & accessors -------------
 PLAN_REGISTRY: Dict[str, Plan] = {

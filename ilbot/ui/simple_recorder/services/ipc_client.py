@@ -63,6 +63,9 @@ class RuneLiteIPC:
         }
         return self._send(payload)
 
+    def key_hold(self, key: str, ms: int = 180):
+        return self._send({"cmd": "keyHold", "key": str(key), "ms": int(ms)})
+
     def scroll(self, amount: int) -> dict:
         """
         Mouse wheel scroll via IPC plugin (positive = zoom in, negative = zoom out).
