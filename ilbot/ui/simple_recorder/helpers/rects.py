@@ -1,7 +1,7 @@
 # utils/rects.py
 from typing import Tuple
 
-def _mk_rect(d):
+def mk_rect(d):
     """
     Accepts any dict like {"x":..., "y":..., "width":..., "height":...}
     Returns (x, y, w, h) or None if invalid.
@@ -19,14 +19,14 @@ def _mk_rect(d):
     except Exception:
         return None
 
-def _rect_contains(rect, px, py):
+def rect_contains(rect, px, py):
     """rect=(x,y,w,h), point=(px,py)"""
     if rect is None:
         return False
     x, y, w, h = rect
     return (px >= x) and (py >= y) and (px < x + w) and (py < y + h)
 
-def _center_distance(rect, px, py):
+def center_distance(rect, px, py):
     """smaller is closer to the center of the rect"""
     if rect is None:
         return 1e18
@@ -35,7 +35,7 @@ def _center_distance(rect, px, py):
     dx, dy = (px - cx), (py - cy)
     return (dx * dx + dy * dy) ** 0.5
 
-def _unwrap_rect(maybe_rect_dict: dict | None) -> dict | None:
+def unwrap_rect(maybe_rect_dict: dict | None) -> dict | None:
     """
     Inventory/bank slots export as {"bounds": {...}} inside 'bounds'.
     Widgets export as {"bounds": {...}} directly.
@@ -51,7 +51,7 @@ def _unwrap_rect(maybe_rect_dict: dict | None) -> dict | None:
         return inner
     return None
 
-def _rect_center_xy(rect: dict | None) -> Tuple[int | None, int | None]:
+def rect_center_xy(rect: dict | None) -> Tuple[int | None, int | None]:
     if not rect:
         return (None, None)
     try:

@@ -7,11 +7,22 @@ import pyautogui
 pyautogui.FAILSAFE = True  # moving mouse to a corner aborts
 
 AUTO_REFRESH_MS      = 100
-AUTO_RUN_TICK_MS     = 250    # scheduler tick for the UI/auto loop
+AUTO_RUN_TICK_MS     = 300    # scheduler tick for the UI/auto loop
 PRE_ACTION_DELAY_MS  = 250    # delay before performing any action (click/key)
 RULE_WAIT_TIMEOUT_MS = 10_000 # pre/post condition wait timeout
 
 SESSIONS_DIR = Path(r"D:\repos\bot_runelite_IL\data\recording_sessions")
+
+# Xmin, Xmax, Ymin, Ymax
+BANK_REGIONS = {
+    "EDGEVILLE_BANK": (3092, 3098, 3488, 3498),
+    "GE": (3155, 3173, 3479, 3498),
+}
+
+REGIONS = {
+    "VARROCK_SQUARE": (3200, 3227, 3416, 3442),
+    "JULIET_MANSION": (3156, 3164, 3432, 3438),
+}
 
 # Grand Exchange region bounds (hardcoded)
 GE_MIN_X = 3155

@@ -11,7 +11,13 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 from tkinter.scrolledtext import ScrolledText
 
-from .action_plans import mark_step_done
+from .helpers.bank import bank_slots
+from .helpers.inventory import inv_count, inv_has
+from .helpers.navigation import list_nav_targets_for_ui, get_nav_rect, get_nav_label
+from .helpers.rects import rect_center_xy, unwrap_rect, mk_rect, rect_contains, center_distance
+from .helpers.utils import list_plans_for_ui, now_ms, is_crafting_anim, clean_rs, fmt_age_ms, mark_step_done, \
+    _CRAFT_ANIMS, norm_name, get_plan
+from .helpers.win32 import POINT
 
 try:
     import pygetwindow as gw
@@ -30,53 +36,17 @@ from .constants import (
     RULE_WAIT_TIMEOUT_MS, CAM_BUFFER_X, CAM_BUFFER_Y_TOP, CAM_BUFFER_Y_BOT, CAM_YAW_HOLD_MS,
 )
 
-# small text/time helpers that table updates rely on
-from .utils.common import (
-    _clean_rs,
-    _fmt_age_ms,
-    _norm_name,
-    _now_ms,
-)
-
-# rect/geometry helpers used across click resolution and table rendering
-from .utils.rects import (
-    _mk_rect,
-    _rect_contains,
-    _center_distance,
-    _unwrap_rect,
-    _rect_center_xy,
-)
-
-# Win32 POINT struct (used by cursor helpers)
-from .utils.win32 import POINT
-
 # IPC client (used by click/key execution)
 from .services.ipc_client import RuneLiteIPC
 
 # left-side status UI (window, gamestate dir, ipc port)
 from .ui.status_panel import InstanceStatusPanel
 
-# action plan selector/registry
-from .action_plans import get_plan, _CRAFT_ANIMS
-# Plans + helper primitives (re-exported here for UI/rules)
-from .action_plans import (
-    Plan,
-    PLAN_REGISTRY,
-    get_plan,
-    _is_crafting_anim,
-    _inv_has,
-    _inv_count,
-    _bank_slots,
-    _norm_name,
-)
-
 from .session_ports import (
     _username_from_title,
     _session_dir_for_username,
     _autofill_port_for_username,
 )
-
-
 
 class SimpleRecorderWindow(ttk.Frame):
     def __init__(self, root, instance_index: int = 0):
@@ -112,7 +82,8 @@ class SimpleRecorderWindow(ttk.Frame):
         self.window_title_var = tk.StringVar(value="(none)")
         self.session_dir_var = tk.StringVar(value="")  # per-instance gamestate dir (editable)
         self.ipc_port_var = tk.StringVar(value="")  # free text, no scan required
-        self.plan_var = tk.StringVar(value="SAPPHIRE_RINGS")  # per-instance plan
+        self.plan_var = tk.StringVar(value="GO_TO_RECT")
+        self.nav_target_var = tk.StringVar(value="GE")
 
         # If you had a pre-existing self.session_dir, keep it in sync:
         self.session_dir = None  # or your existing default Path/str
@@ -197,7 +168,6 @@ class SimpleRecorderWindow(ttk.Frame):
         self.window_status.grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 6))
 
         # IPC / Port Picker
-        # IPC / Port Picker (free-text, no Scan)
         ipc = ttk.LabelFrame(left, text="IPC (RuneLite Plugin)")
         ipc.grid(row=2, column=0, sticky="ew", pady=6)
         ipc.grid_columnconfigure(0, weight=1)
@@ -232,32 +202,86 @@ class SimpleRecorderWindow(ttk.Frame):
         planf.grid_columnconfigure(0, weight=1)
 
         ttk.Label(planf, text="Plan:").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 0))
-        from .action_plans import PLAN_REGISTRY  # top-level import is also fine
-        plan_names = [("SAPPHIRE_RINGS", "Sapphire Rings"), ("GOLD_RINGS", "Gold Rings"), ("EMERALD_RINGS", "Emerald Rings"), ("GO_TO_GE", "Go to GE"),
-                      ("OPEN_GE_BANK", "GE: Open Bank"), ("GE_WITHDRAW_NOTED_RINGS", "GE: Withdraw Rings (notes)"), ("OPEN_GE_EXCHANGE", "GE: Open Exchange"),
-                      ("GE_SELL_BUY", "GE: Sell Rings & Buy Mats"), ("GO_TO_EDGE_BANK", "Go to Edgeville"),
-]
-        self.plan_combo = ttk.Combobox(
-            planf,
-            state="readonly",
-            values=[label for _, label in plan_names]
-        )
-        # map label->id and id->label
-        self._plan_label_to_id = {label: pid for pid, label in plan_names}
-        self._plan_id_to_label = {pid: label for pid, label in plan_names}
-        # default select
-        self.plan_combo.set(self._plan_id_to_label[self.plan_var.get()])
-        self.plan_combo.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
 
-        def _on_plan_change(*_):
-            sel_label = self.plan_combo.get()
-            self.plan_var.set(self._plan_label_to_id.get(sel_label, "SAPPHIRE_RINGS"))
-            # optional: force a table refresh to reflect different head step summaries
+        # --- Area Target (only used by Go to Area plan) ---
+        targetf = ttk.LabelFrame(planf, text="Area Target")
+        targetf.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
+        targetf.grid_columnconfigure(0, weight=1)
+
+        nav_options = list_nav_targets_for_ui()  # [(key, label), ...]
+        self._nav_label_to_key = {label: key for key, label in nav_options}
+        self._nav_key_to_label = {key: label for key, label in nav_options}
+
+        ttk.Label(targetf, text="Target:").grid(row=0, column=0, sticky="w")
+        self.nav_combo = ttk.Combobox(
+            targetf,
+            state="readonly",
+            values=[label for _, label in nav_options],
+        )
+        # set default visible label
+        self.nav_combo.set(self._nav_key_to_label.get(self.nav_target_var.get(), nav_options[0][1]))
+        self.nav_combo.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+
+        def _on_nav_change(*_):
+            sel_label = self.nav_combo.get()
+            key = self._nav_label_to_key.get(sel_label, "GE")
+            self.nav_target_var.set(key)
+            # optional: force a refresh so next-action updates immediately
             try:
                 self.refresh_gamestate_info()
             except Exception:
                 pass
 
+        self.nav_combo.bind("<<ComboboxSelected>>", _on_nav_change)
+
+        # --- plan names / combobox (build ONCE) ---
+        plan_names = list_plans_for_ui()
+        self.plan_combo = ttk.Combobox(
+            planf,
+            state="readonly",
+            values=[label for _, label in plan_names]
+        )
+        # map label <-> id
+        self._plan_label_to_id = {label: pid for pid, label in plan_names}
+        self._plan_id_to_label = {pid: label for pid, label in plan_names}
+
+        # set default selection using current self.plan_var
+        default_label = self._plan_id_to_label.get(self.plan_var.get(), plan_names[0][1])
+        self.plan_combo.set(default_label)
+        self.plan_combo.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
+
+        def _set_nav_enabled(enabled: bool):
+            try:
+                state = "readonly" if enabled else "disabled"
+                self.nav_combo.configure(state=state)
+                for child in targetf.winfo_children():
+                    try:
+                        child.configure(state="normal" if enabled else "disabled")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        def _on_plan_change(*_):
+            sel_label = self.plan_combo.get()
+            pid = self._plan_label_to_id.get(sel_label, "GO_TO_RECT")
+            self.plan_var.set(pid)
+            _set_nav_enabled(pid == "GO_TO_RECT")
+            # if you cache plan instances, you can reset the active one here:
+            try:
+                if hasattr(self, "_plan_cache"):
+                    self._plan_cache.pop(pid, None)
+            except Exception:
+                pass
+            try:
+                self.refresh_gamestate_info()  # <-- fix typo (was refresh_gamestatem)
+            except Exception:
+                pass
+
+        # call once to set initial state
+        _set_nav_enabled(self.plan_var.get() == "GO_TO_RECT")
+
+        # bind ONCE
         self.plan_combo.bind("<<ComboboxSelected>>", _on_plan_change)
 
         # --- Session Management ---
@@ -633,8 +657,8 @@ class SimpleRecorderWindow(ttk.Frame):
             crafting_status = f"Anim {anim_id}"
 
         # --- Crafting hysteresis (prevents flapping back to "Moving to furnace") ---
-        now = _now_ms()
-        if crafting_open or _is_crafting_anim(anim_id):
+        now = now_ms()
+        if crafting_open or is_crafting_anim(anim_id):
             self._last_crafting_ms = now
 
         CRAFT_GRACE_MS = 5000  # keep Crafting phase for up to 5s after last observed craft
@@ -657,7 +681,7 @@ class SimpleRecorderWindow(ttk.Frame):
             obj_name = None
             gos = ht.get("gameObjects") or []
             for g in gos:
-                name = _clean_rs((g or {}).get("name", "")) or ""
+                name = clean_rs((g or {}).get("name", "")) or ""
                 if name and name.lower() != "null" and name.lower() != "unknown":
                     obj_name = name
                     break
@@ -676,12 +700,12 @@ class SimpleRecorderWindow(ttk.Frame):
         # Last interaction (+ time since) with tags stripped
         li = payload.get("lastInteraction")
         if isinstance(li, dict):
-            act = _clean_rs(li.get("action", ""))
-            tgt = _clean_rs(li.get("target", ""))
+            act = clean_rs(li.get("action", ""))
+            tgt = clean_rs(li.get("target", ""))
             ts  = li.get("timestamp")  # expected ms since epoch (from your plugin)
             if isinstance(ts, (int, float)):
                 age_ms = int(time.time() * 1000) - int(ts)
-                age_txt = "  •  " + _fmt_age_ms(age_ms)
+                age_txt = "  •  " + fmt_age_ms(age_ms)
             else:
                 age_txt = ""
             last_interaction = (f"{act} -> {tgt}".strip() or "—") + age_txt
@@ -693,8 +717,8 @@ class SimpleRecorderWindow(ttk.Frame):
         if isinstance(entries, list) and entries:
             parts = []
             for e in entries[:4]:
-                opt = _clean_rs((e or {}).get("option", ""))
-                tgt = _clean_rs((e or {}).get("target", ""))
+                opt = clean_rs((e or {}).get("option", ""))
+                tgt = clean_rs((e or {}).get("target", ""))
                 txt = " ".join(p for p in (opt, tgt) if p).strip()
                 if txt:
                     parts.append(txt)
@@ -710,11 +734,11 @@ class SimpleRecorderWindow(ttk.Frame):
                 since_ms = lc.get("sinceMs")
                 if since_ms is None and lc.get("epochMs") is not None:
                     try:
-                        now_ms = int(time.time() * 1000)
-                        since_ms = now_ms - int(lc["epochMs"])
+                        now_epoch_ms = int(time.time() * 1000)
+                        since_ms = now_epoch_ms - int(lc["epochMs"])
                     except Exception:
                         since_ms = None
-                age_txt = f"  •  {_fmt_age_ms(int(since_ms))}" if isinstance(since_ms, (int, float)) else ""
+                age_txt = f"  •  {fmt_age_ms(int(since_ms))}" if isinstance(since_ms, (int, float)) else ""
                 last_click = f"({cx}, {cy}){age_txt}"
             else:
                 last_click = "—"
@@ -764,6 +788,19 @@ class SimpleRecorderWindow(ttk.Frame):
 
         payload["__ipc"] = ipc
 
+        # If we're running GoToRectPlan, inject the chosen target
+        try:
+            if (self.plan_var.get() or "").strip() == "GO_TO_RECT":
+                key = (self.nav_target_var.get() or "GE").strip().upper()
+                rect = get_nav_rect(key)
+                if rect:
+                    payload["navTarget"] = {
+                        "name": get_nav_label(key),
+                        "rect": tuple(rect),
+                    }
+        except Exception as e:
+            self._debug(f"[DBG] navTarget inject error: {e}")
+
         # Use the persisted text (won’t disappear on later refreshes)
         last_action = self._last_action_text
 
@@ -793,7 +830,7 @@ class SimpleRecorderWindow(ttk.Frame):
             click = first.get("click", {}) or {}
             if click.get("type") in ("rect-center", "rect-random"):
                 rect = tgt.get("bounds") or tgt.get("clickbox")
-                cx, cy = _rect_center_xy(_unwrap_rect(rect))
+                cx, cy = rect_center_xy(unwrap_rect(rect))
                 summary = f"{first.get('action')} → {tname}" + (f" @ ({cx}, {cy})" if cx is not None else "")
             elif click.get("type") == "point":
                 summary = f"{first.get('action')} → {tname} @ ({click.get('x')},{click.get('y')})"
@@ -873,8 +910,8 @@ class SimpleRecorderWindow(ttk.Frame):
         inv = data.get("inventory", {})
         for slot in (inv.get("slots", []) or []):
             b = slot.get("bounds") or {}
-            rect = _mk_rect(b.get("bounds"))
-            if rect and _rect_contains(rect, cx, cy):
+            rect = mk_rect(b.get("bounds"))
+            if rect and rect_contains(rect, cx, cy):
                 tx, ty = rect_center(rect)
                 candidates.append({
                     "priority": 10,
@@ -889,8 +926,8 @@ class SimpleRecorderWindow(ttk.Frame):
         bank = data.get("bank", {})
         for slot in (bank.get("slots", []) or []):
             b = slot.get("bounds") or {}
-            rect = _mk_rect(b.get("bounds"))
-            if rect and _rect_contains(rect, cx, cy):
+            rect = mk_rect(b.get("bounds"))
+            if rect and rect_contains(rect, cx, cy):
                 tx, ty = rect_center(rect)
                 candidates.append({
                     "priority": 9,
@@ -905,8 +942,8 @@ class SimpleRecorderWindow(ttk.Frame):
         cw = data.get("crafting_widgets", {})
         if isinstance(cw, dict):
             for widget_key, v in cw.items():
-                rect = _mk_rect((v or {}).get("bounds") if isinstance(v, dict) else None)
-                if rect and _rect_contains(rect, cx, cy):
+                rect = mk_rect((v or {}).get("bounds") if isinstance(v, dict) else None)
+                if rect and rect_contains(rect, cx, cy):
                     tx, ty = rect_center(rect)
                     candidates.append({
                         "priority": 8,
@@ -919,8 +956,8 @@ class SimpleRecorderWindow(ttk.Frame):
         # Hovered tile game objects
         ht = data.get("hoveredTile") or {}
         for obj in (ht.get("gameObjects", []) or []):
-            rect = _mk_rect(obj.get("clickbox"))
-            if rect and _rect_contains(rect, cx, cy):
+            rect = mk_rect(obj.get("clickbox"))
+            if rect and rect_contains(rect, cx, cy):
                 tx, ty = rect_center(rect)
                 candidates.append({
                     "priority": 7,
@@ -936,9 +973,9 @@ class SimpleRecorderWindow(ttk.Frame):
             best = None
             best_d = 1e18
             for obj in (data.get("closestGameObjects") or []):
-                rect = _mk_rect(obj.get("clickbox"))
+                rect = mk_rect(obj.get("clickbox"))
                 if rect:
-                    d = _center_distance(rect, cx, cy)
+                    d = center_distance(rect, cx, cy)
                     tx, ty = rect_center(rect)
                 else:
                     gx, gy = obj.get("canvasX"), obj.get("canvasY")
@@ -967,7 +1004,7 @@ class SimpleRecorderWindow(ttk.Frame):
         # Pick best candidate by priority then center proximity
         for c in candidates:
             rect = c.get("rect")
-            c["_dist"] = _center_distance(rect, cx, cy) if rect else 0.0
+            c["_dist"] = center_distance(rect, cx, cy) if rect else 0.0
         candidates.sort(key=lambda c: (-c["priority"], c["_dist"]))
         best = candidates[0]
 
@@ -1193,10 +1230,24 @@ class SimpleRecorderWindow(ttk.Frame):
             self._debug("Execute skipped: input disabled")
             return
 
+        # Immediate-mode support: if the current plan has tick(), call it and return.
+        try:
+            plan_impl = self._current_plan()
+        except Exception:
+            plan_impl = None
+
+        if plan_impl is not None and hasattr(plan_impl, "tick"):
+            try:
+                payload = self._latest_payload()
+                plan_impl.tick(self, payload)  # executes actions immediately
+                return
+            except Exception as e:
+                self._debug(f"Immediate plan tick error: {e}")
+
         plan = getattr(self, "_last_action_plan", None)
         if not plan or not isinstance(plan, dict) or not plan.get("steps"):
             self._table_set("next_action", "No plan available")
-            self._debug("Execute skipped: no plan available")
+            self._debug(f"Execute skipped: no plan available. Phase = {plan["phase"]}")
             return
 
         # Pull current plan & first step
@@ -1581,7 +1632,7 @@ class SimpleRecorderWindow(ttk.Frame):
         if self.run_enabled:
             # kick the loop
             self._schedule_auto_run_tick()
-            self._plan_ready_ms = _now_ms() + PRE_ACTION_DELAY_MS
+            self._plan_ready_ms = now_ms() + PRE_ACTION_DELAY_MS
 
         else:
             if self._auto_run_after_id:
@@ -1610,6 +1661,25 @@ class SimpleRecorderWindow(ttk.Frame):
             self._debug(f"refresh during auto-run error: {e}")
 
         data = self._latest_payload()
+        plan_impl = self._current_plan()
+
+        # Immediate-mode plans: if a plan defines tick(ui, payload),
+        # let it drive actions directly and skip the legacy “steps list” path.
+        if hasattr(plan_impl, "tick"):
+            try:
+                # Keep your phase visible in UI if the plan updates its own state
+                craft_recent = False  # or whatever you pass today
+                self._plan_phase = plan_impl.compute_phase(data, craft_recent)
+            except Exception:
+                # If plan’s compute_phase throws, don't block immediate path
+                pass
+
+            try:
+                plan_impl.tick(self, data)  # <-- plan uses ui.dispatch(...) to act now
+            except Exception as e:
+                self._debug(f"plan tick error: {e}")
+            return  # skip legacy list-based execution, this plan already acted
+
         bank_open = bool((data.get("bank") or {}).get("bankOpen", False))
         if bank_open:
             sapp = self._bank_count(data, "Sapphire")
@@ -1688,8 +1758,8 @@ class SimpleRecorderWindow(ttk.Frame):
                     return
                 root = json.loads(f.read_text(encoding="utf-8"))
                 data = root.get("data", {})
-                sapp = _inv_count(data, "Sapphire")
-                gold = _inv_count(data, "Gold bar")
+                sapp = inv_count(data, "Sapphire")
+                gold = inv_count(data, "Gold bar")
                 done = (sapp == 0) or (gold == 0)
             except Exception:
                 done = False
@@ -1766,18 +1836,18 @@ class SimpleRecorderWindow(ttk.Frame):
         # inventory contains 'Item'
         m = re.fullmatch(r"inventory\s+contains\s+'(.+)'", rule, re.I)
         if m:
-            return _inv_has(data, m.group(1))
+            return inv_has(data, m.group(1))
 
         # inventory does not contain 'Item'
         m = re.fullmatch(r"inventory\s+does\s+not\s+contain\s+'(.+)'", rule, re.I)
         if m:
-            return not _inv_has(data, m.group(1))
+            return not inv_has(data, m.group(1))
 
         # inventory count('Item') <op> N
         m = re.fullmatch(r"inventory\s+count\('(.+)'\)\s*(==|>=|<=|>|<)\s*(\d+)", rule, re.I)
         if m:
             item, op, n = m.group(1), m.group(2), int(m.group(3))
-            c = _inv_count(data, item)
+            c = inv_count(data, item)
             return {
                 "==": c == n, ">=": c >= n, "<=": c <= n, ">": c > n, "<": c < n
             }[op]
@@ -1803,7 +1873,7 @@ class SimpleRecorderWindow(ttk.Frame):
             "phase": getattr(self, "_plan_phase", None),
         }
 
-    def _advance_step_state(self):
+    def _advance_step_state(self, single_step: bool = False):
         """
         Drives one step through:
           prewait (pre-delay only) -> acting -> postwait (rules or retry on timeout)
@@ -1855,14 +1925,14 @@ class SimpleRecorderWindow(ttk.Frame):
             m = re.fullmatch(r"inventory\s+contains\s+'(.+)'", r, re.I)
             if m:
                 name = m.group(1)
-                cnt = _inv_count(data, name)
+                cnt = inv_count(data, name)
                 ok  = cnt > 0
                 return f"inventory contains '{name}'  (count={cnt})  => {ok}"
 
             m = re.fullmatch(r"inventory\s+does\s+not\s+contain\s+'(.+)'", r, re.I)
             if m:
                 name = m.group(1)
-                cnt = _inv_count(data, name)
+                cnt = inv_count(data, name)
                 ok  = cnt == 0
                 return f"inventory does not contain '{name}'  (count={cnt})  => {ok}"
 
@@ -1870,7 +1940,7 @@ class SimpleRecorderWindow(ttk.Frame):
             m = re.fullmatch(r"inventory\s+count\('(.+)'\)\s*(==|>=|<=|>|<)\s*(\d+)", r, re.I)
             if m:
                 item, op, n = m.group(1), m.group(2), int(m.group(3))
-                c = _inv_count(data, item)
+                c = inv_count(data, item)
                 res = {"==": c == n, ">=": c >= n, "<=": c <= n, ">": c > n, "<": c < n}[op]
                 return f"inventory count('{item}') {op} {n}  (now {c})  => {res}"
 
@@ -1898,7 +1968,12 @@ class SimpleRecorderWindow(ttk.Frame):
 
         # 2) ACTING: perform once, then go to postwait
         if stage == "acting":
-            self._execute_next_action()  # already refreshes
+            if single_step:
+                # Perform exactly this step now, no recursion into _execute_next_action
+                self._perform_step(step)
+            else:
+                # Legacy path executes whatever plan head currently is
+                self._execute_next_action()
             st["stage"] = "postwait"
             st["t0"] = now
             return False
@@ -2126,11 +2201,11 @@ class SimpleRecorderWindow(ttk.Frame):
         self._debug(f"IPC ping@{port} => {pong}")
 
     def _bank_count(self, payload: dict, name: str) -> int:
-        n = _norm_name(name)
+        n = norm_name(name)
         return sum(
             int(s.get("quantity") or 0)
-            for s in _bank_slots(payload)
-            if _norm_name(s.get("itemName")) == n
+            for s in bank_slots(payload)
+            if norm_name(s.get("itemName")) == n
         )
 
     def _stop_auto_run(self, reason: str):
@@ -2169,7 +2244,17 @@ class SimpleRecorderWindow(ttk.Frame):
             return None
 
     def _current_plan(self):
-        return get_plan(self.plan_var.get())
+        PlanCls = get_plan(self.plan_var.get())
+        if PlanCls is None:
+            return None
+        if not hasattr(self, "_plan_cache"):
+            self._plan_cache = {}
+        key = getattr(PlanCls, "id", PlanCls.__name__)
+        inst = self._plan_cache.get(key)
+        if inst is None or type(inst) is not PlanCls:
+            inst = PlanCls()
+            self._plan_cache[key] = inst
+        return inst
 
     # --- DEBUG: unified trace of click resolution ---
     def _trace_click(self, *, phase: str, step: dict, click: dict, target: dict,
@@ -2330,3 +2415,169 @@ class SimpleRecorderWindow(ttk.Frame):
             pass
 
         return int(self._canvas_wh["w"]), int(self._canvas_wh["h"])
+
+    def dispatch(self, step: dict) -> bool:
+        """
+        Execute a single step immediately (prewait -> act -> postwait).
+        Returns True if finished this call, False if needs another tick.
+        """
+        if not (self.input_enabled and self._action_ready()):
+            return False
+
+        # Reset mid-step if head changed
+        if self._step_state:
+            curr_action = self._step_state.get("step", {}).get("action")
+            new_action = step.get("action")
+            curr_phase = self._step_state.get("phase")
+            new_phase = getattr(self, "_plan_phase", None)
+            if (new_phase is not None and curr_phase != new_phase) or (new_action != curr_action):
+                self._step_state = None
+                self._mark_action_done()
+
+        if not self._step_state:
+            self._begin_step(step)
+
+        done = self._advance_step_state(single_step=True)
+        return bool(done)
+
+    def dispatch_many(self, steps: list[dict]) -> bool:
+        """
+        Convenience: run the first step in the list immediately.
+        Returns True if it completed, False otherwise.
+        """
+        if not steps:
+            return True
+        return self.dispatch(steps[0])
+
+    def _perform_step(self, step: dict):
+        """Execute exactly one step dict immediately."""
+        click = (step.get("click") or {})
+        target = (step.get("target") or {})
+        ctype = (click.get("type") or "").lower()
+
+        if ctype in ("rect-center", "rect-random"):
+            rect = target.get("bounds") or target.get("clickbox")
+            rect = rect if isinstance(rect, dict) else None
+            jitter_px = int(click.get("jitter_px") or 0) if ctype == "rect-random" else None
+            px, py = self._screen_point_from_rect(rect, jitter_px)
+            px, py = self._apply_canvas_offset(px, py)
+            if px is not None:
+                self._do_click_point(int(px), int(py))
+            return
+
+        if ctype in ("point", "canvas-point", "canvas_point"):
+            px, py = click.get("x"), click.get("y")
+            px, py = self._apply_canvas_offset(px, py)
+            if isinstance(px, (int, float)) and isinstance(py, (int, float)):
+                self._do_click_point(int(px), int(py))
+            return
+
+        if ctype in ("key-hold", "keyhold"):
+            key = (click.get("key") or "")
+            dur = int(click.get("ms") or 180)
+            if key:
+                if self._ensure_ipc():
+                    try:
+                        self.ipc.key_hold(key, dur)
+                    except Exception as e:
+                        self._debug(f"[ERR] key-hold IPC failed: {e}")
+            return
+
+        if ctype == "key":
+            key = (click.get("key") or "")
+            if key:
+                self._do_press_key(key)
+            return
+
+        if ctype == "type":
+            text = (click.get("text") or "")
+            enter = bool(click.get("enter", True))
+            per_ms = int(click.get("per_char_ms", 30))
+            should_focus = bool(click.get("focus", True))
+            if text and self._ensure_ipc():
+                pong = self.ipc._send({"cmd": "ping"})
+                if isinstance(pong, dict) and pong.get("ok"):
+                    try:
+                        self.ipc.type(text, enter=enter, per_char_ms=per_ms, focus=should_focus)
+                    except Exception as e:
+                        self._debug(f"[DBG] type error: {type(e).__name__}: {e}")
+            return
+
+        if ctype == "wait":
+            ms = int(click.get("ms", 0))
+            if ms > 0:
+                time.sleep(ms / 1000.0)
+            return
+
+        if ctype == "scroll":
+            try:
+                amt = int(click.get("amount", 0))
+            except Exception:
+                amt = 0
+            if self._ensure_ipc():
+                pong = self.ipc._send({"cmd": "ping"})
+                if isinstance(pong, dict) and pong.get("ok"):
+                    try:
+                        self.ipc.focus()
+                        self.ipc.scroll(amt)
+                    except Exception as e:
+                        self._debug(f"[DBG] scroll error: {type(e).__name__}: {e}")
+            return
+
+    # --- Plan loop integration (immediate-mode v2) ---
+
+    def _looping_plan(self):
+        try:
+            plan = self._current_plan()
+        except Exception:
+            return None
+        return plan if hasattr(plan, "loop") else None
+
+    def _start_plan_loop(self):
+        """Begin calling plan.loop(ui) periodically if supported."""
+        self._stop_plan_loop()
+        plan = self._looping_plan()
+        if not plan:
+            self._debug("[PLAN-LOOP] current plan has no loop(ui); loop runner idle")
+            return
+
+        def _tick():
+            p = self._looping_plan()
+            if not p:
+                self._debug("[PLAN-LOOP] plan changed or no loop(ui); stopping")
+                self._plan_loop_after_id = None
+                return
+
+            # run once
+            try:
+                payload = self._latest_payload()
+                p.loop(self, payload)
+            except Exception as e:
+                self._debug(f"[PLAN-LOOP] loop error: {e}")
+
+            # schedule next tick using the plan's own interval (dynamic)
+            try:
+                interval = int(getattr(p, "loop_interval_ms", 120))
+            except Exception:
+                interval = 120
+            interval = max(10, interval)  # safety floor
+            self._plan_loop_after_id = self.root.after(interval, _tick)
+
+        # kick once using the current plan's interval
+        try:
+            first_interval = int(getattr(plan, "loop_interval_ms", 120))
+        except Exception:
+            first_interval = 120
+        first_interval = max(10, first_interval)
+        self._plan_loop_after_id = self.root.after(first_interval, _tick)
+        self._debug("[PLAN-LOOP] started with plan-owned interval")
+
+    def _stop_plan_loop(self):
+        aid = getattr(self, "_plan_loop_after_id", None)
+        if aid:
+            try:
+                self.root.after_cancel(aid)
+            except Exception:
+                pass
+            self._plan_loop_after_id = None
+
