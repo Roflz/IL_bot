@@ -3,12 +3,18 @@ from typing import Optional
 
 from .runtime import emit
 from ..helpers.context import get_payload, get_ui
+from ..helpers.ipc import ipc_path
+from ..helpers.navigation import _first_blocking_door_from_waypoints
 from ..helpers.npc import closest_npc_by_name, npc_action_index
 from ..helpers.rects import unwrap_rect, rect_center_xy
 
+from typing import Optional
+
 def click_npc(name: str, payload: Optional[dict] = None, ui=None) -> Optional[dict]:
     """
-    Left-click an NPC by (partial) name. Uses rect-center if clickbox exists; else canvas point.
+    Left-click an NPC by (partial) name. If a CLOSED door lies on the path to the NPC,
+    click the earliest blocking door first and wait briefly for it to open; otherwise,
+    click the NPC.
     """
     if payload is None:
         payload = get_payload()
@@ -19,9 +25,41 @@ def click_npc(name: str, payload: Optional[dict] = None, ui=None) -> Optional[di
     if not npc:
         return None
 
+    # 1) Ask IPC for a short path *to the NPC tile* to find doors on the way.
+    gx, gy = npc.get("worldX"), npc.get("worldY")
+    if isinstance(gx, int) and isinstance(gy, int):
+        wps, dbg_path = ipc_path(payload, goal=(gx, gy), max_wps=24)
+        door_plan = _first_blocking_door_from_waypoints(wps)
+        if door_plan:
+            d = (door_plan.get("door") or {})
+            b = d.get("bounds")
+
+            if isinstance(b, dict) and all(k in b for k in ("x", "y", "width", "height")):
+                step = emit({
+                    "action": "open-door",
+                    "click": {"type": "rect-center"},
+                    "target": {"domain": "object", "name": d.get("name") or "Door", "bounds": b},
+                    "postconditions": [],  # or e.g. ["doorRecentlyToggled == true"]
+                    "timeout_ms": 1200
+                })
+            else:
+                c = d.get("canvas") or d.get("tileCanvas")
+                if not (isinstance(c, dict) and "x" in c and "y" in c):
+                    return None
+                step = emit({
+                    "action": "open-door",
+                    "click": {"type": "point", "x": int(c["x"]), "y": int(c["y"])},
+                    "target": {"domain": "object", "name": d.get("name") or "Door"},
+                    "postconditions": [],  # or e.g. ["doorRecentlyToggled == true"]
+                    "timeout_ms": 1200
+                })
+
+            return ui.dispatch(step)
+    # If no blocking door (or no geometry), fall through to normal click.
+
+    # 2) Normal NPC click
     rect = unwrap_rect(npc.get("clickbox"))
     if rect:
-        cx, cy = rect_center_xy(rect)
         step = emit({
             "action": "npc-click",
             "click": {"type": "rect-center"},

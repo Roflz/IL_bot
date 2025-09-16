@@ -2,11 +2,16 @@ import json, socket, time
 from typing import Optional, Tuple, List, Dict, Any
 from heapq import heappush, heappop
 
+from ilbot.ui.simple_recorder.helpers.context import get_payload
+
+
 def ipc_port_from_payload(payload: dict, default: int = 17000) -> int:
     return payload["__ipc"].port
 
 # in _ipc_send(...) inside action_plans.py
-def ipc_send(payload: dict, msg: dict, timeout: float = 0.35) -> Optional[dict]:
+def ipc_send(msg: dict, payload: dict | None = None, timeout: float = 0.35) -> Optional[dict]:
+    if payload is None:
+        payload = get_payload()
     host = "127.0.0.1"
     port = ipc_port_from_payload(payload)
     t0 = time.time()
@@ -39,7 +44,7 @@ def ipc_project_many(payload, wps):
       dbg: raw resp from IPC
     """
     tiles = [{"x": int(w["x"]), "y": int(w["y"])} for w in wps]
-    resp = ipc_send(payload, {"cmd": "tilexy_many", "tiles": tiles})
+    resp = ipc_send({"cmd": "tilexy_many", "tiles": tiles})
     results = resp.get("results", []) or []
 
     out = []
@@ -138,7 +143,7 @@ def ipc_path(payload, rect=None, goal=None, max_wps=None):
     if max_wps is not None:
         req["maxWps"] = int(max_wps)
 
-    resp = ipc_send(payload, req)
+    resp = ipc_send(req)
     # ← keep waypoints exactly as provided, including "door"
     wps = resp.get("waypoints", []) or []
     return wps, resp

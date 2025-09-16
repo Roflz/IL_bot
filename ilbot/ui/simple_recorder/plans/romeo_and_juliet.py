@@ -1,6 +1,8 @@
 # romeo_and_juliet_loop.py (your immediate-mode plan)
 import time
 
+from ..actions import objects
+from ..actions.player import get_player_plane
 from ..actions.timing import wait_until
 from ..constants import BANK_REGIONS, REGIONS
 import ilbot.ui.simple_recorder.actions.travel as trav
@@ -41,7 +43,7 @@ class RomeoAndJulietPlan(Plan):
 
     def loop(self, ui, payload):
         # phase = self.state.get("phase", "GO_TO_CLOSEST_BANK")
-        phase = "TALK_TO_JULIET_1"
+        phase = "TALK_TO_ROMEO_1"
 
         match(phase):
             case "GO_TO_CLOSEST_BANK":
@@ -138,11 +140,32 @@ class RomeoAndJulietPlan(Plan):
                                 return 1200
 
             case "TALK_TO_JULIET_1":
-                if not trav.in_area(REGIONS["JULIET_MANSION"]):
+                if inv.has_item("Message"):
+                    self.set_phase("TALK_TO_ROMEO_1")
+                    return
+                if not trav.in_area(REGIONS["JULIET_MANSION"]) and get_player_plane() == 0:
                     trav.go_to("JULIET_MANSION")
-
+                elif get_player_plane() == 0:
+                    objects.click("Staircase")
+                elif get_player_plane() == 1 and not chat.dialogue_is_open():
+                    npc.click_npc("Juliet")
+                elif chat.dialogue_is_open():
+                    chat.continue_dialogue()
                     return
 
+            case "TALK_TO_ROMEO_1":
+                if get_player_plane() == 1:
+                    objects.click("Staircase")
+                    return
+                elif not trav.in_area(REGIONS["VARROCK_SQUARE"]):
+                    trav.go_to("VARROCK_SQUARE")
+                    return
+                elif not chat.dialogue_is_open():
+                    npc.click_npc("Romeo")
+                    return 3000
+                else:
+                    chat.continue_dialogue()
+                    return
 
 
             case "DONE":

@@ -1,3 +1,5 @@
+from typing import Optional
+
 from ilbot.ui.simple_recorder.constants import *
 
 def list_nav_targets_for_ui() -> list[tuple[str, str]]:
@@ -141,3 +143,48 @@ def bank_rect(key: str) -> tuple[int,int,int,int] | None:
     t = BANK_REGIONS.get((key or "").strip().upper())
     return t
 
+def _merge_door_into_projection(wps: list[dict], proj: list[dict]) -> list[dict]:
+    # Build quick lookup: (x,y,p) -> door
+    door_by_w = {
+        (w["x"], w["y"], w["p"]): w.get("door")
+        for w in (wps or [])
+        if isinstance(w, dict) and "x" in w and "y" in w and "p" in w and w.get("door")
+    }
+
+    out = []
+    for row in (proj or []):
+        # ensure world coords are on the row; if not, attach them from original path
+        wx = row.get("world", {}).get("x", row.get("x"))
+        wy = row.get("world", {}).get("y", row.get("y"))
+        wp = row.get("world", {}).get("p", row.get("p"))
+        if isinstance(wx, int) and isinstance(wy, int) and isinstance(wp, int):
+            d = door_by_w.get((wx, wy, wp))
+            if d:
+                row = dict(row)  # copy so we don’t mutate shared structures
+                row["door"] = d
+        out.append(row)
+    return out
+
+def _first_blocking_door_from_waypoints(wps: list) -> Optional[dict]:
+    """
+    Given IPC 'waypoints' (each possibly containing a 'door' dict),
+    return the earliest waypoint that has a blocking (closed/unknown) door.
+    """
+    if not isinstance(wps, list):
+        return None
+
+    for wp in wps:
+        if not isinstance(wp, dict):
+            continue
+        d = wp.get("door")
+        if not isinstance(d, dict):
+            continue
+        present = bool(d.get("present"))
+        if not present:
+            continue
+        # treat 'closed: True' as blocking; if 'closed' missing, err on the side of blocking
+        closed = d.get("closed")
+        blocking = (closed is True) or ("closed" not in d)
+        if blocking:
+            return wp
+    return None
