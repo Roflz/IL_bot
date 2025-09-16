@@ -140,6 +140,7 @@ class RomeoAndJulietPlan(Plan):
             case "TALK_TO_JULIET_1":
                 if not trav.in_area(REGIONS["JULIET_MANSION"]):
                     trav.go_to("JULIET_MANSION")
+
                     return
 
 

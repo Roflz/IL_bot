@@ -9,41 +9,98 @@ from ..helpers.ipc import ipc_path, ipc_project_many
 from ..helpers.context import get_payload, get_ui
 from ..helpers.navigation import closest_bank_key, bank_rect, player_in_rect
 
-def go_to(rect_or_key, payload: dict | None = None, ui=None) -> dict | None:
-    """
-    Issue a single 'move toward area' click using IPC waypoints.
-    - rect_or_key: either a key (str) OR a rect tuple (minX, maxX, minY, maxY)
+def _is_blocking_door(door: dict) -> bool:
+    if not isinstance(door, dict):
+        return False
+    if not door.get("present"):
+        return False
+    # If 'closed' missing, be conservative and treat as blocking
+    return door.get("closed", True) is True
 
-    Returns ui.dispatch(step) on success, else None if no usable waypoint this tick.
+def _pick_click_from_door(door: dict):
+    """Prefer hull center, then tile center; return (x, y) or None."""
+    if not isinstance(door, dict):
+        return None
+    c = door.get("canvas")
+    if isinstance(c, dict) and "x" in c and "y" in c:
+        return int(c["x"]), int(c["y"])
+    tc = door.get("tileCanvas")
+    if isinstance(tc, dict) and "x" in tc and "y" in tc:
+        return int(tc["x"]), int(tc["y"])
+    # As a last resort, if bounds are there, click rect center
+    b = door.get("bounds")
+    if isinstance(b, dict) and all(k in b for k in ("x", "y", "width", "height")):
+        return int(b["x"] + b["width"] // 2), int(b["y"] + b["height"] // 2)
+    return None
+
+def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None) -> dict | None:
+    """
+    Issue one 'move toward area' click using IPC waypoints.
+    If any waypoint up to the chosen one has a CLOSED door, click the door first.
     """
     if payload is None:
         payload = get_payload()
     if ui is None:
         ui = get_ui()
 
-    rect = get_nav_rect(rect_or_key)
-    if not (isinstance(rect, (tuple, list)) and len(rect) == 4):
-        return None
+    # accept either nav key or raw rect (minX,maxX,minY,maxY)
+    if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
+        rect = tuple(rect_or_key)
+        rect_key = "custom"
+    else:
+        rect_key = str(rect_or_key)
+        rect = get_nav_rect(rect_key)
+        if not (isinstance(rect, (tuple, list)) and len(rect) == 4):
+            return None
 
+    # 1) pull path (preserving 'door' field in each waypoint)
     wps, dbg_path = ipc_path(payload, rect=tuple(rect))
     if not wps:
         return None
 
+    # 2) project waypoints to canvas (merge door info!)
     proj, dbg_proj = ipc_project_many(payload, wps)
     usable = [p for p in proj if isinstance(p, dict) and p.get("canvas")]
     if not usable:
         return None
 
-    # Farther is usually better for progress; pick among farthest few
-    chosen = usable[-1] if len(usable) < 5 else usable[-3]
-    cx, cy = int(chosen["canvas"]["x"]), int(chosen["canvas"]["y"])
+    # choose a waypoint a bit ahead to smooth movement
+    chosen_idx_in_usable = -3 if len(usable) >= 5 else -1
+    chosen = usable[chosen_idx_in_usable]
+    # map back to absolute index in the proj list
+    chosen_abs_idx = proj.index(chosen)
 
+    # 3) scan from start to chosen_abs_idx for the earliest blocking door
+    for i in range(0, chosen_abs_idx + 1):
+        p = proj[i]
+        door = p.get("door")
+        if _is_blocking_door(door):
+            click = _pick_click_from_door(door)
+            if click:
+                cx, cy = click
+                step = {
+                    "action": "open-door",
+                    "description": f"Open door @ {p['world']['x']},{p['world']['y']}",
+                    "click": {"type": "point", "x": cx, "y": cy},
+                    "target": {
+                        "domain": "object",
+                        "name": str(door.get("name", "Door")),
+                        "id": door.get("id"),
+                        "orientation": door.get("orientation"),
+                    },
+                    "debug": {"door_idx": i, "world": p["world"], "ipc_nav": {"dbg_path": dbg_path, "dbg_proj": dbg_proj}},
+                }
+                return ui.dispatch(step)
+            # if no click geometry, fall through to movement this tick
+
+    # 4) no blocking door found ⇒ normal movement click
+    cx, cy = int(chosen["canvas"]["x"]), int(chosen["canvas"]["y"])
     step = {
         "action": "click-ground",
-        "description": f"Move toward {rect_or_key}",
+        "description": f"Move toward {rect_key}",
         "click": {"type": "point", "x": cx, "y": cy},
-        "target": {"domain": "ground", "name": f"Waypoint→{rect_or_key}", "world": chosen["world"]},
-        "debug": {"ipc_nav": {"dbg_path": dbg_path, "dbg_proj": dbg_proj}},
+        "target": {"domain": "ground", "name": f"Waypoint→{rect_key}", "world": chosen.get("world")},
+        "debug": {"ipc_nav": {"dbg_path": dbg_path, "dbg_proj": dbg_proj, "chosen_idx": chosen_abs_idx}},
     }
     return ui.dispatch(step)
 

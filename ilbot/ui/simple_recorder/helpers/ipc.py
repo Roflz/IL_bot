@@ -31,27 +31,36 @@ def ipc_send(payload: dict, msg: dict, timeout: float = 0.35) -> Optional[dict]:
         print(f"[IPC ERR] {type(e).__name__}: {e} ({dt} ms)")
         return None
 
-def ipc_project_many(payload: dict, tiles_w: List[Dict[str, int]]) -> Tuple[List[Dict[str, Any]], dict]:
+def ipc_project_many(payload, wps):
     """
-    Batch project world tiles to canvas using tilexy_many.
-    Returns (list_of_results, debug). Each result ≈
-      {"world":{"x":..,"y":..,"p":..}, "projection":{...}, "canvas":{"x":..,"y":..}} when onscreen.
+    Project world tiles to canvas AND preserve 'door' metadata.
+    Returns:
+      out: [{onscreen, canvas, world:{x,y,p}, door?}, ...]
+      dbg: raw resp from IPC
     """
-    if not tiles_w:
-        return [], {"warn": "no tiles to project"}
+    tiles = [{"x": int(w["x"]), "y": int(w["y"])} for w in wps]
+    resp = ipc_send(payload, {"cmd": "tilexy_many", "tiles": tiles})
+    results = resp.get("results", []) or []
 
-    req = {"cmd": "tilexy_many", "tiles": [{"x": int(t["x"]), "y": int(t["y"])} for t in tiles_w]}
-    resp = ipc_send(payload, req)
-    dbg = {"ipc_req": req, "ipc_resp": resp}
+    out = []
+    for i, (w, r) in enumerate(zip(wps, results)):
+        row = {
+            "onscreen": (r or {}).get("onscreen"),
+            "canvas":  (r or {}).get("canvas"),
+            "world":   {"x": int(w["x"]), "y": int(w["y"]), "p": int(w.get("p", 0))},
+        }
+        # ✨ keep door info from projection if present, else from the waypoint itself
+        door = None
+        if isinstance(r, dict) and isinstance(r.get("door"), dict):
+            door = r["door"]
+        elif isinstance(w, dict) and isinstance(w.get("door"), dict):
+            door = w["door"]
+        if door:
+            row["door"] = door
 
-    out: List[Dict[str, Any]] = []
-    results = (resp or {}).get("results") or []
-    for t, r in zip(tiles_w, results):
-        item = {"world": {"x": t["x"], "y": t["y"], "p": t.get("p", 0)}, "projection": r}
-        if r and r.get("ok") and r.get("onscreen") and isinstance(r.get("canvas"), dict):
-            item["canvas"] = {"x": int(r["canvas"]["x"]), "y": int(r["canvas"]["y"])}
-        out.append(item)
-    return out, dbg
+        out.append(row)
+
+    return out, resp
 
 def ipc_mask(payload: dict, radius: int = 15) -> dict | None:
     ipc = payload.get("__ipc")
@@ -118,17 +127,18 @@ def rows_to_world(mask: dict, rc_path: list[tuple[int,int]]) -> list[tuple[int,i
         out.append((wx, wy))
     return out
 
-def ipc_path(payload: dict, *, rect: Tuple[int,int,int,int] | None = None,
-              goal: Tuple[int,int] | None = None, max_wps: int = 20) -> Tuple[List[Dict[str,int]], dict]:
-    if rect is None and goal is None:
-        return [], {"err":"no rect/goal"}
-    req = {"cmd": "path", "maxWps": int(max_wps)}
-    if rect: req.update({"minX": rect[0], "maxX": rect[1], "minY": rect[2], "maxY": rect[3]})
-    if goal: req.update({"goalX": int(goal[0]), "goalY": int(goal[1])})
-    resp = ipc_send(payload, req); dbg = {"ipc_req": req, "ipc_resp": resp}
-    if not resp or not resp.get("ok"): return [], dbg
-    out = []
-    for w in resp.get("waypoints") or []:
-        try: out.append({"x": int(w["x"]), "y": int(w["y"]), "p": int(w.get("p",0))})
-        except Exception: pass
-    return out, dbg
+def ipc_path(payload, rect=None, goal=None, max_wps=None):
+    req = {"cmd": "path"}
+    if rect:
+        minX, maxX, minY, maxY = rect
+        req.update({"minX": minX, "maxX": maxX, "minY": minY, "maxY": maxY})
+    if goal:
+        gx, gy = goal
+        req.update({"goalX": gx, "goalY": gy})
+    if max_wps is not None:
+        req["maxWps"] = int(max_wps)
+
+    resp = ipc_send(payload, req)
+    # ← keep waypoints exactly as provided, including "door"
+    wps = resp.get("waypoints", []) or []
+    return wps, resp
