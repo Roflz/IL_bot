@@ -53,13 +53,12 @@ class RuneLiteIPC:
             time.sleep(delay / 1000.0)
         return self._send({"cmd": "key", "k": str(k)})
 
-    def type(self, text: str, enter: bool = True, per_char_ms: int = 30, focus: bool = True):
+    def type(self, text: str, enter: bool = True, per_char_ms: int = 30):
         payload = {
             "cmd": "type",
             "text": str(text),
             "enter": bool(enter),
             "perCharMs": int(per_char_ms),
-            "focus": bool(focus),
         }
         return self._send(payload)
 

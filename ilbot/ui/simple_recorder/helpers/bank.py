@@ -1,4 +1,6 @@
 from .utils import norm_name
+from ..constants import BANK_REGIONS
+
 
 def bank_slots_matching(payload: dict, names: list[str]) -> list[dict]:
     """Return bank slots whose itemName matches (case-insensitive) any of names."""
@@ -65,3 +67,15 @@ def nearest_banker(payload: dict) -> dict | None:
         if d2 < best_d2:
             best, best_d2 = npc, d2
     return best
+
+def near_any_bank(payload) -> bool:
+    """
+    True if the player is within any known bank region.
+    Expects BANK_REGIONS = {name: (minX, maxX, minY, maxY), ...}
+    and a helper in_area(rect, payload).
+    """
+    try:
+        from ilbot.ui.simple_recorder.actions.travel import in_area
+        return any(in_area(rect, payload) for rect in BANK_REGIONS.values())
+    except Exception:
+        return False

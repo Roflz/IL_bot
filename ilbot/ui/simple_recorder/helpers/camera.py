@@ -200,3 +200,117 @@ def zoom_steps_toward(
     _ZOOM_STATE["last_sent_ms"] = now
 
     return steps
+
+
+# camera_keys.py (prefix-free)
+import time
+import random
+from ilbot.ui.simple_recorder.helpers.context import get_payload
+from ilbot.ui.simple_recorder.helpers.ipc import ipc_send
+
+# ---------------- basics ----------------
+
+def _screen(payload=None):
+    p = payload or get_payload()
+    w = int(p.get("screenW") or p.get("canvasW") or 765)
+    h = int(p.get("screenH") or p.get("canvasH") or 503)
+    return w, h, w // 2, h // 2
+
+def zoom(steps: int):
+    """Mouse wheel zoom. Positive -> zoom in, Negative -> zoom out."""
+    if steps:
+        ipc_send({"cmd": "scroll", "amount": int(steps)})
+
+def _tap(key: str, hold_ms: int = 60, reps: int = 1, pause: float = 0.02):
+    for _ in range(max(1, reps)):
+        ipc_send({"cmd": "keyHold", "key": key, "ms": int(hold_ms)})
+        time.sleep(pause)
+
+def yaw(delta_steps: int, step_ms: int = 60):
+    """Rotate LEFT/RIGHT with tiny holds. Positive -> RIGHT, Negative -> LEFT."""
+    key = "RIGHT" if delta_steps > 0 else "LEFT"
+    _tap(key, hold_ms=step_ms, reps=abs(int(delta_steps)))
+
+def pitch(delta_steps: int, step_ms: int = 80):
+    """Tilt camera with UP/DOWN. Positive -> UP, Negative -> DOWN."""
+    key = "UP" if delta_steps > 0 else "DOWN"
+    _tap(key, hold_ms=step_ms, reps=abs(int(delta_steps)))
+
+# ---------------- heuristics ----------------
+
+def face_world_point(wx: int, wy: int, timeout_ms: int = 900, payload=None) -> bool:
+    """
+    Center target world tile horizontally using LEFT/RIGHT taps.
+    Returns True if horizontally “good enough”, else False after timeout.
+    """
+    p = payload or get_payload()
+    w, h, cx, _ = _screen(p)
+    margin = max(48, w // 10)
+    deadline = time.time() + timeout_ms / 1000.0
+
+    while time.time() < deadline:
+        proj = ipc_send({"cmd": "tilexy", "x": int(wx), "y": int(wy)}) or {}
+        if proj.get("ok") and proj.get("onscreen"):
+            px = int(proj["canvas"]["x"])
+            dx = px - cx
+            if abs(dx) <= margin:
+                return True
+            taps = max(1, min(5, abs(dx) // 70))
+            yaw(-taps if dx > 0 else +taps)  # if target is right of center, yaw LEFT
+        else:
+            yaw(random.choice((-2, 2)))  # exploratory
+        time.sleep(0.05)
+    return False
+
+def ensure_clickable(point_or_rect: dict, payload=None, max_rot_ms: int = 800) -> bool:
+    """
+    Make a 2D point/rect center safer to click using ONLY arrow keys + scroll.
+    Returns True if likely good to click now.
+    Accepts {"x":..,"y":..} or {"bounds":{x,y,width,height}}; optional {"world":{"x":..,"y":..}}.
+    """
+    p = payload or get_payload()
+    w, h, cx, _ = _screen(p)
+
+    # Normalize to a point
+    if "bounds" in point_or_rect:
+        b = point_or_rect["bounds"]
+        px = int(b["x"] + b["width"] / 2)
+        py = int(b["y"] + b["height"] / 2)
+    else:
+        px, py = int(point_or_rect["x"]), int(point_or_rect["y"])
+
+    # If already comfortably on screen, done
+    if 24 <= px <= w - 24 and 24 <= py <= h - 24:
+        return True
+
+    # Nudge pitch/zoom if low or high
+    if py > h - 40:
+        pitch(+2)
+        zoom(+1)
+    elif py < 40:
+        pitch(-1)
+
+    # Prefer world-aware recenter
+    world = point_or_rect.get("world")
+    if isinstance(world, dict) and "x" in world and "y" in world:
+        return face_world_point(int(world["x"]), int(world["y"]), timeout_ms=max_rot_ms, payload=p)
+
+    # Fallback: heuristic horizontal recenter (no world coords)
+    deadline = time.time() + max_rot_ms / 1000.0
+    while time.time() < deadline:
+        if 24 <= px <= w - 24 and 24 <= py <= h - 24:
+            return True
+        taps = max(1, min(4, abs(px - cx) // 80))
+        yaw(+taps if px < cx else -taps)
+        time.sleep(0.05)
+        return True  # let caller re-fetch the point next tick
+    return False
+
+# ---------------- prep for walking ----------------
+
+def prepare_for_walk(target_world_xy: tuple[int, int] | None, payload=None):
+    """Before long walks: slight top-down bias + face rough goal."""
+    pitch(+2)
+    zoom(+1)
+    if target_world_xy and len(target_world_xy) == 2:
+        face_world_point(int(target_world_xy[0]), int(target_world_xy[1]), timeout_ms=600, payload=payload or get_payload())

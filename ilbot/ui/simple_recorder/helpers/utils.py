@@ -1,5 +1,8 @@
 import re, time
 
+from ilbot.ui.simple_recorder.actions.runtime import emit
+from ilbot.ui.simple_recorder.helpers.context import get_payload, get_ui
+
 _STEP_HITS: dict[str, int] = {}
 _RS_TAG_RE = re.compile(r'</?col(?:=[0-9a-fA-F]+)?>')
 
@@ -65,3 +68,19 @@ def get_plan(plan_id: str):
 _CRAFT_ANIMS = {899}
 def is_crafting_anim(anim_id: int) -> bool:
     return anim_id in _CRAFT_ANIMS
+
+
+def press_enter(payload: dict | None = None, ui=None) -> dict | None:
+    if payload is None:
+        payload = get_payload()
+    if ui is None:
+        ui = get_ui()
+
+    step = emit({
+        "id": "key-enter",
+        "action": "key",
+        "description": "Press Enter",
+        "click": {"type": "key", "key": "ENTER"},
+        "preconditions": [], "postconditions": []
+    })
+    return ui.dispatch(step)

@@ -10,6 +10,9 @@ from ..helpers.rects import unwrap_rect, rect_center_xy
 
 from typing import Optional
 
+from ..services.camera_integration import dispatch_with_camera
+
+
 def click_npc(name: str, payload: Optional[dict] = None, ui=None) -> Optional[dict]:
     """
     Left-click an NPC by (partial) name. If a CLOSED door lies on the path to the NPC,
@@ -28,7 +31,7 @@ def click_npc(name: str, payload: Optional[dict] = None, ui=None) -> Optional[di
     # 1) Ask IPC for a short path *to the NPC tile* to find doors on the way.
     gx, gy = npc.get("worldX"), npc.get("worldY")
     if isinstance(gx, int) and isinstance(gy, int):
-        wps, dbg_path = ipc_path(payload, goal=(gx, gy), max_wps=24)
+        wps, dbg_path = ipc_path(payload, goal=(gx, gy))
         door_plan = _first_blocking_door_from_waypoints(wps)
         if door_plan:
             d = (door_plan.get("door") or {})
@@ -54,7 +57,7 @@ def click_npc(name: str, payload: Optional[dict] = None, ui=None) -> Optional[di
                     "timeout_ms": 1200
                 })
 
-            return ui.dispatch(step)
+            return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)
     # If no blocking door (or no geometry), fall through to normal click.
 
     # 2) Normal NPC click
@@ -65,7 +68,7 @@ def click_npc(name: str, payload: Optional[dict] = None, ui=None) -> Optional[di
             "click": {"type": "rect-center"},
             "target": {"domain": "npc", "name": npc.get("name"), "bounds": rect},
         })
-        return ui.dispatch(step)
+        return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)
 
     if isinstance(npc.get("canvasX"), (int, float)) and isinstance(npc.get("canvasY"), (int, float)):
         step = emit({
@@ -73,7 +76,7 @@ def click_npc(name: str, payload: Optional[dict] = None, ui=None) -> Optional[di
             "click": {"type": "point", "x": int(npc["canvasX"]), "y": int(npc["canvasY"])},
             "target": {"domain": "npc", "name": npc.get("name")},
         })
-        return ui.dispatch(step)
+        return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)
 
     return None
 
@@ -118,7 +121,7 @@ def click_npc_action(name: str, action: str, payload: Optional[dict] = None, ui=
             "click": ({"type": "rect-center"} if rect else {"type": "point", **point}),
             "target": {"domain": "npc", "name": name_str, **anchor},
         })
-        return ui.dispatch(step)
+        return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)
 
     # Need context menu → right-click then select by index
     step = emit({
@@ -135,4 +138,4 @@ def click_npc_action(name: str, action: str, payload: Optional[dict] = None, ui=
         "target": {"domain": "npc", "name": name_str, **anchor} if rect else {"domain": "npc", "name": name_str},
         "anchor": point  # keep explicit anchor as you do elsewhere
     })
-    return ui.dispatch(step)
+    return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)

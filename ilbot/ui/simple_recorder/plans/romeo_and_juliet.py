@@ -14,7 +14,9 @@ import ilbot.ui.simple_recorder.actions.chat as chat
 
 from .base import Plan
 from ..helpers import quest
+from ..helpers.bank import near_any_bank
 from ..helpers.ge import widget_by_id_text, ge_buy_confirm_widget
+from ..helpers.utils import press_enter
 from ..helpers.widgets import rect_center_from_widget
 
 
@@ -22,9 +24,8 @@ class RomeoAndJulietPlan(Plan):
     id = "ROMEO_AND_JULIET"
     label = "Quest: Romeo & Juliet"
 
-
     def __init__(self):
-        self.state = {"phase": "GO_TO_CLOSEST_BANK"}
+        self.state = {"phase": "GO_TO_CLOSEST_BANK"}  # gate: ensure items first
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
 
@@ -42,31 +43,45 @@ class RomeoAndJulietPlan(Plan):
         return phase
 
     def loop(self, ui, payload):
-        # phase = self.state.get("phase", "GO_TO_CLOSEST_BANK")
-        phase = "TALK_TO_ROMEO_1"
+        phase = self.state.get("phase", "GO_TO_CLOSEST_BANK")
 
         match(phase):
             case "GO_TO_CLOSEST_BANK":
-                trav.go_to_closest_bank(payload)
-                ui.debug("[RJ] Reached closest bank; advancing to DONE")
-                self.state["phase"] = "CHECK_BANK_FOR_QUEST_ITEMS"
+                if inv.has_item("Cadava Berries") and quest.quest_state("Romeo & Juliet") == 'NOT_STARTED':
+                    self.set_phase("START_QUEST")
+                    return
+                if not near_any_bank(payload):
+                    trav.go_to_closest_bank(payload)
+                else:
+                    ui.debug("[RJ] Reached closest bank; advancing to DONE")
+                    self.state["phase"] = "CHECK_BANK_FOR_QUEST_ITEMS"
                 return
 
             case "CHECK_BANK_FOR_QUEST_ITEMS":
                 if bank.is_closed():
                     bank.open_bank()
-                    wait_until(bank.is_open, max_wait_ms=5000, min_wait_ms=1000)
+                    return
+                elif bank.is_open():
+                    if bank.has_item("Cadava berries"):
+                        bank.withdraw_item("Cadava berries")
+
+                        return
                     bank.deposit_inventory()
-                    wait_until(inv.is_empty)
-                    if bank.has_item("Cavada berries"):
-                        bank.withdraw_item("Cavada berries")
-                        bank.close_bank()
-                        self.set_phase("DONE")
+                    if wait_until(inv.is_empty, max_wait_ms=5000, min_wait_ms=200):
+                        pass
                     else:
-                        bank.close_bank()
-                        self.set_phase("BUY_QUEST_ITEMS_FROM_GE")
+                        return
+                else:
+                    return
+                if bank.is_open() and bank.has_item("Cavada berries"):
+                    bank.withdraw_item("Cavada berries")
+                    bank.close_bank()
+                    self.set_phase("DONE")
+                    return
                 else:
                     bank.close_bank()
+                    self.set_phase("BUY_QUEST_ITEMS_FROM_GE")
+                    return
 
             case "BUY_QUEST_ITEMS_FROM_GE":
                 if inv.has_item("Cadava berries") and ge.is_closed():
@@ -81,10 +96,16 @@ class RomeoAndJulietPlan(Plan):
                         wait_until(ge.is_open, max_wait_ms=5000)
                         return
                     elif inv.has_item("coins") and ge.is_open():
-                        ge.begin_buy_offer()
-                        wait_until(ge.ge_offer_open, max_wait_ms=5000)
+                        if not ge.offer_open():
+                            ge.begin_buy_offer()
+                            if not wait_until(ge.ge_offer_open, max_wait_ms=5000):
+                                return
                         ge.type_item_name("Cadava berries")
-                        wait_until(lambda: ge.selected_item_is("Cadava berries"))
+                        if wait_until(lambda: ge.buy_chatbox_first_item_is("Cadava berries")):
+                            press_enter()
+                            return
+                        if not wait_until(lambda: ge.selected_item_is("Cadava berries")):
+                            return
                         for _ in range(5):
                             plus = widget_by_id_text( 30474266, "+5%")
                             if not plus:
@@ -107,7 +128,8 @@ class RomeoAndJulietPlan(Plan):
                         return
                     elif not inv.has_item("coins") and bank.is_closed():
                         bank.open_bank()
-                        wait_until(bank.is_open, max_wait_ms=6000)
+                        if not wait_until(bank.is_open, max_wait_ms=6000):
+                            return
                         bank.deposit_inventory()
                         bank.withdraw_item("coins", withdraw_all=True)
                         wait_until(lambda: inv.has_item("coins"))
@@ -170,3 +192,122 @@ class RomeoAndJulietPlan(Plan):
 
             case "DONE":
                 return
+
+    def ensure_have_item(self, item: str, ui, payload) -> bool | None:
+        """
+        Idempotent: returns True only when the item is in inventory.
+        Otherwise it performs the next minimal step toward getting it and returns None.
+        """
+        # 1) Already in inventory?
+        if inv.has_item(item):
+            return True
+
+        # 2) Nearby bank? Open and try to withdraw.
+        if near_any_bank(payload):
+            if bank.is_closed():
+                bank.open_bank()
+                wait_until(bank.is_open, max_wait_ms=6000)
+                return None
+
+            if bank.is_open():
+                # If we’re carrying junk, clear it once so withdraw has space.
+                if not inv.is_empty():
+                    bank.deposit_inventory()
+                    wait_until(inv.is_empty, max_wait_ms=4000, min_wait_ms=150)
+                    return None
+
+                # Withdraw if present; otherwise move on.
+                if bank.has_item(item):
+                    bank.withdraw_item(item)
+                    wait_until(lambda: inv.has_item(item), max_wait_ms=4000)
+                    bank.close_bank()
+                    return None  # next loop sees inv.has_item(item) and returns True
+                else:
+                    bank.close_bank()
+                    # fall through to GE
+                    # (don’t return True—still need to buy)
+
+        # 3) Not in bank, buy at GE (this function is fully idempotent across ticks)
+        return self._buy_item_from_ge(item, ui, payload)
+
+    def _buy_item_from_ge(self, item: str, ui, payload, price_bumps: int = 5) -> bool | None:
+        """
+        Returns True when item is in inventory.
+        Otherwise performs exactly one small step toward buying it and returns None.
+        Safe to call every tick.
+        """
+        # If we already have it (race), bail out True.
+        if inv.has_item(item):
+            return True
+
+        # Go to GE
+        if not trav.in_area(BANK_REGIONS["GE"]):
+            trav.go_to_ge()
+            return None
+
+        # Ensure coins: if we don’t have any, grab from bank quickly (GE has a bank close by)
+        if not inv.has_item("coins"):
+            if bank.is_closed():
+                bank.open_bank()
+                wait_until(bank.is_open, max_wait_ms=6000)
+                return None
+            if bank.is_open():
+                # make space then withdraw all coins
+                if not inv.is_empty():
+                    bank.deposit_inventory()
+                    wait_until(inv.is_empty, max_wait_ms=4000, min_wait_ms=150)
+                    return None
+                bank.withdraw_item("coins", withdraw_all=True)
+                wait_until(lambda: inv.has_item("coins"), max_wait_ms=3000)
+                return None
+
+        # Open GE
+        if ge.is_closed():
+            ge.open_ge()
+            wait_until(ge.is_open, max_wait_ms=5000)
+            return None
+
+        # Open buy offer panel
+        if not ge.offer_open():
+            ge.begin_buy_offer()
+            if not wait_until(ge.ge_offer_open, max_wait_ms=5000):
+                return None
+            return None
+
+        # Type item name and select first result
+        ge.type_item_name(item)
+        if wait_until(lambda: ge.buy_chatbox_first_item_is(item), max_wait_ms=2000):
+            # You added a direct key helper; use it to confirm the selection fast.
+            press_enter()
+            return None
+
+        # Wait until the selected item is locked in
+        if not wait_until(lambda: ge.selected_item_is(item), max_wait_ms=2000):
+            return None
+
+        # Nudge price a few times (+5%)
+        for _ in range(max(0, int(price_bumps))):
+            plus = widget_by_id_text(30474266, "+5%")
+            if not plus:
+                break
+            cx, cy = rect_center_from_widget(plus)
+            ui.dispatch({
+                "id": "ge-plus5",
+                "action": "click",
+                "description": "+5% price",
+                "target": {"name": "+5%", "bounds": plus.get("bounds")},
+                "click": {"type": "point", "x": cx, "y": cy},
+            })
+            time.sleep(0.25)
+
+        # Confirm buy
+        ge.confirm_buy()
+        wait_until(lambda: ge_buy_confirm_widget(payload) is None, max_wait_ms=8000)
+
+        # Collect to inventory
+        ge.collect_to_inventory()
+        if not wait_until(lambda: inv.has_item(item), max_wait_ms=4000):
+            return None
+
+        ge.close_ge()
+        return True

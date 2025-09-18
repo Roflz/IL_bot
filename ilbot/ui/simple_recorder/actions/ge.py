@@ -46,6 +46,28 @@ def has_collect(payload: dict | None = None) -> bool:
         payload = get_payload()
     return bool(widget_by_id_text_contains(payload, 30474246, "collect"))
 
+def buy_chatbox_text_input_contains(substr: str, payload: dict | None = None) -> bool:
+    if payload is None:
+        payload = get_payload()
+    cb = (payload.get("ge_buy_chatbox") or {})
+    p = (cb.get("prompt") or {})
+    text = (p.get("textStripped") or p.get("text") or "")
+    s = (substr or "").strip()
+    return bool(s) and (s.lower() in text.lower())
+
+def buy_chatbox_first_item_is(name: str, payload: dict | None = None) -> bool:
+    if payload is None:
+        payload = get_payload()
+    cb = (payload.get("ge_buy_chatbox") or {})
+    items = (cb.get("items") or [])
+    if not items:
+        return False
+    first = items[0] or {}
+    nm = first.get("nameStripped") or first.get("name") or ""
+    want = (name or "").strip()
+    return bool(want) and (want.lower() in nm.lower())
+
+
 
 # ---------- one-step actions ----------
 def open_ge(payload: dict | None = None, ui=None) -> dict | None:
@@ -54,7 +76,7 @@ def open_ge(payload: dict | None = None, ui=None) -> dict | None:
     if ui is None:
         ui = get_ui()
 
-    # --- Clerk via context-select ("Exchange") ---
+    # --- Prefer the Clerk; use live context menu to pick "Exchange" ---
     npc = None
     for cand in (payload.get("closestNPCs") or []) + (payload.get("npcs") or []):
         nm = (cand.get("name") or "").lower()
@@ -64,35 +86,25 @@ def open_ge(payload: dict | None = None, ui=None) -> dict | None:
             break
 
     if npc and isinstance(npc.get("canvasX"), (int, float)) and isinstance(npc.get("canvasY"), (int, float)):
-        acts = [a.lower() for a in (npc.get("actions") or []) if a]
-        try:
-            idx = acts.index("exchange")
-        except ValueError:
-            idx = None
+        cx = int(npc["canvasX"])
+        cy = int(npc["canvasY"]) - 8  # keep your slight lift
+        step = emit({
+            "id": "ge-open-clerk",
+            "action": "open-ge-context",
+            "description": "Open GE (clerk via context menu: Exchange)",
+            "click": {
+                "type": "context-select",   # uses IPC 'menu' to match rows by text + rect
+                "option": "exchange",       # case-insensitive
+                "target": "grand exchange clerk",  # substring match against target text
+                "x": cx,                    # right-click anchor (canvas)
+                "y": cy,
+                "open_delay_ms": 120
+            },
+            "target": {"domain": "npc", "name": npc.get("name"), "id": npc.get("id")},
+        })
+        return ui.dispatch(step)
 
-        if idx is not None:
-            cx = int(npc["canvasX"])
-            cy = int(npc["canvasY"]) - 8  # keep your original slight lift
-            step = emit({
-                "id": "ge-open-clerk",
-                "action": "open-ge-context",
-                "description": "Open GE (clerk via context menu: Exchange)",
-                "click": {
-                    "type": "context-select",
-                    "index": int(idx),      # 0-based index of "Exchange"
-                    "x": cx,
-                    "y": cy,
-                    "row_height": 16,
-                    "start_dy": 18,
-                    "open_delay_ms": 120
-                },
-                "target": {"domain": "npc", "name": npc.get("name"), "id": npc.get("id")},
-                "preconditions": [], "postconditions": []
-            })
-            return ui.dispatch(step)
-        # If no "Exchange" entry, fall through to booth path below
-
-    # --- Booth (unchanged: simple left-click on point) ---
+    # --- Fallback: booth simple left-click (unchanged) ---
     booth = closest_object_by_names(payload, ["grand exchange booth"])
     if booth and isinstance(booth.get("canvasX"), (int, float)) and isinstance(booth.get("canvasY"), (int, float)):
         step = emit({
@@ -101,12 +113,10 @@ def open_ge(payload: dict | None = None, ui=None) -> dict | None:
             "description": "Open GE (booth)",
             "click": {"type": "point", "x": int(booth["canvasX"]), "y": int(booth["canvasY"]) - 12},
             "target": {"domain": "object", "name": booth.get("name"), "id": booth.get("id")},
-            "preconditions": [], "postconditions": []
         })
         return ui.dispatch(step)
 
     return None
-
 def close_ge(payload: dict | None = None, ui=None) -> dict | None:
     if payload is None: payload = get_payload()
     if ui is None: ui = get_ui()
@@ -149,12 +159,12 @@ def type_item_name(name: str, payload: dict | None = None, ui=None) -> dict | No
 
     if selected_item_is(name):
         return None
+
     step = emit({
         "id": "ge-type-item",
         "action": "type",
         "description": f"Type item: {name}",
-        "click": {"type": "type", "text": name, "enter": True, "per_char_ms": 20, "focus": True},
-        "preconditions": [], "postconditions": []
+        "click": {"type": "type", "text": name, "per_char_ms": 20},
     })
     return ui.dispatch(step)
 

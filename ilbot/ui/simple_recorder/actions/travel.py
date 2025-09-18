@@ -2,6 +2,7 @@
 import random
 
 from .runtime import emit
+from ..helpers.camera import prepare_for_walk
 from ..helpers.context import get_payload
 from ..helpers.navigation import get_nav_rect, closest_bank_key, bank_rect, player_in_rect, _merge_door_into_projection
 from ..helpers.ipc import ipc_path, ipc_project_many
@@ -11,6 +12,8 @@ from ..helpers.ipc import ipc_path, ipc_project_many
 
 from ..helpers.context import get_payload, get_ui
 from ..helpers.navigation import closest_bank_key, bank_rect, player_in_rect
+from ..services.camera_integration import dispatch_with_camera
+
 
 def _is_blocking_door(door: dict) -> bool:
     if not isinstance(door, dict):
@@ -90,6 +93,7 @@ def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None)
     One movement click toward an area, door-aware.
     If a CLOSED door is on the returned segment before the chosen waypoint,
     click it first and wait (with timeout) for it to open.
+    Also aims camera at the door/ground point before dispatch.
     """
     if payload is None:
         payload = get_payload()
@@ -98,7 +102,8 @@ def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None)
 
     # accept key or explicit (minX, maxX, minY, maxY)
     if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
-        rect = tuple(rect_or_key); rect_key = "custom"
+        rect = tuple(rect_or_key)
+        rect_key = "custom"
     else:
         rect_key = str(rect_or_key)
         rect = get_nav_rect(rect_key)
@@ -117,54 +122,64 @@ def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None)
     if not usable:
         return None
 
-    # Window: up to 20 tiles from the start of the path
-    max_stride = min(19, len(usable) - 1)  # 0-based, cap at 19 (i.e., < 20 waypoints away)
-    min_stride = max(0, max_stride - 4)  # furthest 5 within that window
-    candidates = usable[min_stride:max_stride + 1]  # [15..19] typically
+    # Choose randomly among the furthest 5 within the first <20 tiles (i.e., indices 15..19 when available)
+    max_stride = min(19, len(usable) - 1)           # cap at index 19 (20 tiles from start)
+    min_stride = max(0, max_stride - 4)             # last five within that window
+    candidates = usable[min_stride:max_stride + 1]  # typical slice = [15..19]
 
-    # Prefer tiles without a blocking door (present & closed or unknown closedness)
+    # Prefer tiles without a blocking door flag
     def _is_blocking(p):
         d = p.get("door") or {}
         if not d.get("present"):
             return False
         closed = d.get("closed")
-        return (closed is True) or (closed is None)  # treat unknown as possibly blocking
+        return (closed is True) or (closed is None)
 
     preferred = [p for p in candidates if not _is_blocking(p)]
     pool = preferred if preferred else candidates
-
     chosen = random.choice(pool)
-    # If you need the index in the original usable/proj lists:
     chosen_idx = proj.index(chosen)
 
-    # ---- Door first (scan up to chosen_idx) ----
+    # Door before chosen waypoint
     door_plan = _first_blocking_door(usable, up_to_index=chosen_idx)
     if door_plan:
-        step = emit({
-            "action": "open-door",
-            "click": door_plan["click"],
-            "target": door_plan["target"],
-            # Wait until the door reports open, but cap total time
-            "postconditions": door_plan["postconditions"],
-            "timeout_ms": door_plan["timeout_ms"]
-        })
-        return ui.dispatch(step)
+        d = door_plan.get("door") or {}
+        b = d.get("bounds")
+        if isinstance(b, dict) and all(k in b for k in ("x", "y", "width", "height")):
+            step = emit({
+                "action": "open-door",
+                "click": {"type": "rect-center"},
+                "target": {"domain": "object", "name": d.get("name") or "Door", "bounds": b,
+                           "world": door_plan.get("world")},
+                "postconditions": door_plan["postconditions"],
+                "timeout_ms": door_plan["timeout_ms"],
+            })
+        else:
+            c = d.get("canvas") or d.get("tileCanvas")
+            if not (isinstance(c, dict) and "x" in c and "y" in c):
+                return None
+            step = emit({
+                "action": "open-door",
+                "click": {"type": "point", "x": int(c["x"]), "y": int(c["y"])},
+                "target": {"domain": "object", "name": d.get("name") or "Door",
+                           "world": door_plan.get("world")},
+                "postconditions": door_plan["postconditions"],
+                "timeout_ms": door_plan["timeout_ms"],
+            })
+        return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=800)
 
-    # ---- Normal ground move ----
+    # Normal ground move
+    world_hint = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
     cx, cy = int(chosen["canvas"]["x"]), int(chosen["canvas"]["y"])
     step = emit({
         "action": "click-ground",
         "description": f"Move toward {rect_key}",
         "click": {"type": "point", "x": cx, "y": cy},
-        "target": {
-            "domain": "ground",
-            "name": f"Waypoint→{rect_key}",
-            "world": chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
-        },
-        "debug": {"ipc_nav": {"dbg_path": dbg_path, "dbg_proj": dbg_proj}},
+        "target": {"domain": "ground", "name": f"Waypoint→{rect_key}",
+                   "world": chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}},
     })
-    return ui.dispatch(step)
 
+    return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=700)
 
 def go_to_closest_bank(payload: dict | None = None, ui=None) -> dict | None:
     """

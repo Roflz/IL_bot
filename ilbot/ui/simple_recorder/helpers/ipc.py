@@ -8,7 +8,6 @@ from ilbot.ui.simple_recorder.helpers.context import get_payload
 def ipc_port_from_payload(payload: dict, default: int = 17000) -> int:
     return payload["__ipc"].port
 
-# in _ipc_send(...) inside action_plans.py
 def ipc_send(msg: dict, payload: dict | None = None, timeout: float = 0.35) -> Optional[dict]:
     if payload is None:
         payload = get_payload()
@@ -132,7 +131,7 @@ def rows_to_world(mask: dict, rc_path: list[tuple[int,int]]) -> list[tuple[int,i
         out.append((wx, wy))
     return out
 
-def ipc_path(payload, rect=None, goal=None, max_wps=None):
+def ipc_path(payload, rect=None, goal=None, max_wps=15):
     req = {"cmd": "path"}
     if rect:
         minX, maxX, minY, maxY = rect

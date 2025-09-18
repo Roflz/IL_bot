@@ -112,20 +112,17 @@ def open_bank(prefer: str | None = None, payload: dict | None = None, ui=None) -
             "postconditions": ["bankOpen == true"],
         })
     else:
-        # NOTE: Unchanged per your request
         step = emit({
             "action": "open-bank-context",
             "click": {
                 "type": "context-select",
-                "index": int(idx),
-                "x": cx,
-                "y": cy,
-                "row_height": 16,
-                "start_dy": 10,
+                "x": point["x"],  # canvas coords where to open the menu
+                "y": point["y"],
+                "option": "bank",  # match by text
+                "target": "banker",
                 "open_delay_ms": 120
             },
-            "target": {"domain": target_domain, "name": name, **anchor} if rect else {"domain": target_domain, "name": name},
-            "anchor": point
+            "target": {"domain": "npc", "name": "Banker"}
         })
 
     return ui.dispatch(step)
@@ -166,66 +163,62 @@ def withdraw_item(
     slot = first_bank_slot(payload, name)
     if not slot:
         return None
-    rect = unwrap_rect((slot or {}).get("bounds"))
+
+    rect = unwrap_rect(slot.get("bounds"))
     if not rect:
         return None
 
     cx, cy = rect_center_xy(rect)
+    item_name = str(name).strip()
 
-    # Withdraw-All via context menu (no typing)
+    # --- Withdraw-All via live context menu ---
     if withdraw_all:
-        all_idx = 4  # assumed 0-based index for "Withdraw-All" (adjust if needed)
         step = emit({
             "action": "withdraw-item-all",
             "click": {
-                "type": "context-select",
-                "index": int(all_idx),
-                "x": cx,
-                "y": cy,
-                "row_height": 16,
-                "start_dy": 18,
+                "type": "context-select",        # uses live menu geometry via IPC "menu"
+                "option": "withdraw-all",        # case-insensitive match
+                "target": item_name.lower(),     # substring match against menu target
+                "x": int(cx),                    # right-click anchor (canvas)
+                "y": int(cy),
                 "open_delay_ms": 120
             },
-            "target": {"domain": "bank-slot", "name": name, "bounds": rect},
+            "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
         })
         return ui.dispatch(step)
 
-    # Withdraw-X via context menu then type amount
+    # --- Withdraw-X via live context menu + type amount ---
     if withdraw_x is not None:
-        x_idx = 3  # assumed 0-based index for "Withdraw-X" (adjust if needed)
         steps = [
             emit({
                 "action": "withdraw-item-x-menu",
                 "click": {
                     "type": "context-select",
-                    "index": int(x_idx),
-                    "x": cx,
-                    "y": cy,
-                    "row_height": 16,
-                    "start_dy": 18,
+                    "option": "withdraw-x",
+                    "target": item_name.lower(),
+                    "x": int(cx),
+                    "y": int(cy),
                     "open_delay_ms": 120
                 },
-                "target": {"domain": "bank-slot", "name": name, "bounds": rect},
+                "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
             }),
-            emit({"action": "wait-after-context", "click": {"type": "wait", "ms": 300}}),
+            emit({"action": "wait-after-context", "click": {"type": "wait", "ms": 250}}),
             emit({
                 "action": "type-withdraw-x",
                 "click": {"type": "type", "text": str(int(withdraw_x)), "enter": False, "per_char_ms": 15, "focus": True}
             }),
-            emit({"action": "wait-before-enter", "click": {"type": "wait", "ms": 150}}),
             emit({"action": "confirm-withdraw-x", "click": {"type": "key", "key": "enter"}}),
         ]
         return ui.dispatch(steps)
 
-    # Default: simple left-click withdraw
+    # --- Default: simple left-click withdraw (Withdraw-1 / custom shift-click config) ---
     step = emit({
         "action": "withdraw-item",
         "click": {"type": "rect-center"},
-        "target": {"domain": "bank-slot", "name": name, "bounds": rect},
-        "postconditions": [f"inventory contains '{name}'"],
+        "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
+        "postconditions": [f"inventory contains '{item_name}'"],
     })
     return ui.dispatch(step)
-
 
 def close_bank(ui=None) -> dict | None:
     if ui is None:

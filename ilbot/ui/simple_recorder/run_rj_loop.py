@@ -185,12 +185,10 @@ class UIShim:
 
         if ctype == "type":
             text = (click.get("text") or "")
-            enter = bool(click.get("enter", True))
             per_ms = int(click.get("per_char_ms", 20))
-            focus = bool(click.get("focus", True))
             if text:
                 try:
-                    self.ipc.type(text, enter=enter, per_char_ms=per_ms, focus=focus)
+                    self.ipc.type(text, per_char_ms=per_ms)
                 except Exception as e:
                     self.debug(f"[IPC] type error: {e}")
             return
@@ -225,47 +223,53 @@ class UIShim:
                 self.debug("[STEP] right-click: invalid coords; skipping")
             return
 
-        # --- context menu select via offset or index ---
-        # --- context menu select via offset or index ---
+        # --- context menu select via live menu entries ---
         if ctype == "context-select":
-            # Try in order: target bounds → click.{x,y} → step.anchor.{x,y}
-            rect = target.get("bounds") or target.get("clickbox")
-            ax = ay = None
-
-            if rect:
-                ax, ay = self._rect_center(rect)
-
-            if ax is None:
-                x, y = click.get("x"), click.get("y")
-                if isinstance(x, (int, float)) and isinstance(y, (int, float)):
-                    ax, ay = int(x), int(y)
-
-            if ax is None:
-                anch = step.get("anchor") or {}
-                x, y = anch.get("x"), anch.get("y")
-                if isinstance(x, (int, float)) and isinstance(y, (int, float)):
-                    ax, ay = int(x), int(y)
-
-            if ax is None:
-                self.debug("[STEP] context-select: no anchor (bounds/click/anchor); skipping")
+            # 1) require explicit right-click anchor (canvas coords)
+            x = click.get("x");
+            y = click.get("y")
+            if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
                 return
+            ax = int(x) + int(self.canvas_offset[0])
+            ay = int(y) + int(self.canvas_offset[1])
 
-            # Apply canvas offset once, after choosing anchor
-            ax += int(self.canvas_offset[0]); ay += int(self.canvas_offset[1])
-
-            # Right-click to open the context menu
+            # 2) open the menu and wait
             self._click_canvas(ax, ay, button="right")
             time.sleep(int(click.get("open_delay_ms", 120)) / 1000.0)
 
-            if "index" in click:
-                idx = max(0, int(click.get("index", 0)))          # 0-based
-                row_h = 20
-                self._click_canvas(ax, ay + row_h + idx * row_h, button="left")
+            # 3) read live menu (entries[].rect has ABSOLUTE canvas coords from plugin)
+            info = self.ipc._send({"cmd": "menu"}) or {}
+            if not info.get("ok") or not info.get("open"):
                 return
 
-            self.debug("[STEP] context-select: no offset/index provided; skipping")
-            return
+            entries = info.get("entries") or []
+            want_opt = (click.get("option") or "").strip().lower()
+            want_tgt = (click.get("target") or "").strip().lower()
+            if not want_opt and not want_tgt:
+                return
 
+            def _match(e):
+                eo = (e.get("option") or "").strip().lower()
+                et = (e.get("target") or "").strip().lower()
+                return ((not want_opt) or (eo == want_opt or want_opt in eo)) and \
+                    ((not want_tgt) or (want_tgt in et))
+
+            cand = [e for e in entries if _match(e)]
+            if not cand:
+                return
+
+            r = cand[0].get("rect") or {}
+            # rect.x / rect.y are ABSOLUTE canvas coords from the plugin logs:
+            # e.g. rect=(751,409 110x15)
+            cx = int(r["x"]) + int(r["w"]) // 2
+            cy = int(r["y"]) + int(r["h"]) // 2
+
+            # add canvas_offset once (same as you do for other clicks)
+            cx += int(self.canvas_offset[0])
+            cy += int(self.canvas_offset[1])
+
+            self._click_canvas(cx, cy, button="left")
+            return
 
         if ctype == "wait":
             ms = int(click.get("ms", 0))
@@ -286,7 +290,6 @@ class UIShim:
 
     def _click_canvas(self, x: int, y: int, button: str = "left"):
         try:
-            self.ipc.focus()
             btn = 1 if button == "left" else 3
             self.ipc.click_canvas(int(x), int(y), button=btn)
         except Exception as e:
@@ -308,11 +311,11 @@ class UIShim:
 
 def main():
     # TODO: set these for your machine/session
-    SESSION_DIR = r"D:\\repos\\bot_runelite_IL\\data\\recording_sessions\\horsefood11\\gamestates\\"
+    SESSION_DIR = r"D:\\repos\\bot_runelite_IL\\data\\recording_sessions\\chodemastr66\\gamestates\\"
     IPC_PORT    = 17000
     interval_ms = 120
 
-    ui   = UIShim(session_dir=SESSION_DIR, port=IPC_PORT, canvas_offset=(0, 8))
+    ui   = UIShim(session_dir=SESSION_DIR, port=IPC_PORT, canvas_offset=(0, 0))
     set_ui(ui)
     plan = RomeoAndJulietPlan()
 

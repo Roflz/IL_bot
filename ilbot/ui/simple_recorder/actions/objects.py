@@ -4,6 +4,8 @@ from ilbot.ui.simple_recorder.helpers.context import get_ui, get_payload
 from ilbot.ui.simple_recorder.helpers.ipc import ipc_send, ipc_path
 from ilbot.ui.simple_recorder.helpers.navigation import _first_blocking_door_from_waypoints
 from ilbot.ui.simple_recorder.helpers.rects import unwrap_rect, rect_center_xy
+from ilbot.ui.simple_recorder.services.camera_integration import dispatch_with_camera
+
 
 def click(
     name: str,
@@ -107,7 +109,7 @@ def click(
                     "postconditions": [],
                     "timeout_ms": 1200,
                 })
-            return ui.dispatch(step)
+            return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)
 
     # ---------- click geometry ----------
     rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
@@ -160,4 +162,4 @@ def click(
             "anchor": point,
         })
 
-    return ui.dispatch(step)
+    return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)
