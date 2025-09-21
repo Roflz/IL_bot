@@ -311,7 +311,7 @@ class UIShim:
 
 def main():
     # TODO: set these for your machine/session
-    SESSION_DIR = r"D:\\repos\\bot_runelite_IL\\data\\recording_sessions\\chodemastr66\\gamestates\\"
+    SESSION_DIR = r"D:\\repos\\bot_runelite_IL\\data\\recording_sessions\\gorillazzz33\\gamestates\\"
     IPC_PORT    = 17000
     interval_ms = 120
 

@@ -32,6 +32,11 @@ def _dlg_right(payload: Optional[dict] = None) -> dict:
         payload = get_payload() or {}
     return (payload.get("chatRight") or {}) if isinstance(payload, dict) else {}
 
+def _dlg_objectbox(payload: Optional[dict] = None) -> dict:
+    if payload is None:
+        payload = get_payload() or {}
+    return (payload.get("objectbox") or {}) if isinstance(payload, dict) else {}
+
 def _menu(payload: Optional[dict] = None) -> dict:
     if payload is None:
         payload = get_payload() or {}
@@ -56,9 +61,19 @@ def dialogue_is_open(payload: Optional[dict] = None) -> bool:
 def can_continue(payload: Optional[dict] = None) -> bool:
     L = _dlg_left(payload)
     R = _dlg_right(payload)
+    OB = _dlg_objectbox(payload)
+
     l = (L.get("continue") or {}).get("exists")
     r = (R.get("continue") or {}).get("exists")
-    return bool(l or r)
+
+    # Objectbox.UNIVERSE (your new "continue" line)
+    uni = (OB.get("universe") or {})
+    # Prefer explicit visibility; fall back to non-empty text as a heuristic.
+    o_exists = uni.get("exists")
+    o_text   = (uni.get("textStripped") or uni.get("text") or "").strip()
+    o = bool(o_exists) or bool(o_text)
+
+    return bool(l or r or o)
 
 def can_choose_option(payload: Optional[dict] = None) -> bool:
     m = _menu(payload)

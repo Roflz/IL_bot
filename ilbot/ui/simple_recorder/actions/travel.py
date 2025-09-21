@@ -143,30 +143,45 @@ def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None)
     # Door before chosen waypoint
     door_plan = _first_blocking_door(usable, up_to_index=chosen_idx)
     if door_plan:
-        d = door_plan.get("door") or {}
-        b = d.get("bounds")
+        t = (door_plan.get("target") or {})
+        click = (door_plan.get("click") or {})
+        b = t.get("bounds") or None
+        c = t.get("canvas") or t.get("tileCanvas") or None
+
+        # normalize timeout/postconditions
+        timeout_ms = int(door_plan.get("timeout_ms") or 2000)
+        postconds = door_plan.get("postconditions") or []
+
+        # 1) Bounds-based click (preferred)
         if isinstance(b, dict) and all(k in b for k in ("x", "y", "width", "height")):
             step = emit({
                 "action": "open-door",
-                "click": {"type": "rect-center"},
-                "target": {"domain": "object", "name": d.get("name") or "Door", "bounds": b,
-                           "world": door_plan.get("world")},
-                "postconditions": door_plan["postconditions"],
-                "timeout_ms": door_plan["timeout_ms"],
+                "click": click if click else {"type": "rect-center"},
+                "target": {
+                    "domain": t.get("domain") or "object",
+                    "name": t.get("name") or "Door",
+                    "bounds": b,
+                    "world": door_plan.get("world"),
+                },
+                "postconditions": postconds,
+                "timeout_ms": timeout_ms,
             })
-        else:
-            c = d.get("canvas") or d.get("tileCanvas")
-            if not (isinstance(c, dict) and "x" in c and "y" in c):
-                return None
+            return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)
+
+        # 2) Canvas point click (fallback)
+        if isinstance(c, dict) and "x" in c and "y" in c:
             step = emit({
                 "action": "open-door",
                 "click": {"type": "point", "x": int(c["x"]), "y": int(c["y"])},
-                "target": {"domain": "object", "name": d.get("name") or "Door",
-                           "world": door_plan.get("world")},
-                "postconditions": door_plan["postconditions"],
-                "timeout_ms": door_plan["timeout_ms"],
+                "target": {
+                    "domain": t.get("domain") or "object",
+                    "name": t.get("name") or "Door",
+                    "world": door_plan.get("world"),
+                },
+                "postconditions": postconds,
+                "timeout_ms": timeout_ms,
             })
-        return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=800)
+            return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)
 
     # Normal ground move
     world_hint = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}

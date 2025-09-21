@@ -22,6 +22,8 @@ BANK_REGIONS = {
 REGIONS = {
     "VARROCK_SQUARE": (3200, 3227, 3416, 3442),
     "JULIET_MANSION": (3156, 3164, 3432, 3438),
+    "VARROCK_CHURCH": (3252, 3259, 3471, 3488),
+    "VARROCK_APOTHECARY": (3192, 3198, 3402, 3406),
 }
 
 # Grand Exchange region bounds (hardcoded)

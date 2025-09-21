@@ -31,12 +31,43 @@ def can_choose_option(payload: Optional[dict] = None) -> bool:
 def get_options(payload: Optional[dict] = None):
     if payload is None:
         payload = get_payload()
-    return _get_options(payload)
+    if  not _get_options(payload) == []:
+        return _get_options(payload)
+    else:
+        return None
+
 
 def get_option(index: int, payload: Optional[dict] = None):
     if payload is None:
         payload = get_payload()
     return _get_option(index, payload)
+
+def dialogue_contains(substr: str, payload: Optional[dict] = None) -> bool:
+    """
+    True if the current dialogue (left or right) contains `substr` in its *text* block.
+    Only checks the TEXT portion (not names or 'continue').
+    """
+    if not substr:
+        return False
+    if payload is None:
+        payload = get_payload() or {}
+
+    def _side_text(side_key: str) -> str:
+        side = (payload.get(side_key) or {}) if isinstance(payload, dict) else {}
+        text_block = side.get("text") or {}
+        # Prefer stripped if present; otherwise raw text; else empty string
+        return (text_block.get("textStripped")
+                or text_block.get("text")
+                or "").strip()
+
+    needle = substr.strip().lower()
+    if not needle:
+        return False
+
+    left_txt  = _side_text("chatLeft").lower()
+    right_txt = _side_text("chatRight").lower()
+
+    return (needle in left_txt) or (needle in right_txt)
 
 def option_exists(text: str, payload: dict | None = None) -> bool:
     """

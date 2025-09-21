@@ -1,4 +1,7 @@
+from typing import Optional
+
 from ilbot.ui.simple_recorder.helpers.context import get_payload
+from ilbot.ui.simple_recorder.helpers.vars import get_var
 
 
 def get_player_plane(payload: dict | None = None, default=None):
@@ -14,3 +17,12 @@ def get_player_plane(payload: dict | None = None, default=None):
     player = payload.get("player", payload)
     plane = player.get("plane")
     return int(plane) if isinstance(plane, (int, float)) else default
+
+def in_cutscene(payload: dict | None = None, timeout: float = 0.35) -> bool:
+    """
+    Check if the player is in a cutscene.
+    Returns True if varbit 542 == 1, False otherwise.
+    """
+    val = get_var(542, payload=payload, timeout=timeout)
+    return val == 1
+
