@@ -1,6 +1,7 @@
 # ilbot/ui/simple_recorder/actions/banking.py
-
+from . import chat, ge
 from .runtime import emit
+from .timing import wait_until
 from .travel import in_area
 from ..constants import BANK_REGIONS
 from ..helpers.context import get_payload, get_ui
@@ -189,27 +190,43 @@ def withdraw_item(
 
     # --- Withdraw-X via live context menu + type amount ---
     if withdraw_x is not None:
-        steps = [
-            emit({
-                "action": "withdraw-item-x-menu",
-                "click": {
-                    "type": "context-select",
-                    "option": "withdraw-x",
-                    "target": item_name.lower(),
-                    "x": int(cx),
-                    "y": int(cy),
-                    "open_delay_ms": 120
-                },
-                "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
-            }),
-            emit({"action": "wait-after-context", "click": {"type": "wait", "ms": 250}}),
-            emit({
-                "action": "type-withdraw-x",
-                "click": {"type": "type", "text": str(int(withdraw_x)), "enter": False, "per_char_ms": 15, "focus": True}
-            }),
-            emit({"action": "confirm-withdraw-x", "click": {"type": "key", "key": "enter"}}),
-        ]
-        return ui.dispatch(steps)
+        # Step 1: Right-click and select "Withdraw-X"
+        step1 = emit({
+            "action": "withdraw-item-x-menu",
+            "click": {
+                "type": "context-select",
+                "option": "withdraw-x",
+                "target": item_name.lower(),
+                "x": int(cx),
+                "y": int(cy),
+                "open_delay_ms": 120
+            },
+            "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
+        })
+        ui.dispatch(step1)
+        if not wait_until(ge.chat_qty_prompt_active, min_wait_ms=300, max_wait_ms=3000):
+            return None
+        
+        # Step 3: Type the quantity
+        step3 = emit({
+            "action": "type-withdraw-x",
+            "click": {"type": "type", "text": str(int(withdraw_x)), "enter": False, "per_char_ms": 15, "focus": True}
+        })
+        ui.dispatch(step3)
+        if not wait_until(lambda: ge.buy_chatbox_text_input_contains(str(withdraw_x)), min_wait_ms=300, max_wait_ms=3000):
+            return None
+
+        
+        # Step 4: Press Enter to confirm
+        step4 = emit({"action": "confirm-withdraw-x", "click": {"type": "key", "key": "enter"}})
+        ui.dispatch(step4)
+        
+        # Wait until inventory contains the expected amount
+        from .inventory import inventory_has_amount
+        if not wait_until(lambda: inventory_has_amount(item_name, int(withdraw_x)), min_wait_ms=500, max_wait_ms=5000):
+            return None
+        
+        return True
 
     # --- Default: simple left-click withdraw (Withdraw-1 / custom shift-click config) ---
     step = emit({
@@ -231,3 +248,35 @@ def close_bank(ui=None) -> dict | None:
         "postconditions": ["bankOpen == false"],
     })
     return ui.dispatch(step)
+
+def toggle_note_mode(payload: dict | None = None, ui=None) -> dict | None:
+    """Toggle bank note mode (withdraw as note/withdraw as item)"""
+    if payload is None:
+        payload = get_payload()
+    if ui is None:
+        ui = get_ui()
+    
+    from ..helpers.bank import bank_note_selected
+    bw = payload.get("bank_widgets") or {}
+    node = bw.get("withdraw_note_toggle") or {}
+    b = node.get("bounds") or {}
+    
+    if int(b.get("width") or 0) > 0 and int(b.get("height") or 0) > 0:
+        step = emit({
+            "action": "bank-note-toggle",
+            "click": {"type": "rect-center"},
+            "target": {"domain": "bank-widget", "name": "Withdraw as Note", "bounds": b},
+            "postconditions": [],
+        })
+        return ui.dispatch(step)
+    return None
+
+def ensure_note_mode_disabled(payload: dict | None = None, ui=None) -> dict | None:
+    """Ensure bank note mode is disabled (withdraw as items, not notes)"""
+    if payload is None:
+        payload = get_payload()
+    
+    from ..helpers.bank import bank_note_selected
+    if bank_note_selected(payload):
+        return toggle_note_mode(payload, ui)
+    return None

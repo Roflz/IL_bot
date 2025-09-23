@@ -13,6 +13,38 @@ from .chat import dialogue_is_open, can_choose_option, can_continue, any_chat_ac
 from ..services.camera_integration import dispatch_with_camera
 
 
+def _door_is_open(door_plan: dict, payload: dict) -> bool:
+    """
+    Check if a door is open by looking for it in the objects list.
+    If the door is not found in objects, it's likely open.
+    """
+    if not door_plan or not door_plan.get("door"):
+        return True
+    
+    door = door_plan.get("door", {})
+    door_name = door.get("name", "")
+    door_world = door.get("world", {})
+    door_x = door_world.get("x")
+    door_y = door_world.get("y")
+    
+    if not isinstance(door_x, int) or not isinstance(door_y, int):
+        return True  # Can't verify, assume open
+    
+    # Check if door still exists in objects (if it does, it's closed)
+    objects = payload.get("objects", [])
+    for obj in objects:
+        obj_world = obj.get("world", {})
+        obj_x = obj_world.get("x")
+        obj_y = obj_world.get("y")
+        obj_name = obj.get("name", "")
+        
+        if (obj_x == door_x and obj_y == door_y and 
+            door_name.lower() in obj_name.lower()):
+            return False  # Door still exists, so it's closed
+    
+    return True  # Door not found, so it's open
+
+
 def click_npc(name: str, payload: Optional[dict] = None, ui=None) -> Optional[dict]:
     """
     Left-click an NPC by (partial) name. If a CLOSED door lies on the path to the NPC,
@@ -42,35 +74,53 @@ def click_npc(name: str, payload: Optional[dict] = None, ui=None) -> Optional[di
             wps, dbg_path = ipc_path(fresh_payload, goal=(gx, gy))
             door_plan = _first_blocking_door_from_waypoints(wps)
             if door_plan:
-                d = (door_plan.get("door") or {})
-                b = d.get("bounds")
+                # Door is closed, try to open it with retry logic
+                door_opened = door_plan["door"].get("Closed")
+                door_retry_count = 0
+                max_door_retries = 3
 
-                if isinstance(b, dict) and all(k in b for k in ("x", "y", "width", "height")):
-                    step = emit({
-                        "action": "open-door",
-                        "click": {"type": "rect-center"},
-                        "target": {"domain": "object", "name": d.get("name") or "Door", "bounds": b},
-                        "postconditions": [],
-                        "timeout_ms": 1200
-                    })
-                else:
-                    c = d.get("canvas") or d.get("tileCanvas")
-                    if not (isinstance(c, dict) and "x" in c and "y" in c):
-                        continue  # Skip this attempt, try again
-                    step = emit({
-                        "action": "open-door",
-                        "click": {"type": "point", "x": int(c["x"]), "y": int(c["y"])},
-                        "target": {"domain": "object", "name": d.get("name") or "Door"},
-                        "postconditions": [],
-                        "timeout_ms": 1200
-                    })
+                while not door_opened and door_retry_count < max_door_retries:
+                    d = (door_plan.get("door") or {})
+                    b = d.get("bounds")
 
-                door_result = dispatch_with_camera(step, ui=ui, payload=fresh_payload, aim_ms=420)
-                if door_result:
-                    # Door was opened, continue to NPC click
-                    pass
-                else:
-                    # Door opening failed, continue to next retry
+                    if isinstance(b, dict) and all(k in b for k in ("x", "y", "width", "height")):
+                        step = emit({
+                            "action": "open-door",
+                            "click": {"type": "rect-center"},
+                            "target": {"domain": "object", "name": d.get("name") or "Door", "bounds": b},
+                            "postconditions": [],
+                            "timeout_ms": 1200
+                        })
+                    else:
+                        c = d.get("canvas") or d.get("tileCanvas")
+                        if not (isinstance(c, dict) and "x" in c and "y" in c):
+                            break  # Can't get coordinates, skip door opening
+                        step = emit({
+                            "action": "open-door",
+                            "click": {"type": "point", "x": int(c["x"]), "y": int(c["y"])},
+                            "target": {"domain": "object", "name": d.get("name") or "Door"},
+                            "postconditions": [],
+                            "timeout_ms": 1200
+                        })
+
+                    door_result = dispatch_with_camera(step, ui=ui, payload=fresh_payload, aim_ms=420)
+                    if door_result:
+                        # Wait up to 2 seconds for door to open
+                        door_wait_start = time.time()
+                        while (time.time() - door_wait_start) * 1000 < 2000:
+                            fresh_payload = get_payload()  # Get fresh payload
+                            if _door_is_open(door_plan, fresh_payload):
+                                door_opened = True
+                                break
+                            time.sleep(0.1)  # Check every 100ms
+
+                    if not door_opened:
+                        door_retry_count += 1
+                        if door_retry_count < max_door_retries:
+                            time.sleep(0.5)  # Wait before retry
+
+                if not door_opened:
+                    # Door opening failed after retries, continue to next attempt
                     continue
 
         # 2) Click the NPC

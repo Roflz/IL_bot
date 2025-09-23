@@ -1,4 +1,5 @@
-from ..helpers.inventory import inv_has, inv_has_any, get_item_coordinates
+import time
+from ..helpers.inventory import inv_has, inv_has_any, get_item_coordinates, inv_count
 from ..helpers.context import get_payload, get_ui  # for optional payload
 from ..helpers.widgets import rect_center_from_widget
 from .runtime import emit
@@ -26,21 +27,60 @@ def has_item(name: str, min_qty: int = 1, payload: dict | None = None) -> bool:
 
     # Fallback: manual scan of the payload
     try:
-        items = (((payload or {}).get("inventory") or {}).get("items") or [])
+        items = (((payload or {}).get("inventory") or {}).get("slots") or [])
         want = (name or "").strip().lower()
         total = 0
         for it in items:
-            nm = (it.get("name") or "").strip().lower()
+            nm = (it.get("itemName") or "").strip().lower()
             if nm == want:
-                q = it.get("quantity", it.get("qty", 1))
-                try:
-                    q = int(q)
-                except Exception:
-                    q = 1
-                total += max(1, q)
-        return total >= int(min_qty)
+                total += int(it.get("quantity") or 1)
+        return total >= min_qty
     except Exception:
         return False
+
+def has_noted_item(name: str, payload: dict | None = None) -> bool:
+    """
+    True if inventory contains noted version of item `name`.
+    Checks for items with "(noted)" suffix or similar patterns.
+    """
+    if payload is None:
+        payload = get_payload()
+    
+    items = ((payload or {}).get("inventory") or {}).get("slots") or []
+    target_name = (name or "").strip().lower()
+    
+    for item in items:
+        item_name = (item.get("itemName") or "").strip().lower()
+        if not item_name:
+            continue
+            
+        # Check for other noted patterns (some items might have different formats)
+        if target_name in item_name and item.get("isNoted"):
+            return True
+    
+    return False
+
+def has_unnoted_item(name: str, payload: dict | None = None) -> bool:
+    """
+    True if inventory contains unnoted version of item `name`.
+    This is the normal item, not the noted version.
+    """
+    if payload is None:
+        payload = get_payload()
+    
+    items = ((payload or {}).get("inventory") or {}).get("slots") or []
+    target_name = (name or "").strip().lower()
+    
+    for item in items:
+        item_name = (item.get("itemName") or "").strip().lower()
+        if not item_name:
+            continue
+            
+        # Exact match and not noted
+        if item_name == target_name and not item.get("isNoted"):
+            return True
+    
+    return False
 
 
 
@@ -197,3 +237,23 @@ def use_item_on_item(item1_name: str, item2_name: str, payload: Optional[dict] =
             time.sleep(0.2)
     
     return None
+
+
+def inventory_has_amount(item_name: str, expected_amount: int, payload: dict | None = None) -> bool:
+    """
+    Helper function for use with wait_until to check if inventory contains 
+    the expected amount of an item.
+    
+    Args:
+        item_name: Name of the item to check
+        expected_amount: Expected quantity in inventory
+        payload: Optional payload, will get fresh if None
+    
+    Returns:
+        True if inventory contains at least the expected amount
+    """
+    if payload is None:
+        payload = get_payload()
+    
+    current_count = inv_count(payload, item_name)
+    return current_count >= expected_amount
