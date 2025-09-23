@@ -87,6 +87,47 @@ def option_exists(text: str, payload: dict | None = None) -> bool:
             return True
     return False
 
+def any_chat_active(payload: Optional[dict] = None) -> bool:
+    """
+    Return True if any kind of chat/dialogue is currently active.
+    This includes:
+    - Regular dialogue (can continue)
+    - Option menus (can choose option)
+    - Any dialogue text present (left or right)
+    - Any chat menu options available
+    """
+    if payload is None:
+        payload = get_payload() or {}
+    
+    # Check if dialogue is open
+    if _dialogue_is_open(payload):
+        return True
+    
+    # Check if we can continue dialogue
+    if _can_continue(payload):
+        return True
+    
+    # Check if we can choose options
+    if _can_choose_option(payload):
+        return True
+    
+    # Check if there's any dialogue text present
+    def _has_text(side_key: str) -> bool:
+        side = (payload.get(side_key) or {}) if isinstance(payload, dict) else {}
+        text_block = side.get("text") or {}
+        text = (text_block.get("textStripped") or text_block.get("text") or "").strip()
+        return bool(text)
+    
+    if _has_text("chatLeft") or _has_text("chatRight"):
+        return True
+    
+    # Check if there are any chat menu options
+    opts = (((payload.get("chatMenu") or {}).get("options") or {}).get("texts") or [])
+    if opts and any(isinstance(s, str) and s.strip() for s in opts):
+        return True
+    
+    return False
+
 
 def continue_dialogue(payload: Optional[dict] = None, ui=None) -> Optional[dict]:
     """

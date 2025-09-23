@@ -88,12 +88,18 @@ def _first_blocking_door(proj_rows: list[dict], up_to_index: int | None = None) 
     return None
 
 
-def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None) -> dict | None:
+def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None, center: bool = False) -> dict | None:
     """
     One movement click toward an area, door-aware.
     If a CLOSED door is on the returned segment before the chosen waypoint,
     click it first and wait (with timeout) for it to open.
     Also aims camera at the door/ground point before dispatch.
+    
+    Args:
+        rect_or_key: Region key or (minX, maxX, minY, maxY) tuple
+        payload: Game state payload
+        ui: UI instance for dispatching actions
+        center: If True, go to center of region instead of stopping at boundary
     """
     if payload is None:
         payload = get_payload()
@@ -122,10 +128,25 @@ def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None)
     if not usable:
         return None
 
-    # Choose randomly among the furthest 5 within the first <20 tiles (i.e., indices 15..19 when available)
-    max_stride = min(19, len(usable) - 1)           # cap at index 19 (20 tiles from start)
-    min_stride = max(0, max_stride - 4)             # last five within that window
-    candidates = usable[min_stride:max_stride + 1]  # typical slice = [15..19]
+    if center:
+        # When going to center, choose from waypoints closer to the center of the region
+        center_x = (rect[0] + rect[1]) / 2
+        center_y = (rect[2] + rect[3]) / 2
+        
+        # Calculate distance from each waypoint to center and sort by distance
+        def distance_to_center(wp):
+            wx = wp.get("x", 0)
+            wy = wp.get("y", 0)
+            return ((wx - center_x) ** 2 + (wy - center_y) ** 2) ** 0.5
+        
+        # Sort by distance to center, take the closest 5
+        sorted_by_distance = sorted(usable, key=distance_to_center)
+        candidates = sorted_by_distance[-5:]
+    else:
+        # Choose randomly among the furthest 5 within the first <20 tiles (i.e., indices 15..19 when available)
+        max_stride = min(19, len(usable) - 1)           # cap at index 19 (20 tiles from start)
+        min_stride = max(0, max_stride - 4)             # last five within that window
+        candidates = usable[min_stride:max_stride + 1]  # typical slice = [15..19]
 
     # Prefer tiles without a blocking door flag
     def _is_blocking(p):
@@ -240,8 +261,60 @@ def go_to_ge(payload: dict | None = None, ui=None) -> dict | None:
 
     return go_to(rect_key, payload, ui)
 
-def in_area(area: tuple[int,int,int,int], payload: dict | None = None):
+def in_area(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None):
     if payload is None:
         payload = get_payload()
-    return player_in_rect(payload, area)
+
+    # accept key or explicit (minX, maxX, minY, maxY)
+    if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
+        rect = tuple(rect_or_key)
+        rect_key = "custom"
+    else:
+        rect_key = str(rect_or_key)
+        rect = get_nav_rect(rect_key)
+        if not (isinstance(rect, (tuple, list)) and len(rect) == 4):
+            return None
+    return player_in_rect(payload, rect)
+
+# --- Node-based travel (thin wrappers) ---
+from ..helpers.nodes import node_rect, distance2_to  # new module
+
+def go_to_node(name: str, payload: dict | None = None, ui=None, radius: int = 2):
+    """
+    Walk one step toward the named node (x,y,p) by wrapping the node tile as a small rect.
+    Reuses existing go_to(...) which is door-aware, projection-based, and camera-integrated.
+    """
+    rect = node_rect(name, r=radius)
+    if not rect:
+        return None
+    return go_to(rect, payload=payload, ui=ui)  # existing door-aware path→project→click flow
+
+def follow_nodes(seq: list[str], payload: dict | None = None, ui=None,
+                 arrive_d2: int = 9, radius: int = 2) -> dict | None:
+    """
+    Given a sequence of node names, attempt to reach the first not-yet-arrived node.
+    - If within arrive_d2 (default=3 tiles -> 9), advance to the next.
+    - Otherwise, issue one step toward that node (via go_to_node).
+    Returns the dispatched step dict or None if already at final node.
+    """
+    if not isinstance(seq, (list, tuple)) or not seq:
+        return None
+    if payload is None:
+        from ..helpers.context import get_payload
+        payload = get_payload()
+
+    # find first target not yet reached
+    idx = 0
+    while idx < len(seq):
+        d2 = distance2_to(seq[idx], payload=payload)
+        if d2 is None:
+            break  # unknown player or node missing -> attempt anyway
+        if d2 > arrive_d2:
+            break
+        idx += 1
+
+    if idx >= len(seq):
+        return None  # finished
+
+    return go_to_node(seq[idx], payload=payload, ui=ui, radius=radius)
 

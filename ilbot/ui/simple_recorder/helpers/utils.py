@@ -84,3 +84,18 @@ def press_enter(payload: dict | None = None, ui=None) -> dict | None:
         "preconditions": [], "postconditions": []
     })
     return ui.dispatch(step)
+
+def press_esc(payload: dict | None = None, ui=None) -> dict | None:
+    if payload is None:
+        payload = get_payload()
+    if ui is None:
+        ui = get_ui()
+
+    step = emit({
+        "id": "key-esc",
+        "action": "key",
+        "description": "Press Escape",
+        "click": {"type": "key", "key": "ESC"},
+        "preconditions": [], "postconditions": []
+    })
+    return ui.dispatch(step)

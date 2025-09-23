@@ -17,6 +17,7 @@ SESSIONS_DIR = Path(r"D:\repos\bot_runelite_IL\data\recording_sessions")
 BANK_REGIONS = {
     "EDGEVILLE_BANK": (3092, 3098, 3488, 3498),
     "GE": (3155, 3173, 3479, 3498),
+    "VARROCK_WEST": (3180, 3190, 3433, 3447),
 }
 
 REGIONS = {
@@ -24,6 +25,7 @@ REGIONS = {
     "JULIET_MANSION": (3156, 3164, 3432, 3438),
     "VARROCK_CHURCH": (3252, 3259, 3471, 3488),
     "VARROCK_APOTHECARY": (3192, 3198, 3402, 3406),
+    "GOBLIN_VILLAGE": (2946, 2968, 3490, 3515),
 }
 
 # Grand Exchange region bounds (hardcoded)

@@ -4,12 +4,48 @@
 import json
 import threading
 import time
+import argparse
+import sys
 from pathlib import Path
 
-from ilbot.ui.simple_recorder.helpers.context import set_payload, set_ui
+from ilbot.ui.simple_recorder.helpers.context import set_payload, set_ui, get_payload
 from ilbot.ui.simple_recorder.services.ipc_client import RuneLiteIPC
+from ilbot.ui.simple_recorder.actions.timing import wait_until
 
+# Import all available plans
 from ilbot.ui.simple_recorder.plans.romeo_and_juliet import RomeoAndJulietPlan
+from ilbot.ui.simple_recorder.plans.goblin_diplomacy import GoblinDiplomacyPlan
+
+# Plan registry - add new plans here
+AVAILABLE_PLANS = {
+    "romeo_and_juliet": RomeoAndJulietPlan,
+    "goblin_diplomacy": GoblinDiplomacyPlan,
+    # Add more plans here as you create them
+    # "cook_assistant": CookAssistantPlan,
+    # "sheep_shearer": SheepShearerPlan,
+}
+
+
+def get_plan_class(plan_name: str):
+    """Get plan class by name."""
+    plan_class = AVAILABLE_PLANS.get(plan_name.lower())
+    if plan_class is None:
+        available = ", ".join(AVAILABLE_PLANS.keys())
+        raise ValueError(f"Unknown plan '{plan_name}'. Available plans: {available}")
+    return plan_class
+
+
+def list_available_plans():
+    """List all available plans with their descriptions."""
+    print("Available plans:")
+    for name, plan_class in AVAILABLE_PLANS.items():
+        # Create a temporary instance to get the label
+        try:
+            temp_plan = plan_class()
+            label = getattr(temp_plan, 'label', 'No description')
+            print(f"  {name}: {label}")
+        except Exception as e:
+            print(f"  {name}: Error creating plan - {e}")
 
 
 class UIShim:
@@ -107,13 +143,14 @@ class UIShim:
         """
         Execute a single action step immediately.
         Supports: point, rect-center, rect-random, key, key-hold, type, scroll, wait.
+        Returns lastInteraction data for click actions.
         """
         # NEW: allow None and sequences of steps
         if step is None:
             return
         if isinstance(step, (list, tuple)):
             for s in step:
-                self.dispatch(s)
+                return self.dispatch(s)
             return
 
         if not isinstance(step, dict):
@@ -123,6 +160,7 @@ class UIShim:
         click = (step.get("click") or {})
         target = (step.get("target") or {})
         ctype = (click.get("type") or "").lower()
+        
 
         # 'wait' doesn't require IPC readiness
         if ctype in ("point", "rect-center", "rect-random", "key", "key-hold", "keyhold", "type", "scroll"):
@@ -148,8 +186,7 @@ class UIShim:
                         cy = y + random.randint(1, h - 2)
                 except Exception:
                     pass
-            self._click_canvas(cx, cy)
-            return
+            return self._click_canvas(cx, cy)
 
         if ctype in ("point", "canvas-point", "canvas_point"):
             x, y = click.get("x"), click.get("y")
@@ -157,7 +194,7 @@ class UIShim:
                 x, y = int(x), int(y)
                 x += int(self.canvas_offset[0]);
                 y += int(self.canvas_offset[1])
-                self._click_canvas(x, y)
+                return self._click_canvas(x, y)
             else:
                 self.debug("[STEP] point: invalid coords; skipping")
             return
@@ -211,14 +248,13 @@ class UIShim:
                 if cx is None:
                     self.debug("[STEP] right-click: no bounds; skipping")
                     return
-                self._click_canvas(cx, cy, button="right")
-                return
+                return self._click_canvas(cx, cy, button="right")
 
             x, y = click.get("x"), click.get("y")
             if isinstance(x, (int, float)) and isinstance(y, (int, float)):
                 x, y = int(x), int(y)
                 x += int(self.canvas_offset[0]); y += int(self.canvas_offset[1])
-                self._click_canvas(x, y, button="right")
+                return self._click_canvas(x, y, button="right")
             else:
                 self.debug("[STEP] right-click: invalid coords; skipping")
             return
@@ -268,8 +304,7 @@ class UIShim:
             cx += int(self.canvas_offset[0])
             cy += int(self.canvas_offset[1])
 
-            self._click_canvas(cx, cy, button="left")
-            return
+            return self._click_canvas(cx, cy, button="left")
 
         if ctype == "wait":
             ms = int(click.get("ms", 0))
@@ -289,11 +324,14 @@ class UIShim:
             return False
 
     def _click_canvas(self, x: int, y: int, button: str = "left"):
+        btn = 1 if button == "left" else 3
+        
         try:
-            btn = 1 if button == "left" else 3
             self.ipc.click_canvas(int(x), int(y), button=btn)
+            return True
         except Exception as e:
             self.debug(f"[IPC] click error: {e}")
+            return None
 
     @staticmethod
     def _rect_center(bounds: dict | None):
@@ -310,47 +348,128 @@ class UIShim:
 
 
 def main():
-    # TODO: set these for your machine/session
-    SESSION_DIR = r"D:\\repos\\bot_runelite_IL\\data\\recording_sessions\\gorillazzz33\\gamestates\\"
-    IPC_PORT    = 17000
-    interval_ms = 120
-
-    ui   = UIShim(session_dir=SESSION_DIR, port=IPC_PORT, canvas_offset=(0, 0))
+    parser = argparse.ArgumentParser(
+        description="Run RuneLite bot plans",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python run_rj_loop.py romeo_and_juliet
+  python run_rj_loop.py goblin_diplomacy --port 17001
+  python run_rj_loop.py --list
+  python run_rj_loop.py romeo_and_juliet --session-dir "D:\\data\\sessions\\player1\\gamestates\\"
+        """
+    )
+    
+    parser.add_argument(
+        "plan", 
+        nargs="?", 
+        help="Plan name to run (use --list to see available plans)"
+    )
+    parser.add_argument(
+        "--list", 
+        action="store_true", 
+        help="List all available plans and exit"
+    )
+    parser.add_argument(
+        "--port", 
+        type=int, 
+        default=17000, 
+        help="IPC port number (default: 17000)"
+    )
+    parser.add_argument(
+        "--session-dir", 
+        type=str, 
+        default=r"D:\\repos\\bot_runelite_IL\\data\\recording_sessions\\gorillazzz33\\gamestates\\",
+        help="Session directory path"
+    )
+    parser.add_argument(
+        "--canvas-offset", 
+        type=str, 
+        default="0,0", 
+        help="Canvas offset as x,y (default: 0,0)"
+    )
+    parser.add_argument(
+        "--interval", 
+        type=int, 
+        default=120, 
+        help="Loop interval in milliseconds (default: 120)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Handle --list option
+    if args.list:
+        list_available_plans()
+        return
+    
+    # Require plan name if not listing
+    if not args.plan:
+        parser.print_help()
+        print("\nError: Plan name is required. Use --list to see available plans.")
+        sys.exit(1)
+    
+    # Parse canvas offset
+    try:
+        offset_parts = args.canvas_offset.split(",")
+        canvas_offset = (int(offset_parts[0]), int(offset_parts[1]))
+    except (ValueError, IndexError):
+        print(f"Error: Invalid canvas offset '{args.canvas_offset}'. Use format 'x,y'")
+        sys.exit(1)
+    
+    # Get plan class
+    try:
+        plan_class = get_plan_class(args.plan)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    
+    # Create UI and plan instances
+    ui = UIShim(
+        session_dir=args.session_dir, 
+        port=args.port, 
+        canvas_offset=canvas_offset
+    )
     set_ui(ui)
-    plan = RomeoAndJulietPlan()
-
+    plan = plan_class()
+    
     ui.debug(f"Starting plan: {plan.label} ({plan.id})")
-
+    ui.debug(f"Session dir: {args.session_dir}")
+    ui.debug(f"IPC port: {args.port}")
+    ui.debug(f"Canvas offset: {canvas_offset}")
+    
     try:
         while True:
             # Always refresh payload for this tick
             payload = ui.latest_payload()
             set_payload(payload)
-
+            
             # Let the plan decide the wait (ms)
             try:
                 delay_ms = plan.loop(ui, payload)
             except Exception as e:
                 ui.debug(f"[PLAN] error in loop: {e}")
-                delay_ms = getattr(plan, "loop_interval_ms", 600)
-
+                delay_ms = getattr(plan, "loop_interval_ms", args.interval)
+            
             # Optional: log current phase
             try:
                 ph = plan.compute_phase(payload, craft_recent=False)
                 ui.debug(f"[phase] {ph}")
             except Exception:
                 pass
-
+            
             # Normalize delay
             try:
                 delay_ms = int(delay_ms if delay_ms is not None else plan.loop_interval_ms)
             except Exception:
-                delay_ms = getattr(plan, "loop_interval_ms", 600)
+                delay_ms = getattr(plan, "loop_interval_ms", args.interval)
             delay_ms = max(10, delay_ms)
-
+            
             time.sleep(delay_ms / 1000.0)
     except KeyboardInterrupt:
         ui.debug("Stopped by user.")
+    except Exception as e:
+        ui.debug(f"Fatal error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

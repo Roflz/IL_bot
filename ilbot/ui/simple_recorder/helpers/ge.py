@@ -231,19 +231,25 @@ def chatbox_qty_prompt_visible(payload: dict) -> bool:
     return ("10616874" in cbw) and ("10616875" in cbw)
 
 def chat_qty_prompt_active(payload: dict) -> bool:
-    # prefer your exporter’s flag if present
-    cb = payload.get("chatbox") or {}
-    if isinstance(cb.get("promptActive"), bool):
-        return cb["promptActive"]
-    # fallback: require BOTH widgets and positive bounds
-    W = ((ge_widgets(payload) or {}))  # not used here; keeping shape similar
-    chat = (payload.get("chatbox") or {}).get("widgets") or {}
-    a = chat.get("10616874") or {}
-    b = chat.get("10616875") or {}
-    def _ok(w):
-        b = (w.get("bounds") or {})
-        return bool(b.get("width")) and bool(b.get("height"))
-    return _ok(a) and _ok(b)
+    # prefer your exporter's flag if present
+    cb = payload.get("ge_buy_chatbox") or {}
+    prompt = cb.get("prompt") or {}
+    text = prompt.get("text")
+    if text:
+        return '*' in text
+    else:
+        return False
+    # if isinstance(cb.get("promptActive"), bool):
+    #     return cb["promptActive"]
+    # # fallback: require BOTH widgets and positive bounds
+    # W = ((ge_widgets(payload) or {}))  # not used here; keeping shape similar
+    # chat = (payload.get("chatbox") or {}).get("widgets") or {}
+    # a = chat.get("10616874") or {}
+    # b = chat.get("10616875") or {}
+    # def _ok(w):
+    #     b = (w.get("bounds") or {})
+    #     return bool(b.get("width")) and bool(b.get("height"))
+    # return _ok(a) and _ok(b)
 
 def ge_inv_slot_bounds(payload: dict, item_name: str | int) -> dict | None:
     """

@@ -7,8 +7,14 @@ from ..helpers.utils import closest_object_by_names
 from ..helpers.widgets import rect_center_from_widget
 from ..helpers.ge import (
     ge_open, ge_offer_open, ge_selected_item_is, ge_first_buy_slot_btn,
-    widget_by_id_text_contains, ge_qty_button, ge_qty_matches, chat_qty_prompt_active, find_ge_plus5_bounds
+    widget_by_id_text_contains, ge_qty_button, ge_qty_matches, chat_qty_prompt_active, find_ge_plus5_bounds,
+    widget_by_id_text, ge_buy_confirm_widget
 )
+from ..helpers.utils import press_enter
+from ..actions import travel as trav, bank, inventory as inv
+from ..actions.timing import wait_until
+from ..constants import BANK_REGIONS
+import time
 
 # ---------- simple reads ----------
 def is_open(payload: dict | None = None) -> bool:
@@ -175,7 +181,7 @@ def set_quantity(payload: dict | None = None, qty: int = 0, ui=None) -> dict | N
     if ui is None:
         ui = get_ui()
 
-    if qty_is(payload, qty):
+    if qty_is(qty):
         return None
 
     if not chat_qty_prompt_active(payload):
@@ -193,15 +199,18 @@ def set_quantity(payload: dict | None = None, qty: int = 0, ui=None) -> dict | N
             return ui.dispatch(step)
         return None
 
-    step = emit({
-        "id": "ge-qty-type",
-        "action": "type",
-        "description": f"Type buy quantity: {qty}",
-        "click": {"type": "type", "text": str(int(qty)), "enter": True, "per_char_ms": 10, "focus": True},
-        "preconditions": [], "postconditions": []
-    })
-    return ui.dispatch(step)
+    if not buy_chatbox_text_input_contains(str(qty)):
+        step = emit({
+            "id": "ge-qty-type",
+            "action": "type",
+            "description": f"Type buy quantity: {qty}",
+            "click": {"type": "type", "text": str(qty), "per_char_ms": 20},
+            "preconditions": [], "postconditions": []
+        })
+        return ui.dispatch(step)
 
+    else:
+        return press_enter()
 
 
 def click_plus5(payload: dict | None = None, ui=None) -> dict | None:
@@ -262,3 +271,118 @@ def collect_to_inventory(payload: dict | None = None, ui=None) -> dict | None:
         "preconditions": [], "postconditions": []
     })
     return ui.dispatch(step)
+
+
+def buy_item_from_ge(item, ui) -> bool | None:
+    """
+    Returns True when all items are in inventory.
+    Otherwise performs exactly one small step toward buying them and returns None.
+    Safe to call every tick.
+    
+    Args:
+        item: Name of the item to buy (str) or dict of items to buy {item_name: (quantity, price_bumps)}
+        ui: UI instance for dispatching actions
+    """
+    payload = get_payload()
+    
+    # Normalize input to dict
+    if isinstance(item, str):
+        items_to_buy = {item: (1, 5)}  # (quantity, price_bumps)
+    else:
+        items_to_buy = item
+    
+    # Check if we already have all items
+    if all(inv.has_item(item_name) for item_name in items_to_buy.keys()):
+        close_ge()
+        if is_closed():
+            return True
+        return None
+
+    # Go to GE
+    if not trav.in_area(BANK_REGIONS["GE"]):
+        trav.go_to_ge()
+        return None
+
+    # Ensure coins: if we don't have any, grab from bank quickly (GE has a bank close by)
+    if not inv.has_item("coins"):
+        if bank.is_closed():
+            bank.open_bank()
+            wait_until(bank.is_open, max_wait_ms=6000)
+            return None
+        if bank.is_open():
+            # make space then withdraw all coins
+            if not inv.is_empty():
+                bank.deposit_inventory()
+                wait_until(inv.is_empty, max_wait_ms=4000, min_wait_ms=150)
+                return None
+            bank.withdraw_item("coins", withdraw_all=True)
+            wait_until(lambda: inv.has_item("coins"), max_wait_ms=3000)
+            return None
+    elif bank.is_open():
+        bank.close_bank()
+        return None
+
+    # Open GE
+    if is_closed():
+        open_ge()
+        wait_until(is_open, max_wait_ms=5000)
+        return None
+
+    # Buy each item one by one
+    for item_name, (item_quantity, item_price_bumps) in items_to_buy.items():
+        if inv.has_item(item_name):
+            continue  # Skip if we already have this item
+            
+        # Open buy offer panel
+        if not offer_open():
+            if has_collect():
+                collect_to_inventory()
+                return None
+            begin_buy_offer()
+            if not wait_until(offer_open, max_wait_ms=5000):
+                return None
+            return None
+
+        # Type item name and select first result
+        if not buy_chatbox_first_item_is(item_name) and not selected_item_is(item_name):
+            type_item_name(item_name)
+            if not wait_until(lambda: buy_chatbox_first_item_is(item_name), min_wait_ms=600, max_wait_ms=3000):
+                return None
+            return None
+
+        elif not selected_item_is(item_name):
+            press_enter()
+            if not wait_until(lambda: selected_item_is(item_name), min_wait_ms=600, max_wait_ms=3000):
+                return None
+            return None
+
+        if selected_item_is(item_name):
+            # Set quantity if needed
+            if item_quantity > 1:
+                if not qty_is(item_quantity):
+                    set_quantity(qty=item_quantity)
+                    return None
+
+            # Nudge price a few times (+5%)
+            for _ in range(max(0, int(item_price_bumps))):
+                plus = widget_by_id_text(30474266, "+5%")
+                if not plus:
+                    break
+                cx, cy = rect_center_from_widget(plus)
+                ui.dispatch({
+                    "id": "ge-plus5",
+                    "action": "click",
+                    "description": "+5% price",
+                    "target": {"name": "+5%", "bounds": plus.get("bounds")},
+                    "click": {"type": "point", "x": cx, "y": cy},
+                })
+                time.sleep(0.25)
+
+            # Confirm buy
+            confirm_buy()
+            wait_until(lambda: ge_buy_confirm_widget() is None, min_wait_ms=600, max_wait_ms=3000)
+            return None
+
+    # Close GE after all items are bought
+    close_ge()
+    return True

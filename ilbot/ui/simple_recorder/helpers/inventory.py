@@ -1,6 +1,9 @@
+from typing import Optional
+
 from .utils import norm_name
 
 from .rects import unwrap_rect
+from .widgets import rect_center_from_widget
 
 
 def inv_slots(payload: dict) -> list[dict]:
@@ -46,3 +49,18 @@ def coins(payload: dict) -> int:
 
 def inv_has_any(payload: dict) -> bool:
     return int((payload.get("inventory") or {}).get("totalItems") or 0) > 0
+
+def get_item_coordinates(item: dict) -> Optional[tuple[int, int]]:
+    """Extract click coordinates from an inventory item using existing helper functions."""
+    # Use the existing rect_center_from_widget function which handles nested bounds
+    coords = rect_center_from_widget(item)
+    if coords[0] is not None and coords[1] is not None:
+        return (coords[0], coords[1])
+    
+    # Fallback to direct x, y fields if available
+    x = item.get("x")
+    y = item.get("y")
+    if x is not None and y is not None:
+        return (int(x), int(y))
+    
+    return None
