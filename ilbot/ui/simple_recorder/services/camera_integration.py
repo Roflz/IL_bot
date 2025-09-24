@@ -102,13 +102,50 @@ def aim_midtop_at_world(
 
 
 # if your current dispatch_with_camera doesn't pass payload, use this version:
-def dispatch_with_camera(step: dict, *, ui, payload: dict, aim_ms: int = 450):
+def dispatch_with_camera(step: dict, *, ui, payload: dict, aim_ms: int = 450, 
+                        async_camera: bool = True, camera_delay_ms: int = 100):
+    """
+    Dispatch action with optional camera movement.
+    
+    Args:
+        step: Action step to execute
+        ui: UI instance
+        payload: Game state payload
+        aim_ms: Maximum time for camera aiming
+        async_camera: If True, camera movement happens asynchronously
+        camera_delay_ms: Delay before starting camera movement
+        
+    Returns:
+        Dispatch result
+    """
+    # Start camera movement first (if async) or after click (if sync)
+    if async_camera:
+        try:
+            tgt = (step.get("target") or {}).get("world") or {}
+            wx, wy = tgt.get("x"), tgt.get("y")
+            if isinstance(wx, int) and isinstance(wy, int):
+                # Start camera movement in background
+                import threading
+                def camera_thread():
+                    import time
+                    time.sleep(camera_delay_ms / 1000.0)  # Small delay before camera movement
+                    aim_midtop_at_world(wx, wy, max_ms=aim_ms, payload=payload)
+                
+                threading.Thread(target=camera_thread, daemon=True).start()
+        except Exception:
+            pass
+    
+    # Execute the main action
     out = ui.dispatch(step)
-    try:
-        tgt = (step[0].get("target") or {}).get("world") or {}
-        wx, wy = tgt.get("x"), tgt.get("y")
-        if isinstance(wx, int) and isinstance(wy, int):
-            aim_midtop_at_world(wx, wy, max_ms=aim_ms, payload=payload)
-    except Exception:
-        pass
+    
+    # Handle synchronous camera movement
+    if not async_camera:
+        try:
+            tgt = (step.get("target") or {}).get("world") or {}
+            wx, wy = tgt.get("x"), tgt.get("y")
+            if isinstance(wx, int) and isinstance(wy, int):
+                aim_midtop_at_world(wx, wy, max_ms=aim_ms, payload=payload)
+        except Exception:
+            pass
+    
     return out

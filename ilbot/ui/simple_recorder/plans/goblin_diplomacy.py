@@ -61,29 +61,34 @@ class GoblinDiplomacyPlan(Plan):
                     bank.open_bank()
                     return
                 elif bank.is_open():
-                    # Check what items we need (only unnoted items)
-                    needed_items = []
+                    # First, deposit everything to get a clean state
+                    bank.deposit_inventory()
+                    wait_until(inv.is_empty, max_wait_ms=5000, min_wait_ms=200)
+                    
+                    # Now check what we have in the bank and what we need
                     required_items = ["Blue dye", "Orange dye", "Goblin mail"]
+                    needed_items = []
                     
+                    missing_items = []
                     for item in required_items:
-                        # Check if we have the unnoted version
-                        has_unnoted = inv.has_unnoted_item(item)
-                        has_noted = inv.has_noted_item(item)
-                        
-                        if not has_unnoted:
-                            if bank.has_item(item):
-                                needed_items.append(item)
-                            elif has_noted:
-                                # We have noted version but need unnoted - need to withdraw unnoted
-                                needed_items.append(item)
+                        # Check if bank has the item
+                        if bank.has_item(item):
+                            needed_items.append(item)
+                        else:
+                            # Item not in bank, need to buy from GE
+                            missing_items.append(item)
+                            ui.debug(f"[GD] Item {item} not found in bank, need to buy from GE")
                     
-                    if needed_items:
+                    if missing_items:
+                        # Some items are missing, need to buy from GE
+                        bank.close_bank()
+                        if not wait_until(bank.is_closed, min_wait_ms=600, max_wait_ms=3000):
+                            return
+                        self.set_phase("BUY_QUEST_ITEMS_FROM_GE")
+                        return
+                    elif needed_items:
                         # Ensure bank note mode is disabled (withdraw as items, not notes)
                         bank.ensure_note_mode_disabled()
-                        
-                        # Deposit inventory to make space
-                        bank.deposit_inventory()
-                        wait_until(inv.is_empty, max_wait_ms=5000, min_wait_ms=200)
                         
                         # Withdraw needed items (as unnoted items)
                         for item in needed_items:
@@ -92,30 +97,69 @@ class GoblinDiplomacyPlan(Plan):
                                 bank.withdraw_item(item, withdraw_x=3)
                             else:
                                 bank.withdraw_item(item)
-                        return
-                    else:
-                        # Check if we have all unnoted items in inventory
-                        has_all_unnoted = all(inv.has_unnoted_item(item) for item in required_items)
-                        if has_all_unnoted:
+                        
+                        # Verify we have all items in inventory before proceeding
+                        time.sleep(0.5)  # Brief wait for items to appear in inventory
+                        
+                        # Check if we have all required items in inventory (unnoted)
+                        has_all_required = True
+                        for item in required_items:
+                            if item == "Goblin mail":
+                                # Need 3 goblin mail
+                                if not inv.has_item(item, min_qty=3):
+                                    has_all_required = False
+                                    break
+                            else:
+                                if not inv.has_unnoted_item(item):
+                                    has_all_required = False
+                                    break
+                        
+                        if has_all_required:
                             bank.close_bank()
                             if not wait_until(bank.is_closed, min_wait_ms=600, max_wait_ms=3000):
                                 return
                             self.set_phase("MAKE_ARMOURS")
                             return
                         else:
-                            # Missing items, need to buy from GE
-                            bank.close_bank()
-                            if not wait_until(bank.is_closed, min_wait_ms=600, max_wait_ms=3000):
-                                return
-                            self.set_phase("BUY_QUEST_ITEMS_FROM_GE")
+                            # Items not properly withdrawn, try again next tick
                             return
+                    else:
+                        # All items are in bank, but we need to withdraw them
+                        # This shouldn't happen since we just checked, but handle it
+                        ui.debug("[GD] All items found in bank, withdrawing...")
+                        bank.ensure_note_mode_disabled()
+                        
+                        for item in required_items:
+                            if item == "Goblin mail":
+                                bank.withdraw_item(item, withdraw_x=3)
+                            else:
+                                bank.withdraw_item(item)
+                        
+                        # Verify withdrawal and close bank
+                        time.sleep(0.5)
+                        bank.close_bank()
+                        if not wait_until(bank.is_closed, min_wait_ms=600, max_wait_ms=3000):
+                            return
+                        self.set_phase("MAKE_ARMOURS")
+                        return
 
             case "BUY_QUEST_ITEMS_FROM_GE":
                 # Define required items
                 required_items = ["Blue dye", "Orange dye", "Goblin mail"]
                 
-                # Check if we have all required items
-                has_all_items = all(inv.has_item(item) for item in required_items)
+                # Check if we have all required items with correct quantities and types
+                has_all_items = True
+                for item in required_items:
+                    if item == "Goblin mail":
+                        # Need 3 goblin mail
+                        if not inv.has_item(item, min_qty=3):
+                            has_all_items = False
+                            break
+                    else:
+                        # Need 1 of each dye (unnoted)
+                        if not inv.has_unnoted_item(item):
+                            has_all_items = False
+                            break
                 
                 if has_all_items:
                     if ge.is_open():
@@ -143,10 +187,10 @@ class GoblinDiplomacyPlan(Plan):
                     ui.debug("[GD] Failed to buy items, retrying...")
                     return
                 
-                # If we get here, all items should be bought
-                if all(inv.has_item(item) for item in required_items):
-                    self.set_phase("MAKE_ARMOURS")
-                    return
+                # If we get here, all items should be bought - verify and go to bank
+                time.sleep(0.5)  # Brief wait for items to appear in inventory
+                self.set_phase("CHECK_BANK_FOR_QUEST_ITEMS")
+                return
 
             case "MAKE_ARMOURS":
                 # Use blue dye on one goblin mail
