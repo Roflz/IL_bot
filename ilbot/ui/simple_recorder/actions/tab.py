@@ -4,89 +4,94 @@ from __future__ import annotations
 from typing import Optional
 from .runtime import emit
 from ..helpers.context import get_payload, get_ui
-from ..helpers.tab import is_inventory_tab_open
+from ..helpers.tab import is_inventory_tab_open, is_tab_open, find_tab_by_name
 
-def open_inventory_tab(payload: Optional[dict] = None, ui=None) -> Optional[dict]:
+def open_tab(tab_name: str) -> Optional[dict]:
     """
-    Open the inventory tab if it's not already open.
+    Open a specific tab if it's not already open.
     
     Args:
-        payload: Optional payload, will get fresh if None
-        ui: Optional UI instance, will get if None
+        tab_name: Name of the tab to open (e.g., "INVENTORY", "COMBAT", "SKILLS", etc.)
     
     Returns:
-        UI dispatch result or None if failed
+        Result dict or None if failed
     """
-    if payload is None:
-        payload = get_payload()
-    if ui is None:
-        ui = get_ui()
-    
-    # Check if inventory tab is already open
-    if is_inventory_tab_open(payload):
+    # Check if tab is already open
+    if is_tab_open(tab_name):
         return None  # Already open
     
-    # Get tab coordinates from IPC
-    from ..helpers.tab import get_current_tab
-    tab_info = get_current_tab(payload)
-    
-    if not tab_info or not tab_info.get("ok"):
-        return None
-    
-    # Find the inventory tab in the tabs list
-    tabs = tab_info.get("tabs", [])
-    inventory_tab = None
-    for tab in tabs:
-        if tab.get("name") == "INVENTORY":
-            inventory_tab = tab
-            break
-    
-    if not inventory_tab:
+    # Find the tab by name
+    tab = find_tab_by_name(tab_name)
+    if not tab:
         return None
     
     # Get coordinates from the tab info
-    canvas = inventory_tab.get("canvas", {})
+    canvas = tab.get("canvas", {})
     x = canvas.get("x")
     y = canvas.get("y")
     
     if x is None or y is None:
         return None
     
-    # Click on the inventory tab using dynamic coordinates
-    step = emit({
-        "action": "tab-click",
-        "click": {"type": "point", "x": int(x), "y": int(y)},
-        "target": {"domain": "tab", "name": "INVENTORY"},
-    })
-    return ui.dispatch(step)
+    # Use direct IPC click instead of UI dispatch
+    try:
+        from ..services.ipc_client import RuneLiteIPC
+        
+        ipc = RuneLiteIPC()
+        click_resp = ipc._send({
+            "cmd": "click",
+            "x": int(x),
+            "y": int(y)
+        })
+        
+        if click_resp and click_resp.get("ok"):
+            return {"ok": True, "action": "tab-click", "tab": tab_name}
+        return None
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to click tab {tab_name}: {e}")
+        return None
 
-def ensure_inventory_tab_open(payload: Optional[dict] = None, ui=None) -> bool:
+def open_inventory_tab() -> Optional[dict]:
     """
-    Ensure the inventory tab is open, opening it if necessary.
-    
-    Args:
-        payload: Optional payload, will get fresh if None
-        ui: Optional UI instance, will get if None
+    Open the inventory tab if it's not already open.
     
     Returns:
-        True if inventory tab is open (or was opened), False if failed
+        Result dict or None if failed
     """
-    if payload is None:
-        payload = get_payload()
-    if ui is None:
-        ui = get_ui()
+    return open_tab("INVENTORY")
+
+def ensure_tab_open(tab_name: str) -> bool:
+    """
+    Ensure a specific tab is open, opening it if necessary.
     
+    Args:
+        tab_name: Name of the tab to ensure is open (e.g., "INVENTORY", "COMBAT", "SKILLS", etc.)
+    
+    Returns:
+        True if tab is open (or was opened), False if failed
+    """
     # Check if already open
-    if is_inventory_tab_open(payload):
+    if is_tab_open(tab_name):
         return True
     
     # Try to open it
-    result = open_inventory_tab(payload, ui)
+    result = open_tab(tab_name)
     if result is not None:
         # Wait a moment for the tab to open
         import time
         time.sleep(0.2)
         # Check again
-        return is_inventory_tab_open(payload)
+        return is_tab_open(tab_name)
     
     return False
+
+def ensure_inventory_tab_open() -> bool:
+    """
+    Ensure the inventory tab is open, opening it if necessary.
+    
+    Returns:
+        True if inventory tab is open (or was opened), False if failed
+    """
+    return ensure_tab_open("INVENTORY")
+

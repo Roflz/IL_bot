@@ -314,3 +314,69 @@ def prepare_for_walk(target_world_xy: tuple[int, int] | None, payload=None):
     zoom(+1)
     if target_world_xy and len(target_world_xy) == 2:
         face_world_point(int(target_world_xy[0]), int(target_world_xy[1]), timeout_ms=600, payload=payload or get_payload())
+
+def setup_camera_optimal(payload=None):
+    """
+    Set up camera for optimal bot operation:
+    - Zoom all the way out (scale ~551)
+    - Set pitch to high angle (~350 degrees)
+    """
+    p = payload or get_payload()
+    if not p:
+        print("[CAMERA] No payload available for camera setup")
+        return False
+    
+    print("[CAMERA] Setting up optimal camera view...")
+    
+    # Step 1: Zoom all the way out
+    print("[CAMERA] Zooming out...")
+    current_scale = read_camera_scale(p)
+    if current_scale is not None:
+        print(f"[CAMERA] Current scale: {current_scale}")
+        
+        # Keep zooming out until we reach the target (551 or lower)
+        max_zoom_attempts = 20
+        zoom_attempts = 0
+        
+        while current_scale > 551 and zoom_attempts < max_zoom_attempts:
+            zoom(-3)  # Zoom out (negative = out)
+            time.sleep(0.1)  # Small delay between zoom attempts
+            
+            # Get updated scale
+            new_scale = read_camera_scale(p)
+            if new_scale is not None:
+                current_scale = new_scale
+                print(f"[CAMERA] Scale after zoom: {current_scale}")
+            else:
+                print("[CAMERA] Could not read camera scale, continuing...")
+                break
+                
+            zoom_attempts += 1
+        
+        if current_scale <= 551:
+            print(f"[CAMERA] Successfully zoomed out to scale: {current_scale}")
+        else:
+            print(f"[CAMERA] Reached max zoom attempts, final scale: {current_scale}")
+    else:
+        print("[CAMERA] Could not read initial camera scale, attempting zoom anyway...")
+        # Try zooming out anyway
+        for _ in range(10):
+            zoom(-3)
+            time.sleep(0.1)
+    
+    # Step 2: Set pitch to high angle (~350 degrees)
+    print("[CAMERA] Adjusting pitch to high angle...")
+    
+    # Press UP arrow multiple times to increase pitch
+    # The exact number depends on current pitch, but we'll try a reasonable amount
+    pitch_attempts = 0
+    max_pitch_attempts = 15
+    
+    while pitch_attempts < max_pitch_attempts:
+        pitch(+1)  # Pitch up
+        time.sleep(0.1)  # Small delay between pitch adjustments
+        pitch_attempts += 1
+        print(f"[CAMERA] Pitch adjustment {pitch_attempts}/{max_pitch_attempts}")
+    
+    print("[CAMERA] Camera setup complete!")
+    return True

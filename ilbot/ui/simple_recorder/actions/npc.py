@@ -246,29 +246,28 @@ def chat_with_npc(npc_name: str, options: Optional[List[str]] = None, payload: O
         options = []
     
     # Check if dialogue is already open or if we can choose options
-    if not dialogue_is_open(payload) and not can_choose_option(payload):
+    if not dialogue_is_open() and not can_choose_option():
         # Click on the NPC to start conversation
-        result = click_npc(npc_name, payload, ui)
+        result = click_npc(npc_name)
         if result is None:
             return None
         
         # Wait for dialogue to open
         start_time = time.time()
-        while not dialogue_is_open(payload) and not can_choose_option(payload):
+        while not dialogue_is_open() and not can_choose_option():
             if (time.time() - start_time) * 1000 > max_wait_ms:
                 return None
             time.sleep(0.1)
-            payload = get_payload()  # Refresh payload
         
         return result
     
     # Handle existing dialogue
-    if any_chat_active(payload):
-        if can_choose_option(payload):
+    if any_chat_active():
+        if can_choose_option():
             # Try to select one of the provided options in order of preference
             for option in options:
-                if option_exists(option, payload):
-                    result = choose_option(option, payload, ui)
+                if option_exists(option):
+                    result = choose_option(option)
                     if result is not None:
                         return 1200  # Return delay value as in your example
                     break
@@ -276,9 +275,9 @@ def chat_with_npc(npc_name: str, options: Optional[List[str]] = None, payload: O
             # If no preferred options found, return None
             return None
             
-        elif can_continue(payload):
+        elif can_continue():
             # Continue the dialogue
-            result = continue_dialogue(payload, ui)
+            result = continue_dialogue()
             return result
     
     return None

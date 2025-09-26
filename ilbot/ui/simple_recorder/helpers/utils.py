@@ -99,3 +99,18 @@ def press_esc(payload: dict | None = None, ui=None) -> dict | None:
         "preconditions": [], "postconditions": []
     })
     return ui.dispatch(step)
+
+def press_backspace(payload: dict | None = None, ui=None) -> dict | None:
+    if payload is None:
+        payload = get_payload()
+    if ui is None:
+        ui = get_ui()
+
+    step = emit({
+        "id": "key-backspace",
+        "action": "key",
+        "description": "Press Backspace",
+        "click": {"type": "key", "key": "BACKSPACE"},
+        "preconditions": [], "postconditions": []
+    })
+    return ui.dispatch(step)
