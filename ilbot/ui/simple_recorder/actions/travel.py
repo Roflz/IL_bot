@@ -5,9 +5,175 @@ import time
 from .runtime import emit
 from ..helpers.camera import prepare_for_walk
 from ..helpers.context import get_payload, get_ui
-from ..helpers.navigation import get_nav_rect, closest_bank_key, bank_rect, player_in_rect, _merge_door_into_projection
+from ..helpers.navigation import get_nav_rect, closest_bank_key, bank_rect, player_in_rect, _merge_door_into_projection, _first_blocking_door_from_waypoints
 from ..helpers.ipc import ipc_path, ipc_project_many
 from ..services.camera_integration import dispatch_with_camera
+
+# Global variable to track the most recently traversed door
+_most_recently_traversed_door = None
+
+
+def _is_same_door(door_plan: dict) -> bool:
+    """
+    Check if the door_plan is the same as the most recently traversed door.
+    """
+    global _most_recently_traversed_door
+    
+    if not door_plan or not _most_recently_traversed_door:
+        return False
+    
+    # Compare door IDs and coordinates
+    current_door = door_plan.get("door", {})
+    current_id = current_door.get("id")
+    current_x = door_plan.get("x")
+    current_y = door_plan.get("y")
+    current_p = door_plan.get("p", 0)
+    
+    recent_door = _most_recently_traversed_door.get("door", {})
+    recent_id = recent_door.get("id")
+    recent_x = _most_recently_traversed_door.get("x")
+    recent_y = _most_recently_traversed_door.get("y")
+    recent_p = _most_recently_traversed_door.get("p", 0)
+    
+    return (current_id == recent_id and 
+            current_x == recent_x and 
+            current_y == recent_y and 
+            current_p == recent_p)
+
+
+def _handle_door_opening(door_plan: dict, fresh_payload: dict, ui) -> bool:
+    """
+    Handle door opening logic with retry mechanism and recently traversed door tracking.
+    
+    Args:
+        door_plan: Door plan containing door information
+        fresh_payload: Current game state payload
+        ui: UI instance for dispatching actions
+        
+    Returns:
+        True if door was opened successfully or skipped, False if door opening failed
+    """
+    global _most_recently_traversed_door
+    
+    if not door_plan:
+        return True  # No door to handle
+    
+    # Check if this is the same door we just traversed
+    if _is_same_door(door_plan):
+        print(f"[DEBUG] Skipping recently traversed door at ({door_plan.get('x')}, {door_plan.get('y')})")
+        # Reset the recently traversed door so we don't skip it forever
+        _most_recently_traversed_door = None
+        return True  # Continue to normal ground move without door handling
+    
+    # Get initial door coordinates for pathfinding
+    door_x = door_plan.get("x")
+    door_y = door_plan.get("y")
+    door_p = door_plan.get("p", 0)
+    
+    if not isinstance(door_x, int) or not isinstance(door_y, int):
+        return True  # Invalid door coordinates
+    
+    # Door is closed, try to open it with retry logic
+    door_opened = not door_plan["door"].get("closed")
+    door_retry_count = 0
+    max_door_retries = 3
+
+    while not door_opened and door_retry_count < max_door_retries:
+        # Get fresh door data for each retry attempt
+        fresh_payload = get_payload()
+        wps, dbg_path = ipc_path(fresh_payload, goal=(door_x, door_y))
+        fresh_door_plan = _first_blocking_door_from_waypoints(wps)
+        
+        if not fresh_door_plan:
+            # No door found, it might be open already
+            door_opened = True
+            break
+            
+        # Use fresh door data for clicking
+        d = (fresh_door_plan.get("door") or {})
+        b = d.get("bounds")
+
+        if isinstance(b, dict) and all(k in b for k in ("x", "y", "width", "height")):
+            step = emit({
+                "action": "open-door",
+                "click": {"type": "rect-center"},
+                "target": {"domain": "object", "name": d.get("name") or "Door", "bounds": b},
+                "postconditions": [],
+                "timeout_ms": 1200
+            })
+        else:
+            c = d.get("canvas") or d.get("tileCanvas")
+            if not (isinstance(c, dict) and "x" in c and "y" in c):
+                break  # Can't get coordinates, skip door opening
+            step = emit({
+                "action": "open-door",
+                "click": {"type": "point", "x": int(c["x"]), "y": int(c["y"])},
+                "target": {"domain": "object", "name": d.get("name") or "Door"},
+                "postconditions": [],
+                "timeout_ms": 1200
+            })
+
+        door_result = dispatch_with_camera(step, ui=get_ui(), payload=get_payload(), aim_ms=420)
+        if door_result:
+            # Wait up to 5 seconds for door to open
+            door_wait_start = time.time()
+            while (time.time() - door_wait_start) * 1000 < 5000:
+                fresh_payload = get_payload()  # Get fresh payload
+                if _door_is_open(fresh_door_plan, fresh_payload):
+                    # Door opened successfully, mark it as recently traversed
+                    _most_recently_traversed_door = fresh_door_plan
+                    print(f"[DEBUG] Door opened successfully, marking as recently traversed")
+                    return True
+                time.sleep(0.1)  # Check every 100ms
+
+        if not door_opened:
+            door_retry_count += 1
+            if door_retry_count < max_door_retries:
+                time.sleep(0.5)  # Wait before retry
+
+    if not door_opened:
+        # Door opening failed after retries
+        return False
+    
+    return True
+
+
+def _door_is_open(door_plan: dict, payload: dict) -> bool:
+    """
+    Check if a door is open by using IPC to get current door state.
+    Uses the door_state IPC command to check if the door still exists.
+    """
+    if not door_plan or not door_plan.get("door"):
+        return True
+    
+    # World coordinates are at the top level of door_plan, not inside door
+    door_x = door_plan.get("x")
+    door_y = door_plan.get("y")
+    door_p = door_plan.get("p", 0)  # Default to plane 0 if not specified
+    
+    if not isinstance(door_x, int) or not isinstance(door_y, int):
+        return True  # Can't verify, assume open
+    
+    # Use IPC to get current door state
+    from ..helpers.ipc import ipc_send
+    resp = ipc_send({
+        "cmd": "door_state",
+        "door_x": door_x,
+        "door_y": door_y,
+        "door_p": door_p
+    }, payload)
+    
+    if not resp or not resp.get("ok"):
+        return True  # If IPC fails, assume door is open
+    
+    # If wall_object is null, door doesn't exist (is open)
+    # If wall_object exists, door is still there (is closed)
+    og_door_id = door_plan['door'].get('id')
+    new_door_id = resp['wall_object'].get('id')
+    if not og_door_id == new_door_id:
+        return True
+
+    return False
 
 
 def _get_hovered_tile_info(payload: dict) -> dict | None:
@@ -380,6 +546,8 @@ def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None,
         ui: UI instance for dispatching actions
         center: If True, go to center of region instead of stopping at boundary
     """
+    global _most_recently_traversed_door
+    
     if payload is None:
         payload = get_payload()
     if ui is None:
@@ -442,8 +610,8 @@ def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None,
     player_x, player_y = _get_player_position(fresh_payload)
     if isinstance(player_x, int) and isinstance(player_y, int) and usable:
         last_waypoint = usable[-1]
-        last_wp_x = last_waypoint.get("x")
-        last_wp_y = last_waypoint.get("y")
+        last_wp_x = last_waypoint["world"].get("x")
+        last_wp_y = last_waypoint["world"].get("y")
         
         if isinstance(last_wp_x, int) and isinstance(last_wp_y, int):
             distance_to_last = _calculate_distance(player_x, player_y, last_wp_x, last_wp_y)
@@ -473,7 +641,6 @@ def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None,
                         rect = get_nav_rect(rect_key)
                         if rect and player_in_rect(fresh_payload, rect):
                             print(f"[DEBUG] Player is at destination {rect_key}, no action needed")
-        return None
 
     if center:
         # When going to center, choose from waypoints closer to the center of the region
@@ -525,70 +692,39 @@ def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None,
     chosen = random.choice(pool)
     chosen_idx = proj.index(chosen)
 
-    # Door before chosen waypoint
-    door_plan = _first_blocking_door(usable, up_to_index=chosen_idx)
-    if door_plan:
-        t = (door_plan.get("target") or {})
-        click = (door_plan.get("click") or {})
-        b = t.get("bounds") or None
-        c = t.get("canvas") or t.get("tileCanvas") or None
+    # 1) Check for doors on the path to the destination
+    if usable:
+        # Get the destination coordinates from the last waypoint
+        last_waypoint = usable[-1]
+        gx = last_waypoint["world"].get("x")
+        gy = last_waypoint["world"].get("y")
+        
+        if isinstance(gx, int) and isinstance(gy, int):
+            wps, dbg_path = ipc_path(fresh_payload, goal=(gx, gy))
+            door_plan = _first_blocking_door_from_waypoints(wps)
+            if door_plan:
+                # Handle door opening with retry logic and recently traversed door tracking
+                if _handle_door_opening(door_plan, fresh_payload, ui):
+                    pass
+                else:
+                    return
 
-        # normalize timeout/postconditions
-        timeout_ms = int(door_plan.get("timeout_ms") or 2000)
-        postconds = door_plan.get("postconditions") or []
-
-        # 1) Bounds-based click (preferred)
-        if isinstance(b, dict) and all(k in b for k in ("x", "y", "width", "height")):
-            step = emit({
-                "action": "open-door",
-                "click": click if click else {"type": "rect-center"},
-                "target": {
-                    "domain": t.get("domain") or "object",
-                    "name": t.get("name") or "Door",
-                    "bounds": b,
-                    "world": door_plan.get("world"),
-                },
-                "postconditions": postconds,
-                "timeout_ms": timeout_ms,
-            })
-            return _wait_for_camera_and_click(step, ui=ui, payload=fresh_payload, aim_ms=420, 
-                                            hover_delay_ms=250, click_delay_ms=150)
-
-        # 2) Canvas point click (fallback)
-        if isinstance(c, dict) and "x" in c and "y" in c:
-            step = emit({
-                "action": "open-door",
-                "click": {"type": "point", "x": int(c["x"]), "y": int(c["y"])},
-                "target": {
-                    "domain": t.get("domain") or "object",
-                    "name": t.get("name") or "Door",
-                    "world": door_plan.get("world"),
-                },
-                "postconditions": postconds,
-                "timeout_ms": timeout_ms,
-            })
-            return _wait_for_camera_and_click(step, ui=ui, payload=fresh_payload, aim_ms=420,
-                                            hover_delay_ms=250, click_delay_ms=150)
-
-    # Normal ground move
-    world_hint = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
-    cx, cy = int(chosen["canvas"]["x"]), int(chosen["canvas"]["y"])
-    step = emit({
-        "action": "click-ground",
-        "description": f"Move toward {rect_key}",
-        "click": {"type": "point", "x": cx, "y": cy},
-        "target": {"domain": "ground", "name": f"Waypoint→{rect_key}",
-                   "world": chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}},
-    })
-
-    return _wait_for_camera_and_click(step, ui=ui, payload=fresh_payload, aim_ms=700,
-                                    hover_delay_ms=300, click_delay_ms=200)
+    # Normal ground move using centralized function
+    world_coords = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
+    from ..services.click_with_camera import click_ground_with_camera
+    return click_ground_with_camera(
+        world_coords=world_coords,
+        description=f"Move toward {rect_key}",
+        ui=ui,
+        payload=fresh_payload,
+        aim_ms=700
+    )
 
 
 def _get_player_position(payload: dict) -> tuple[int | None, int | None]:
     """Get current player position from payload."""
     player = payload.get("player", {})
-    return player.get("x"), player.get("y")
+    return player.get("worldX"), player.get("worldY")
 
 
 def _calculate_distance(x1: int, y1: int, x2: int, y2: int) -> float:
@@ -751,46 +887,3 @@ def in_area(rect_or_key: str | tuple | list, payload: dict | None = None, ui=Non
         if not (isinstance(rect, (tuple, list)) and len(rect) == 4):
             return None
     return player_in_rect(payload, rect)
-
-# --- Node-based travel (thin wrappers) ---
-from ..helpers.nodes import node_rect, distance2_to  # new module
-
-def go_to_node(name: str, payload: dict | None = None, ui=None, radius: int = 2):
-    """
-    Walk one step toward the named node (x,y,p) by wrapping the node tile as a small rect.
-    Reuses existing go_to(...) which is door-aware, projection-based, and camera-integrated.
-    """
-    rect = node_rect(name, r=radius)
-    if not rect:
-        return None
-    return go_to(rect, payload=payload, ui=ui)  # existing door-aware path→project→click flow
-
-def follow_nodes(seq: list[str], payload: dict | None = None, ui=None,
-                 arrive_d2: int = 9, radius: int = 2) -> dict | None:
-    """
-    Given a sequence of node names, attempt to reach the first not-yet-arrived node.
-    - If within arrive_d2 (default=3 tiles -> 9), advance to the next.
-    - Otherwise, issue one step toward that node (via go_to_node).
-    Returns the dispatched step dict or None if already at final node.
-    """
-    if not isinstance(seq, (list, tuple)) or not seq:
-        return None
-    if payload is None:
-        from ..helpers.context import get_payload
-        payload = get_payload()
-
-    # find first target not yet reached
-    idx = 0
-    while idx < len(seq):
-        d2 = distance2_to(seq[idx], payload=payload)
-        if d2 is None:
-            break  # unknown player or node missing -> attempt anyway
-        if d2 > arrive_d2:
-            break
-        idx += 1
-
-    if idx >= len(seq):
-        return None  # finished
-
-    return go_to_node(seq[idx], payload=payload, ui=ui, radius=radius)
-

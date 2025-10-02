@@ -1,38 +1,51 @@
 from typing import Optional
 
+from .context import get_payload
 from .utils import norm_name
 
 from .rects import unwrap_rect
 from .widgets import rect_center_from_widget
 
 
-def inv_slots(payload: dict) -> list[dict]:
+def inv_slots(payload: dict | None = None) -> list[dict]:
+    if payload is None:
+        payload = get_payload()
     return (payload.get("inventory", {}) or {}).get("slots", []) or []
 
-def inv_has(payload: dict, name: str) -> bool:
+def inv_has(name: str, payload: dict | None = None) -> bool:
+    if payload is None:
+        payload = get_payload()
     n = norm_name(name)
     return any(norm_name(s.get("itemName")) == n for s in inv_slots(payload))
 
-def inv_count(payload: dict, name: str) -> int:
+def inv_count(name: str, payload: dict | None = None) -> int:
+    if payload is None:
+        payload = get_payload()
     n = norm_name(name)
     return sum(int(s.get("quantity") or 0) for s in inv_slots(payload)
                if norm_name(s.get("itemName")) == n)
 
-def first_inv_slot(payload: dict, name: str) -> dict | None:
+def first_inv_slot(name: str, payload: dict | None = None) -> dict | None:
+    if payload is None:
+        payload = get_payload()
     n = norm_name(name)
     for s in inv_slots(payload):
         if norm_name(s.get("itemName")) == n:
             return s
     return None
 
-def inventory_has_foreign_items(payload: dict) -> bool:
+def inventory_has_foreign_items(payload: dict | None = None) -> bool:
+    if payload is None:
+        payload = get_payload()
     allowed = {"Ring mould", "Gold bar", "Sapphire", "Emerald"}
     for slot in (payload.get("inventory") or {}).get("slots") or []:
         if int(slot.get("quantity") or 0) > 0 and (slot.get("itemName") or "") not in allowed:
             return True
     return False
 
-def inventory_ring_slots(payload: dict) -> list[dict]:
+def inventory_ring_slots(payload: dict | None = None) -> list[dict]:
+    if payload is None:
+        payload = get_payload()
     out = []
     for s in inv_slots(payload):
         nm = norm_name(s.get("itemName"))
@@ -40,14 +53,18 @@ def inventory_ring_slots(payload: dict) -> list[dict]:
             out.append(s)
     return out
 
-def inv_slot_bounds(payload: dict, slot_id: int) -> dict | None:
+def inv_slot_bounds(slot_id: int, payload: dict | None = None) -> dict | None:
+    if payload is None:
+        payload = get_payload()
     iw = (payload.get("inventory_widgets") or {}).get(str(slot_id)) or {}
     return unwrap_rect(iw.get("bounds") if isinstance(iw, dict) else None)
 
-def coins(payload: dict) -> int:
-    return inv_count(payload, "Coins")
+def coins(payload: dict | None = None) -> int:
+    return inv_count("Coins", payload)
 
-def inv_has_any(payload: dict) -> bool:
+def inv_has_any(payload: dict | None = None) -> bool:
+    if payload is None:
+        payload = get_payload()
     return int((payload.get("inventory") or {}).get("totalItems") or 0) > 0
 
 def get_item_coordinates(item: dict) -> Optional[tuple[int, int]]:

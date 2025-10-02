@@ -7,6 +7,55 @@ from ilbot.ui.simple_recorder.helpers.rects import unwrap_rect, rect_center_xy
 from ilbot.ui.simple_recorder.services.camera_integration import dispatch_with_camera
 
 
+def object_exists(
+    name: str,
+    payload: dict | None = None,
+    radius: int = 26,
+    types: List[str] | None = None
+) -> bool:
+    """
+    Check if a game object exists by (partial) name.
+    
+    Args:
+        name: Name of the object to search for (partial match)
+        payload: Optional payload, will get fresh if None
+        radius: Search radius for IPC fallback (default: 26)
+        types: Object types to search for (default: ["WALL", "GAME", "DECOR", "GROUND"])
+        
+    Returns:
+        True if object exists, False otherwise
+    """
+    if not name or not str(name).strip():
+        return False
+    if payload is None:
+        payload = get_payload()
+    if types is None:
+        types = ["WALL", "GAME", "DECOR", "GROUND"]
+
+    want = str(name).strip().lower()
+
+    # ---------- check payload first ----------
+    objs = (payload.get("closestGameObjects") or []) + (payload.get("gameObjects") or [])
+    objs = [o for o in objs if (o.get("name") or "").strip()]
+    
+    for o in objs:
+        nm = (o.get("name") or "").lower()
+        if want in nm:
+            return True
+
+    # ---------- IPC fallback for broader search ----------
+    req = {
+        "cmd": "objects",
+        "name": want,
+        "radius": radius,
+        "types": types,
+    }
+    resp = ipc_send(req) or {}
+    found = resp.get("objects") or []
+    
+    return len(found) > 0
+
+
 def click(
     name: str,
     prefer_action: str | None = None,
@@ -14,10 +63,8 @@ def click(
     ui=None,
 ) -> dict | None:
     """
-    Click a game object by (partial) name (like open_bank).
-    - If a CLOSED door lies on the path to the object, open it first (then return).
-    - If prefer_action provided and not the first action, use context-select.
-    - Otherwise left-click (rect-center if clickbox available, else canvas point).
+    Click a game object by (partial) name using direct IPC detection with pathing and door handling.
+    If a CLOSED door lies on the path to the object, click the earliest blocking door first.
     """
     if not name or not str(name).strip():
         return None
@@ -29,137 +76,105 @@ def click(
     want = str(name).strip().lower()
     want_action = (prefer_action or "").strip().lower()
 
-    # ---------- gather candidates ----------
-    objs = (payload.get("closestGameObjects") or []) + (payload.get("gameObjects") or [])
-    objs = [o for o in objs if (o.get("name") or "").strip()]
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        # Get fresh payload and object data on each retry
+        fresh_payload = get_payload()
+        
+        # Use direct IPC to get game objects - OPTIMIZED VERSION
+        from ..helpers.ipc import ipc_send
+        
+        # Get specific object using optimized find_object command
+        obj_resp = ipc_send({"cmd": "find_object", "name": want, "types": ["GAME"]}, fresh_payload)
+        
+        if not obj_resp or not obj_resp.get("ok") or not obj_resp.get("found"):
+            print(f"[DEBUG] Object '{want}' not found")
+            continue  # Try next attempt
+        
+        target = obj_resp.get("object")
+        print(f"[DEBUG] Found object: {target.get('name')} at distance {target.get('distance')}")
 
-    # ---------- pick target by name (substring) locally ----------
-    target = None
-    for o in objs:
-        nm = (o.get("name") or "").lower()
-        if want in nm:
-            target = o
-            break
+        def action_index(actions: List[str] | None, needle: str) -> Optional[int]:
+            if not needle: return None
+            try:
+                acts = [a.lower() for a in (actions or []) if a]
+                return acts.index(needle) if needle in acts else None
+            except Exception:
+                return None
 
-    # ---------- IPC fallback (broader scan), then choose closest ----------
-    if target is None:
-        req = {
-            "cmd": "objects",
-            "name": want,                 # substring match in plugin
-            "radius": 26,                 # adjust as needed
-            "types": ["WALL", "GAME", "DECOR", "GROUND"],
-        }
-        resp = ipc_send(req) or {}
-        found = (resp.get("objects") or [])
-        if not found:
-            return None
+        # Target already found by optimized find_object command
 
-        me = (payload.get("player") or {})
-        me_x = me.get("worldX") if isinstance(me.get("worldX"), int) else payload.get("worldX")
-        me_y = me.get("worldY") if isinstance(me.get("worldY"), int) else payload.get("worldY")
-        me_p = me.get("plane")  if isinstance(me.get("plane"),  int) else payload.get("plane")
+        # 1) Check for doors on the path to the object
+        gx, gy = target["world"].get("x"), target["world"].get("y")
+        if isinstance(gx, int) and isinstance(gy, int):
+            from ..helpers.ipc import ipc_path
+            from ..helpers.navigation import _first_blocking_door_from_waypoints
+            from .travel import _handle_door_opening
+            
+            wps, dbg_path = ipc_path(fresh_payload, goal=(gx, gy))
+            door_plan = _first_blocking_door_from_waypoints(wps)
+            if door_plan:
+                # Handle door opening with retry logic and recently traversed door tracking
+                if not _handle_door_opening(door_plan, fresh_payload, ui):
+                    # Door opening failed after retries, continue to next attempt
+                    continue
 
-        def obj_wxy_p(o):
-            w = o.get("world") or {}
-            ox = w.get("x", o.get("worldX"))
-            oy = w.get("y", o.get("worldY"))
-            op = w.get("p", o.get("plane"))
-            return ox, oy, op
+        # 2) Click the object
+        idx = action_index(target.get("actions"), want_action) if want_action else None
+        from ..helpers.rects import unwrap_rect, rect_center_xy
+        rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
+        obj_name = target.get("name") or name
+        world_coords = {"x": target.get("world", {}).get("x"), "y": target.get("world", {}).get("y"), "p": target.get("world", {}).get("p", 0)}
 
-        scored = []
-        for o in found:
-            ox, oy, op = obj_wxy_p(o)
-            if isinstance(me_x, int) and isinstance(me_y, int) and isinstance(ox, int) and isinstance(oy, int):
-                dist = abs(ox - me_x) + abs(oy - me_y)
-            else:
-                dist = 10**9
-            same_plane = 0 if (isinstance(me_p, int) and op == me_p) else 1
-            has_rect = 0 if (o.get("bounds") or o.get("clickbox")) else 1
-            scored.append((same_plane, dist, has_rect, o))
+        if rect:
+            cx, cy = rect_center_xy(rect)
+            anchor = {"bounds": rect}
+            point = {"x": cx, "y": cy}
+        elif isinstance(target["canvas"].get("x"), (int, float)) and isinstance(target["canvas"].get("y"), (int, float)):
+            cx, cy = int(target["canvas"]["x"]), int(target["canvas"]["y"])
+            anchor = {}
+            point = {"x": cx, "y": cy}
+        else:
+            continue  # Try next attempt
 
-        scored.sort(key=lambda t: (t[0], t[1], t[2]))
-        target = scored[0][3]
+        from .runtime import emit
+        from ..services.camera_integration import dispatch_with_camera
+        if not want_action or idx is None or idx == 0:
+            # Simple left click
+            step = emit({
+                "action": "click-object",
+                "click": ({"type": "rect-center"} if rect else {"type": "point", **point}),
+                "target": {"domain": "object", "name": obj_name, **anchor, "world": world_coords},
+            })
+        else:
+            # Context menu select
+            step = emit({
+                "action": "click-object-context",
+                "click": {
+                    "type": "context-select",
+                    "index": int(idx),
+                    "x": point["x"],
+                    "y": point["y"],
+                    "row_height": 16,
+                    "start_dy": 10,
+                    "open_delay_ms": 120,
+                },
+                "target": ({"domain": "object", "name": obj_name, **anchor, "world": world_coords}
+                           if rect else {"domain": "object", "name": obj_name, "world": world_coords}),
+                "anchor": point,
+            })
 
-    # ---------- door check: path to object, open earliest blocking door ----------
-    w = target.get("world") or {}
-    gx = w.get("x", target.get("worldX"))
-    gy = w.get("y", target.get("worldY"))
-    if isinstance(gx, int) and isinstance(gy, int):
-        wps, dbg_path = ipc_path(payload, goal=(gx, gy), max_wps=24)
-        door_plan = _first_blocking_door_from_waypoints(wps)  # your existing helper
-        if door_plan:
-            d = (door_plan.get("door") or {})
-            b = d.get("bounds")
-            if isinstance(b, dict) and all(k in b for k in ("x", "y", "width", "height")):
-                step = emit({
-                    "action": "open-door",
-                    "click": {"type": "rect-center"},
-                    "target": {"domain": "object", "name": d.get("name") or "Door", "bounds": b},
-                    "postconditions": [],
-                    "timeout_ms": 1200,
-                })
-            else:
-                c = d.get("canvas") or d.get("tileCanvas")
-                if not (isinstance(c, dict) and "x" in c and "y" in c):
-                    return None
-                step = emit({
-                    "action": "open-door",
-                    "click": {"type": "point", "x": int(c["x"]), "y": int(c["y"])},
-                    "target": {"domain": "object", "name": d.get("name") or "Door"},
-                    "postconditions": [],
-                    "timeout_ms": 1200,
-                })
-            return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)
+        # Use centralized click with camera function
+        from ..services.click_with_camera import click_object_with_camera
+        return click_object_with_camera(
+            object_name=name,
+            action=want_action,
+            action_index=idx,
+            world_coords=world_coords,
+            ui=ui,
+            payload=fresh_payload,
+            aim_ms=420
+        )
 
-    # ---------- click geometry ----------
-    rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
-    if rect:
-        cx, cy = rect_center_xy(rect)
-        anchor = {"bounds": rect}
-        point = {"x": cx, "y": cy}
-    elif isinstance(target.get("canvasX"), (int, float)) and isinstance(target.get("canvasY"), (int, float)):
-        cx, cy = int(target["canvasX"]), int(target["canvasY"])
-        anchor = {}
-        point = {"x": cx, "y": cy}
-    else:
-        return None
-
-    # ---------- decide action / build step ----------
-    def action_index(actions: List[str] | None, needle: str) -> Optional[int]:
-        if not needle: return None
-        try:
-            acts = [a.lower() for a in (actions or []) if a]
-            return acts.index(needle) if needle in acts else None
-        except Exception:
-            return None
-
-    acts = target.get("actions") or []
-    idx = action_index(acts, want_action) if want_action else None
-    obj_name = target.get("name") or name
-
-    if not want_action or idx is None or idx == 0:
-        # Simple left click
-        step = emit({
-            "action": "click-object",
-            "click": ({"type": "rect-center"} if rect else {"type": "point", **point}),
-            "target": {"domain": "object", "name": obj_name, **anchor},
-        })
-    else:
-        # Context menu select
-        step = emit({
-            "action": "click-object-context",
-            "click": {
-                "type": "context-select",
-                "index": int(idx),
-                "x": point["x"],
-                "y": point["y"],
-                "row_height": 16,
-                "start_dy": 10,
-                "open_delay_ms": 120,
-            },
-            "target": ({"domain": "object", "name": obj_name, **anchor}
-                       if rect else {"domain": "object", "name": obj_name}),
-            "anchor": point,
-        })
-
-    return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)
+    return None

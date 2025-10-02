@@ -114,3 +114,18 @@ def press_backspace(payload: dict | None = None, ui=None) -> dict | None:
         "preconditions": [], "postconditions": []
     })
     return ui.dispatch(step)
+
+def press_spacebar(payload: dict | None = None, ui=None) -> dict | None:
+    if payload is None:
+        payload = get_payload()
+    if ui is None:
+        ui = get_ui()
+
+    step = emit({
+        "id": "key-spacebar",
+        "action": "key",
+        "description": "Press Spacebar",
+        "click": {"type": "key", "key": "SPACE"},
+        "preconditions": [], "postconditions": []
+    })
+    return ui.dispatch(step)

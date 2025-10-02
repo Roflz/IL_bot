@@ -210,7 +210,7 @@ def set_quantity(payload: dict | None = None, qty: int = 0, ui=None) -> dict | N
         return ui.dispatch(step)
 
     else:
-        return press_enter()
+        return press_enter(payload, ui)
 
 
 def click_plus5(payload: dict | None = None, ui=None) -> dict | None:
@@ -351,7 +351,7 @@ def buy_item_from_ge(item, ui) -> bool | None:
             return None
 
         elif not selected_item_is(item_name):
-            press_enter()
+            press_enter(payload, ui)
             if not wait_until(lambda: selected_item_is(item_name), min_wait_ms=600, max_wait_ms=3000):
                 return None
             return None

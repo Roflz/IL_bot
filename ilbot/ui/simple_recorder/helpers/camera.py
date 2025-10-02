@@ -1,5 +1,6 @@
-from .ipc import ipc_send
-from .utils import now_ms
+from ilbot.ui.simple_recorder.helpers.ipc import ipc_send
+from ilbot.ui.simple_recorder.helpers.utils import now_ms
+from typing import Optional, Dict, Any
 
 _CAM_CENTER_TOL_PX = 120
 _CAM_NUDGE_COOLDOWN_MS = 350
@@ -88,14 +89,6 @@ def camera_nudge_budget() -> bool:
         return False
     _CAM_LAST_MS = now
     return True
-
-def read_camera_scale(payload: dict) -> float|None:
-    try:
-        cam = payload.get("camera") or {}
-        sc = cam.get("Scale")
-        return float(sc) if sc is not None else None
-    except Exception:
-        return None
 
 # --- Zoom state ---
 _ZOOM_STATE = {
@@ -315,35 +308,105 @@ def prepare_for_walk(target_world_xy: tuple[int, int] | None, payload=None):
     if target_world_xy and len(target_world_xy) == 2:
         face_world_point(int(target_world_xy[0]), int(target_world_xy[1]), timeout_ms=600, payload=payload or get_payload())
 
-def setup_camera_optimal(payload=None):
+
+
+
+
+def get_camera_stats(payload: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
     """
-    Set up camera for optimal bot operation:
-    - Zoom all the way out (scale ~551)
-    - Set pitch to high angle (~350 degrees)
+    Get real-time camera statistics directly from the client.
+    
+    Args:
+        payload: Optional payload, will get fresh if None
+        
+    Returns:
+        Dictionary with camera stats or None if failed:
+        {
+            "ok": True,
+            "scale": 512,           # Camera zoom level (lower = more zoomed out)
+            "pitch": 383,           # Camera pitch (vertical angle)
+            "yaw": 1024,            # Camera yaw (horizontal angle)
+            "position": {           # Camera position coordinates
+                "x": 1234,
+                "y": 5678,
+                "z": 90
+            },
+            "plane": 0,             # Current plane
+            "baseX": 1234,          # Base X coordinate
+            "baseY": 5678           # Base Y coordinate
+        }
     """
-    p = payload or get_payload()
-    if not p:
+    if payload is None:
+        from ilbot.ui.simple_recorder.helpers.context import get_payload
+        payload = get_payload()
+    
+    if not payload:
+        return None
+    
+    try:
+        resp = ipc_send({"cmd": "get_camera"})
+        if resp and resp.get("ok"):
+            return resp
+        else:
+            print(f"[CAMERA] Failed to get camera stats: {resp}")
+            return None
+    except Exception as e:
+        print(f"[CAMERA] Error getting camera stats: {e}")
+        return None
+
+
+def read_camera_scale(payload: Optional[Dict] = None) -> Optional[int]:
+    """
+    Get the current camera scale (zoom level) in real-time.
+    
+    Args:
+        payload: Optional payload, will get fresh if None
+        
+    Returns:
+        Current camera scale or None if failed
+    """
+    stats = get_camera_stats(payload)
+    if stats and stats.get("ok"):
+        return stats.get("scale")
+    return None
+
+
+def setup_camera_optimal(payload: Optional[Dict] = None, target_scale: int = 551, target_pitch: int = 383) -> bool:
+    """
+    Set up camera for optimal bot operation using real-time data.
+    
+    Args:
+        payload: Optional payload, will get fresh if None
+        target_scale: Target camera scale (lower = more zoomed out, default 551)
+        target_pitch: Target camera pitch (higher = more upward angle, default 383)
+        
+    Returns:
+        True if setup completed successfully, False otherwise
+    """
+    if payload is None:
+        payload = get_payload()
+    
+    if not payload:
         print("[CAMERA] No payload available for camera setup")
         return False
     
-    print("[CAMERA] Setting up optimal camera view...")
+    print(f"[CAMERA] Setting up camera for optimal view (Scale: {target_scale}, Pitch: {target_pitch})...")
     
-    # Step 1: Zoom all the way out
-    print("[CAMERA] Zooming out...")
-    current_scale = read_camera_scale(p)
+    # Step 1: Zoom to target scale
+    print(f"[CAMERA] Adjusting zoom to scale {target_scale}...")
+    current_scale = read_camera_scale(payload)
     if current_scale is not None:
         print(f"[CAMERA] Current scale: {current_scale}")
         
-        # Keep zooming out until we reach the target (551 or lower)
-        max_zoom_attempts = 20
+        # Keep zooming until we reach target scale
+        max_zoom_attempts = 100
         zoom_attempts = 0
         
-        while current_scale > 551 and zoom_attempts < max_zoom_attempts:
+        while current_scale > target_scale and zoom_attempts < max_zoom_attempts:
             zoom(-3)  # Zoom out (negative = out)
-            time.sleep(0.1)  # Small delay between zoom attempts
             
-            # Get updated scale
-            new_scale = read_camera_scale(p)
+            # Get updated scale using real-time data
+            new_scale = read_camera_scale(payload)
             if new_scale is not None:
                 current_scale = new_scale
                 print(f"[CAMERA] Scale after zoom: {current_scale}")
@@ -353,30 +416,62 @@ def setup_camera_optimal(payload=None):
                 
             zoom_attempts += 1
         
-        if current_scale <= 551:
+        if current_scale <= target_scale:
             print(f"[CAMERA] Successfully zoomed out to scale: {current_scale}")
         else:
             print(f"[CAMERA] Reached max zoom attempts, final scale: {current_scale}")
     else:
         print("[CAMERA] Could not read initial camera scale, attempting zoom anyway...")
         # Try zooming out anyway
-        for _ in range(10):
+        for _ in range(30):
             zoom(-3)
+    
+    # Step 2: Set pitch to target angle
+    print(f"[CAMERA] Adjusting pitch to {target_pitch} degrees...")
+    current_pitch = get_camera_stats(payload)
+    if current_pitch and current_pitch.get("ok"):
+        current_pitch_value = current_pitch.get("pitch", 0)
+        print(f"[CAMERA] Current pitch: {current_pitch_value}")
+        
+        # Calculate pitch direction and amount
+        pitch_diff = target_pitch - current_pitch_value
+        max_pitch_attempts = 100
+        pitch_attempts = 0
+        
+        while abs(pitch_diff) > 10 and pitch_attempts < max_pitch_attempts:  # 10 degree tolerance
+            if pitch_diff > 0:
+                # Target pitch is higher, need to pitch up
+                pitch(+1)  # Pitch up
+                print(f"[CAMERA] Pitching up (attempt {pitch_attempts + 1})")
+            else:
+                # Target pitch is lower, need to pitch down
+                pitch(-1)  # Pitch down
+                print(f"[CAMERA] Pitching down (attempt {pitch_attempts + 1})")
+
+            
+            # Get updated pitch using real-time data
+            new_pitch_data = get_camera_stats(payload)
+            if new_pitch_data and new_pitch_data.get("ok"):
+                current_pitch_value = new_pitch_data.get("pitch", current_pitch_value)
+                pitch_diff = target_pitch - current_pitch_value
+                print(f"[CAMERA] Pitch after adjustment: {current_pitch_value} (diff: {pitch_diff:.1f})")
+            else:
+                print("[CAMERA] Could not read camera pitch, continuing...")
+                break
+                
+            pitch_attempts += 1
+            time.sleep(0.05)
+        
+        if abs(pitch_diff) <= 10:
+            print(f"[CAMERA] Successfully adjusted pitch to: {current_pitch_value} (target: {target_pitch})")
+        else:
+            print(f"[CAMERA] Reached max pitch attempts, final pitch: {current_pitch_value} (target: {target_pitch})")
+    else:
+        print("[CAMERA] Could not read initial camera pitch, attempting pitch adjustment anyway...")
+        # Try pitching up anyway
+        for _ in range(15):
+            pitch(+1)
             time.sleep(0.1)
-    
-    # Step 2: Set pitch to high angle (~350 degrees)
-    print("[CAMERA] Adjusting pitch to high angle...")
-    
-    # Press UP arrow multiple times to increase pitch
-    # The exact number depends on current pitch, but we'll try a reasonable amount
-    pitch_attempts = 0
-    max_pitch_attempts = 15
-    
-    while pitch_attempts < max_pitch_attempts:
-        pitch(+1)  # Pitch up
-        time.sleep(0.1)  # Small delay between pitch adjustments
-        pitch_attempts += 1
-        print(f"[CAMERA] Pitch adjustment {pitch_attempts}/{max_pitch_attempts}")
     
     print("[CAMERA] Camera setup complete!")
     return True

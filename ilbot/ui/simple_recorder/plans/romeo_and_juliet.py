@@ -15,10 +15,6 @@ import ilbot.ui.simple_recorder.actions.chat as chat
 from .base import Plan
 from ..helpers import quest
 from ..helpers.bank import near_any_bank
-from ..helpers.nodes import add_node
-from ..helpers.utils import press_enter
-from ..helpers.vars import get_var
-from ..helpers.widgets import rect_center_from_widget
 
 
 class RomeoAndJulietPlan(Plan):
@@ -33,15 +29,9 @@ class RomeoAndJulietPlan(Plan):
     def compute_phase(self, payload, craft_recent):
         return self.state.get("phase", "GO_TO_CLOSEST_BANK")
 
-    def set_phase(self, phase: str, ui=None):
-        self.state["phase"] = phase
-        self.next = phase
-        if ui is not None:
-            try:
-                ui.debug(f"[RJ] phase → {phase}")
-            except Exception:
-                pass
-        return phase
+    def set_phase(self, phase: str, ui=None, camera_setup: bool = True):
+        from ..helpers.phase_utils import set_phase_with_camera
+        return set_phase_with_camera(self, phase, ui, camera_setup)
 
     def loop(self, ui, payload):
         phase = self.state.get("phase", "GO_TO_CLOSEST_BANK")

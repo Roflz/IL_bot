@@ -74,6 +74,33 @@ def can_continue(payload: Optional[dict] = None) -> bool:
             if "continue" in text:
                 return True
 
+    # Check for Objectbox.TEXT widget (ID 12648450) - poll booth dialogue
+    if widget_exists(12648450):
+        widget_info = get_widget_info(12648450)
+        if widget_info:
+            widget_data = widget_info.get("data", {})
+            text = widget_data.get("text", "").lower()
+            if "continue" in text:
+                return True
+
+    # Check for Chatbox.MES_TEXT2 widget (ID 10616875) - another "Click here to continue" widget
+    if widget_exists(10616875):
+        widget_info = get_widget_info(10616875)
+        if widget_info:
+            widget_data = widget_info.get("data", {})
+            text = widget_data.get("text", "").lower()
+            if "continue" in text:
+                return True
+
+    # Check for ObjectboxDouble.PAUSEBUTTON widget (ID 720900) - "Click here to continue"
+    if widget_exists(720900):
+        widget_info = get_widget_info(720900)
+        if widget_info:
+            widget_data = widget_info.get("data", {})
+            text = widget_data.get("text", "").lower()
+            if "continue" in text:
+                return True
+
     L = _dlg_left(payload)
     R = _dlg_right(payload)
     OB = _dlg_objectbox(payload)
@@ -159,13 +186,13 @@ def has_informational_text(payload: Optional[dict] = None) -> bool:
     
     return False
 
-def get_dialogue_text_raw(payload: Optional[dict] = None) -> Optional[str]:
+def get_dialogue_text_raw(payload: Optional[dict] = None) -> str:
     """
     Extract raw dialogue text from any available chat widget.
     Checks multiple widget types in order of preference.
     
     Returns:
-        Raw dialogue text or None if no dialogue found
+        Raw dialogue text or empty string if no dialogue found
     """
     if payload is None:
         payload = get_payload() or {}
@@ -175,6 +202,9 @@ def get_dialogue_text_raw(payload: Optional[dict] = None) -> Optional[str]:
         17235969,  # Mesoverlay.TEXT (tutorial dialogue)
         15007747,  # Messagebox.TEXT (general dialogue)
         15007748,  # Messagebox.CONTINUE (continue dialogue)
+        12648450,  # Objectbox.TEXT (poll booth dialogue)
+        10616875,  # Chatbox.MES_TEXT2 (another "Click here to continue" widget)
+        720898,    # ObjectboxDouble.TEXT (combat tutorial dialogue)
     ]
     
     # Check each widget for text
@@ -218,18 +248,18 @@ def get_dialogue_text_raw(payload: Optional[dict] = None) -> Optional[str]:
     except Exception as e:
         print(f"[DIALOGUE] Error checking payload dialogue: {e}")
     
-    return None
+    return ""  # Return empty string instead of None for graceful handling
 
-def get_clean_dialogue_text(payload: Optional[dict] = None) -> Optional[str]:
+def get_clean_dialogue_text(payload: Optional[dict] = None) -> str:
     """
     Get dialogue text with HTML tags and color codes stripped.
     
     Returns:
-        Clean dialogue text or None if no dialogue found
+        Clean dialogue text or empty string if no dialogue found
     """
     raw_text = get_dialogue_text_raw(payload)
     if not raw_text:
-        return None
+        return ""
     
     import re
     
@@ -328,6 +358,8 @@ def get_dialogue_info(payload: Optional[dict] = None) -> Dict[str, Any]:
             (17235969, "Mesoverlay.TEXT"),
             (15007747, "Messagebox.TEXT"),
             (15007748, "Messagebox.CONTINUE"),
+            (12648450, "Objectbox.TEXT"),
+            (10616875, "Chatbox.MES_TEXT2"),
         ]
         
         for widget_id, widget_name in dialogue_widgets:

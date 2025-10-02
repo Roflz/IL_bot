@@ -106,3 +106,20 @@ def click_widget_by_name(widget_name: str, payload: Optional[dict] = None, ui=No
         "target": {"domain": "widget", "name": widget_name},
     })
     return ui.dispatch(step)
+
+
+def smithing_interface_open(payload: Optional[dict] = None) -> bool:
+    """
+    Check if the smithing interface is open and visible.
+    
+    Args:
+        payload: Optional payload, will get fresh if None
+    
+    Returns:
+        True if smithing interface is open and visible, False otherwise
+    """
+    if payload is None:
+        payload = get_payload()
+    
+    # Check if the smithing interface widget exists and is visible
+    return widget_exists(20447232, payload)

@@ -287,7 +287,7 @@ def type_tutorial_name(name: str, payload: Optional[dict] = None, ui=None) -> bo
     
     # Wait a moment for the field to be focused
     import time
-    time.sleep(0.2)
+    time.sleep(0.5)
     
     # Type the character name
     step = emit({
@@ -299,7 +299,7 @@ def type_tutorial_name(name: str, payload: Optional[dict] = None, ui=None) -> bo
     ui.dispatch(step)
     
     # Wait a moment then press enter
-    time.sleep(0.2)
+    time.sleep(1.0)
     
     # Press enter to confirm
     step = emit({

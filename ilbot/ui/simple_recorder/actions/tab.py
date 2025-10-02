@@ -86,12 +86,4 @@ def ensure_tab_open(tab_name: str) -> bool:
     
     return False
 
-def ensure_inventory_tab_open() -> bool:
-    """
-    Ensure the inventory tab is open, opening it if necessary.
-    
-    Returns:
-        True if inventory tab is open (or was opened), False if failed
-    """
-    return ensure_tab_open("INVENTORY")
 

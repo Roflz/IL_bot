@@ -53,6 +53,13 @@ def find_tab_by_name(tab_name: str) -> Optional[Dict[str, Any]]:
             return tab
     return None
 
+def tab_exists(tab_name: str) -> bool:
+    """Check if a tab exists by checking if its bounds x coordinate is >= 0."""
+    tab = find_tab_by_name(tab_name)
+    if tab and tab.get('bounds'):
+        return tab['bounds'].get('x', -1) >= 0
+    return False
+
 # Convenience functions
 def is_inventory_tab_open() -> bool:
     """Check if the inventory tab is currently open."""

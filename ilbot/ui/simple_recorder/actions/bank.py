@@ -9,6 +9,7 @@ from ..helpers.inventory import inv_has, inv_has_any
 from ..helpers.bank import first_bank_slot, deposit_all_button_bounds
 from ..helpers.rects import unwrap_rect, rect_center_xy
 from ..helpers.utils import closest_object_by_names
+from ..services.camera_integration import dispatch_with_camera
 
 
 def is_open(payload: dict | None = None) -> bool:
@@ -27,6 +28,10 @@ def has_item(name: str, payload: dict | None = None) -> bool:
     return first_bank_slot(payload, name) is not None
 
 def open_bank(prefer: str | None = None, payload: dict | None = None, ui=None) -> dict | None:
+    """
+    Open a bank using direct IPC detection with pathing and door handling.
+    If a CLOSED door lies on the path to the bank, click the earliest blocking door first.
+    """
     if payload is None:
         payload = get_payload()
     if ui is None:
@@ -45,88 +50,156 @@ def open_bank(prefer: str | None = None, payload: dict | None = None, ui=None) -
         pass
     # -----------------------------------------------------------------
 
-    # ---------- gather candidates ----------
-    objs = (payload.get("closestGameObjects") or []) + (payload.get("gameObjects") or []) + (payload.get("ge_booths") or [])
-    objs = [o for o in objs if (o.get("name") or "").lower() not in ("", "null")]
-    npcs = (payload.get("closestNPCs") or []) + (payload.get("npcs") or [])
-    npcs = [n for n in npcs if (n.get("name") or "").lower() not in ("", "null")]
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        # Get fresh payload and bank data on each retry
+        fresh_payload = get_payload()
+        
+        # Use direct IPC to get bank objects and NPCs - OPTIMIZED VERSION
+        from ..helpers.ipc import ipc_send
+        
+        # Try to find bank booth first
+        booth_resp = ipc_send({"cmd": "find_object", "name": "bank booth", "types": ["GAME"]}, fresh_payload)
+        booth_found = booth_resp and booth_resp.get("ok") and booth_resp.get("found")
+        
+        # Try to find banker NPC
+        banker_resp = ipc_send({"cmd": "find_npc", "name": "banker"}, fresh_payload)
+        banker_found = banker_resp and banker_resp.get("ok") and banker_resp.get("found")
+        
+        # Convert to old format for compatibility
+        objs = [booth_resp.get("object")] if booth_found else []
+        npcs = [banker_resp.get("npc")] if banker_found else []
 
-    def bank_index(actions) -> int | None:
-        try:
-            acts = [a.lower() for a in (actions or []) if a]
-            return acts.index("bank") if "bank" in acts else None
-        except Exception:
-            return None
+        def bank_index(actions) -> int | None:
+            try:
+                acts = [a.lower() for a in (actions or []) if a]
+                if "bank" in acts:
+                    return acts.index("bank")
+                elif "use" in acts:
+                    return acts.index("use")
+                else:
+                    return None
+            except Exception:
+                return None
 
-    # ---------- pick target ----------
-    target = None
-    target_domain = None
+        # ---------- pick target ----------
+        target = None
+        target_domain = None
 
-    if not want_banker:
-        booth_names = ("bank booth", "grand exchange booth")
-        for o in objs:
-            nm = (o.get("name") or "").lower()
-            idx = bank_index(o.get("actions"))
-            if idx is not None and any(bn in nm for bn in booth_names):
-                target, target_domain = o, "object"
-                break
-        if target is None and not want_booth and prefer != "banker":
+        if not want_banker:
+            booth_names = ("bank booth", "grand exchange booth")
             for o in objs:
+                nm = (o.get("name") or "").lower()
                 idx = bank_index(o.get("actions"))
-                if idx is not None:
+                if idx is not None and any(bn in nm for bn in booth_names):
                     target, target_domain = o, "object"
                     break
+            if target is None and not want_booth and prefer != "banker":
+                for o in objs:
+                    idx = bank_index(o.get("actions"))
+                    if idx is not None:
+                        target, target_domain = o, "object"
+                        break
 
-    if target is None and not want_booth:
-        for n in npcs:
-            nm = (n.get("name") or "").lower()
-            if ("banker" in nm) or want_banker:
-                idx = bank_index(n.get("actions"))
-                if idx is not None:
-                    target, target_domain = n, "npc"
-                    break
+        if target is None and not want_booth:
+            for n in npcs:
+                nm = (n.get("name") or "").lower()
+                if ("banker" in nm) or want_banker:
+                    idx = bank_index(n.get("actions"))
+                    if idx is not None:
+                        target, target_domain = n, "npc"
+                        break
 
-    if target is None:
-        return None
+        if target is None:
+            continue  # Try next attempt
 
-    # ---------- build step ----------
-    idx = bank_index(target.get("actions"))
-    rect = unwrap_rect(target.get("clickbox"))
-    name = target.get("name") or "Bank"
+        # 1) Check for doors on the path to the bank
+        gx, gy = target["world"].get("x"), target["world"].get("y")
+        if isinstance(gx, int) and isinstance(gy, int):
+            from ..helpers.ipc import ipc_path
+            from ..helpers.navigation import _first_blocking_door_from_waypoints
+            from .travel import _handle_door_opening
+            
+            wps, dbg_path = ipc_path(fresh_payload, goal=(gx, gy))
+            door_plan = _first_blocking_door_from_waypoints(wps)
+            if door_plan:
+                # Handle door opening with retry logic and recently traversed door tracking
+                if not _handle_door_opening(door_plan, fresh_payload, ui):
+                    # Door opening failed after retries, continue to next attempt
+                    continue
 
-    if rect:
-        cx, cy = rect_center_xy(rect)
-        anchor = {"bounds": rect}
-        point = {"x": cx, "y": cy}
-    elif isinstance(target.get("canvasX"), (int, float)) and isinstance(target.get("canvasY"), (int, float)):
-        cx, cy = int(target["canvasX"]), int(target["canvasY"])
-        anchor = {}
-        point = {"x": cx, "y": cy}
-    else:
-        return None
+        # 2) Click the bank
+        idx = bank_index(target.get("actions"))
+        rect = unwrap_rect(target.get("clickbox"))
+        name = target.get("name") or "Bank"
+        world_coords = {"x": gx, "y": gy, "p": 0}  # Use the world coordinates from the target
 
-    if idx == 0:
-        step = emit({
-            "action": "open-bank",
-            "click": ({"type": "rect-center"} if rect else {"type": "point", **point}),
-            "target": {"domain": target_domain, "name": name, **anchor},
-            "postconditions": ["bankOpen == true"],
-        })
-    else:
-        step = emit({
-            "action": "open-bank-context",
-            "click": {
-                "type": "context-select",
-                "x": point["x"],  # canvas coords where to open the menu
-                "y": point["y"],
-                "option": "bank",  # match by text
-                "target": "banker",
-                "open_delay_ms": 120
-            },
-            "target": {"domain": "npc", "name": "Banker"}
-        })
+        if rect:
+            cx, cy = rect_center_xy(rect)
+            anchor = {"bounds": rect}
+            point = {"x": cx, "y": cy}
+        elif isinstance(target["canvas"].get("x"), (int, float)) and isinstance(target["canvas"].get("y"), (int, float)):
+            cx, cy = int(target["canvas"]["x"]), int(target["canvas"]["y"])
+            anchor = {}
+            point = {"x": cx, "y": cy}
+        else:
+            continue  # Try next attempt
 
-    return ui.dispatch(step)
+        if idx == 0:
+            step = emit({
+                "action": "open-bank",
+                "click": ({"type": "rect-center"} if rect else {"type": "point", **point}),
+                "target": {"domain": target_domain, "name": name, **anchor, "world": world_coords},
+                "postconditions": ["bankOpen == true"],
+            })
+        else:
+            step = emit({
+                "action": "open-bank-context",
+                "click": {
+                    "type": "context-select",
+                    "x": point["x"],  # canvas coords where to open the menu
+                    "y": point["y"],
+                    "option": "bank",  # match by text
+                    "target": "banker",
+                    "open_delay_ms": 120
+                },
+                "target": {"domain": "npc", "name": "Banker", "world": world_coords}
+            })
+
+        # Use centralized click with camera function
+        from ..services.click_with_camera import click_object_with_camera, click_npc_with_camera
+        
+        if target_domain == "object":
+            result = click_object_with_camera(
+                object_name=name,
+                action="bank" if idx != 0 else None,
+                action_index=idx,
+                world_coords=world_coords,
+                ui=ui,
+                payload=fresh_payload,
+                aim_ms=420
+            )
+        else:  # target_domain == "npc"
+            result = click_npc_with_camera(
+                npc_name=name,
+                action="bank" if idx != 0 else None,
+                action_index=idx,
+                world_coords=world_coords,
+                ui=ui,
+                payload=fresh_payload,
+                aim_ms=420
+            )
+        
+        if result:
+            # Wait for bank interface to actually open
+            if wait_until(is_open, max_wait_ms=5000, min_wait_ms=200):
+                return result
+            else:
+                # Bank didn't open, continue to next attempt
+                continue
+
+    return None
 
 
 def deposit_inventory(payload: dict | None = None, ui=None) -> dict | None:
@@ -146,7 +219,7 @@ def deposit_inventory(payload: dict | None = None, ui=None) -> dict | None:
         "target": {"domain": "bank-widget", "name": "Deposit Inventory", "bounds": rect},
         "postconditions": [],
     })
-    return ui.dispatch(step)
+    return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)
 
 
 def withdraw_item(
@@ -203,7 +276,7 @@ def withdraw_item(
             },
             "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
         })
-        ui.dispatch(step1)
+        dispatch_with_camera(step1, ui=ui, payload=payload, aim_ms=420)
         if not wait_until(ge.chat_qty_prompt_active, min_wait_ms=300, max_wait_ms=3000):
             return None
         
@@ -235,7 +308,7 @@ def withdraw_item(
         "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
         "postconditions": [f"inventory contains '{item_name}'"],
     })
-    return ui.dispatch(step)
+    return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)
 
 def close_bank(ui=None) -> dict | None:
     if ui is None:
@@ -247,7 +320,7 @@ def close_bank(ui=None) -> dict | None:
         "target": {"domain": "bank", "name": "Close"},
         "postconditions": ["bankOpen == false"],
     })
-    return ui.dispatch(step)
+    return dispatch_with_camera(step, ui=ui, payload=get_payload(), aim_ms=420)
 
 def toggle_note_mode(payload: dict | None = None, ui=None) -> dict | None:
     """Toggle bank note mode (withdraw as note/withdraw as item)"""
