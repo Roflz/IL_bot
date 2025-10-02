@@ -484,6 +484,84 @@ def _pick_click_from_door(door: dict):
         return int(b["x"] + b["width"] // 2), int(b["y"] + b["height"] // 2)
     return None
 
+def _should_use_long_distance_travel(rect_or_key: str | tuple | list, payload: dict) -> bool:
+    """
+    Determine if we should use long-distance travel for this route.
+    
+    Args:
+        rect_or_key: Region key or (minX, maxX, minY, maxY) tuple
+        payload: Game state payload
+        
+    Returns:
+        True if long-distance travel should be used
+    """
+    # Get current player position
+    player = payload.get("player", {})
+    current_x = player.get("worldX")
+    current_y = player.get("worldY")
+    
+    if not isinstance(current_x, int) or not isinstance(current_y, int):
+        return False
+    
+    # Get target position
+    if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
+        target_x = (rect_or_key[0] + rect_or_key[1]) / 2
+        target_y = (rect_or_key[2] + rect_or_key[3]) / 2
+    else:
+        rect_key = str(rect_or_key)
+        rect = get_nav_rect(rect_key)
+        if not rect:
+            return False
+        target_x = (rect[0] + rect[1]) / 2
+        target_y = (rect[2] + rect[3]) / 2
+    
+    # Calculate distance
+    distance = abs(current_x - target_x) + abs(current_y - target_y)
+    
+    # Use long-distance travel for routes longer than 50 tiles
+    # or for specific known complex routes
+    if distance > 50:
+        return True
+    
+    # Check for specific complex routes
+    current_region = _get_current_region(current_x, current_y)
+    target_region = _get_target_region(rect_or_key)
+    
+    complex_routes = [
+        ('Lumbridge', 'Grand Exchange'),
+        ('Lumbridge', 'Falador'),
+        ('Falador', 'Grand Exchange'),
+    ]
+    
+    return (current_region, target_region) in complex_routes
+
+
+def _get_current_region(x: int, y: int) -> str:
+    """Determine current region based on coordinates."""
+    if 3200 <= x <= 3300 and 3200 <= y <= 3300:
+        return 'Lumbridge'
+    elif 3140 <= x <= 3200 and 3450 <= y <= 3500:
+        return 'Grand Exchange'
+    elif 3000 <= x <= 3100 and 3300 <= y <= 3400:
+        return 'Falador'
+    elif 3080 <= x <= 3120 and 3240 <= y <= 3280:
+        return 'Draynor'
+    else:
+        return 'Unknown'
+
+
+def _get_target_region(rect_or_key: str | tuple | list) -> str:
+    """Determine target region."""
+    if isinstance(rect_or_key, str):
+        if 'GE' in rect_or_key.upper() or 'grand' in rect_or_key.lower():
+            return 'Grand Exchange'
+        elif 'lumbridge' in rect_or_key.lower():
+            return 'Lumbridge'
+        elif 'falador' in rect_or_key.lower():
+            return 'Falador'
+    return 'Unknown'
+
+
 def _first_blocking_door(proj_rows: list[dict], up_to_index: int | None = None) -> dict | None:
     """
     Scan projected rows (which now include door metadata) and return a click plan
@@ -533,7 +611,7 @@ def _first_blocking_door(proj_rows: list[dict], up_to_index: int | None = None) 
     return None
 
 
-def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None, center: bool = False) -> dict | None:
+def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None, center: bool = False, use_long_distance: bool = True) -> dict | None:
     """
     One movement click toward an area, door-aware.
     If a CLOSED door is on the returned segment before the chosen waypoint,
@@ -545,6 +623,7 @@ def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None,
         payload: Game state payload
         ui: UI instance for dispatching actions
         center: If True, go to center of region instead of stopping at boundary
+        use_long_distance: If True, use enhanced long-distance travel for complex routes
     """
     global _most_recently_traversed_door
     
@@ -552,6 +631,18 @@ def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None,
         payload = get_payload()
     if ui is None:
         ui = get_ui()
+    
+    # Check if we should use long-distance travel for complex routes
+    if use_long_distance and _should_use_long_distance_travel(rect_or_key, payload):
+        print(f"[TRAVEL] Using long-distance travel for {rect_or_key}")
+        from .long_distance_travel import travel_to_long_distance
+        success = travel_to_long_distance(rect_or_key, payload, ui)
+        if success:
+            # Return a success indicator
+            return {"action": "long-distance-travel", "success": True, "destination": rect_or_key}
+        else:
+            print(f"[TRAVEL] Long-distance travel failed, falling back to normal travel")
+            # Fall through to normal travel logic
 
     # accept key or explicit (minX, maxX, minY, maxY)
     if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:

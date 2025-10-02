@@ -16,12 +16,14 @@ from ilbot.ui.simple_recorder.actions.timing import wait_until
 from ilbot.ui.simple_recorder.plans.romeo_and_juliet import RomeoAndJulietPlan
 from ilbot.ui.simple_recorder.plans.goblin_diplomacy import GoblinDiplomacyPlan
 from ilbot.ui.simple_recorder.plans.tutorial_island import TutorialIslandPlan
+from ilbot.ui.simple_recorder.plans.ge_trade import GeTradePlan
 
 # Plan registry - add new plans here
 AVAILABLE_PLANS = {
     "romeo_and_juliet": RomeoAndJulietPlan,
     "goblin_diplomacy": GoblinDiplomacyPlan,
     "tutorial_island": TutorialIslandPlan,
+    "ge_trade": GeTradePlan,
     # Add more plans here as you create them
     # "cook_assistant": CookAssistantPlan,
     # "sheep_shearer": SheepShearerPlan,
