@@ -312,6 +312,41 @@ def get_combat_level(payload: Optional[dict] = None) -> Optional[int]:
     return player_data.get("combatLevel")
 
 
+def get_health(payload: Optional[dict] = None) -> Optional[int]:
+    """
+    Get the player's current hitpoints.
+    
+    Args:
+        payload: Optional payload, will get fresh if None
+        
+    Returns:
+        Current hitpoints (int) if successful, None otherwise
+    """
+    if payload is None:
+        payload = get_payload()
+    
+    resp = ipc_send({"cmd": "get_player"}, payload)
+    if not resp or not resp.get("ok"):
+        return None
+    
+    player_data = resp.get("player")
+    if not player_data:
+        return None
+    
+    # Try healthRatio first (current hitpoints)
+    health_ratio = player_data.get("healthRatio")
+    if health_ratio is not None and health_ratio > 0:
+        return health_ratio
+    
+    # Fallback to hitpoints skill level
+    skills = player_data.get("skills", {})
+    hitpoints_data = skills.get("hitpoints")
+    if hitpoints_data:
+        return hitpoints_data.get("boostedLevel")  # Current hitpoints (boosted level)
+    
+    return None
+
+
 def get_tile_objects(payload: Optional[dict] = None) -> list[dict]:
     """
     Get all objects on the player's current tile using direct IPC calls.

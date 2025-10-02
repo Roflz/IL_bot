@@ -15,7 +15,7 @@ import ilbot.ui.simple_recorder.actions.chat as chat
 from .base import Plan
 from ..helpers import quest
 from ..helpers.bank import near_any_bank
-from ..helpers.utils import press_esc
+from ..helpers.utils import press_esc, press_spacebar
 
 
 class GeTradePlan(Plan):
@@ -26,6 +26,10 @@ class GeTradePlan(Plan):
         self.state = {"phase": "GO_TO_GE"}
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
+        
+        # Set up camera immediately during initialization
+        from ilbot.ui.simple_recorder.helpers.camera import setup_camera_optimal
+        setup_camera_optimal()
 
     def compute_phase(self, payload, craft_recent):
         return self.state.get("phase", "GO_TO_GE")
@@ -41,15 +45,19 @@ class GeTradePlan(Plan):
             case "GO_TO_GE":
                 # Check if we're already at the Grand Exchange
                 if trav.in_area("GE"):
-                    self.set_phase("TRADE_PLAYER")
+                    self.set_phase("TRADE_PLAYER", ui)
                     return
                 else:
                     # Use enhanced long-distance travel for GE
                     print("[GE_TRADE] Using enhanced travel to reach Grand Exchange...")
-                    result = trav.go_to("GE", use_long_distance=True)
+                    result = trav.go_to("GE")
                     return
 
             case "TRADE_PLAYER":
+                time.sleep(300)
+                print("pressing space bar")
+                press_spacebar()
+                return
                 # Look for a player to trade with
                 print("[GE_TRADE] Looking for a player to trade with...")
                 
@@ -97,7 +105,7 @@ class GeTradePlan(Plan):
                 result = npc.click_npc_simple(player_name)
                 if result:
                     print(f"[GE_TRADE] Successfully clicked on {player_name}")
-                    self.set_phase("DONE")
+                    self.set_phase("DONE", ui)
                 else:
                     print(f"[GE_TRADE] Failed to click on {player_name}")
 

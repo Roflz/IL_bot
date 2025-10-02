@@ -17,6 +17,7 @@ from ilbot.ui.simple_recorder.plans.romeo_and_juliet import RomeoAndJulietPlan
 from ilbot.ui.simple_recorder.plans.goblin_diplomacy import GoblinDiplomacyPlan
 from ilbot.ui.simple_recorder.plans.tutorial_island import TutorialIslandPlan
 from ilbot.ui.simple_recorder.plans.ge_trade import GeTradePlan
+from ilbot.ui.simple_recorder.plans.falador_cows import FaladorCowsPlan
 
 # Plan registry - add new plans here
 AVAILABLE_PLANS = {
@@ -24,6 +25,7 @@ AVAILABLE_PLANS = {
     "goblin_diplomacy": GoblinDiplomacyPlan,
     "tutorial_island": TutorialIslandPlan,
     "ge_trade": GeTradePlan,
+    "falador_cows": FaladorCowsPlan,
     # Add more plans here as you create them
     # "cook_assistant": CookAssistantPlan,
     # "sheep_shearer": SheepShearerPlan,
@@ -283,8 +285,8 @@ class UIShim:
                 return
 
             entries = info.get("entries") or []
-            want_opt = (click.get("option") or "").strip().lower()
-            want_tgt = (click.get("target") or "").strip().lower()
+            want_opt = (step.get("option") or "").strip().lower()
+            want_tgt = (target.get("name") or "").strip().lower()
             if not want_opt and not want_tgt:
                 return
 

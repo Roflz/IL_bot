@@ -12,6 +12,62 @@ from ..services.camera_integration import dispatch_with_camera
 # Global variable to track the most recently traversed door
 _most_recently_traversed_door = None
 
+# Global variables for long-distance path caching
+_long_distance_path_cache = None
+_long_distance_destination = None
+_long_distance_waypoint_index = 0
+
+
+def _get_next_long_distance_waypoints(destination_key: str, payload: dict, batch_size: int = 35) -> list[tuple[int, int]] | None:
+    """
+    Get the next batch of waypoints from the cached long-distance path.
+    If no cache exists or it's for a different destination, generate a new path.
+    Returns up to batch_size waypoints starting from current position.
+    """
+    global _long_distance_path_cache, _long_distance_destination, _long_distance_waypoint_index
+    
+    # Check if we have a valid cache for this destination
+    if (_long_distance_path_cache is None or 
+        _long_distance_destination != destination_key or 
+        _long_distance_waypoint_index >= len(_long_distance_path_cache)):
+        
+        print(f"[LONG_DISTANCE_CACHE] Generating new path for {destination_key}")
+        waypoints = get_long_distance_waypoints(destination_key, payload)
+        if not waypoints:
+            return None
+        
+        _long_distance_path_cache = waypoints
+        _long_distance_destination = destination_key
+        _long_distance_waypoint_index = 0
+        print(f"[LONG_DISTANCE_CACHE] Cached {len(waypoints)} waypoints")
+    
+    # Get the next batch of waypoints
+    if _long_distance_waypoint_index < len(_long_distance_path_cache):
+        end_index = min(_long_distance_waypoint_index + batch_size, len(_long_distance_path_cache))
+        waypoint_batch = _long_distance_path_cache[_long_distance_waypoint_index:end_index]
+        _long_distance_waypoint_index = end_index
+        print(f"[LONG_DISTANCE_CACHE] Using waypoints {_long_distance_waypoint_index - len(waypoint_batch) + 1}-{_long_distance_waypoint_index}/{len(_long_distance_path_cache)} ({len(waypoint_batch)} waypoints)")
+        return waypoint_batch
+    
+    return None
+
+
+def clear_long_distance_cache():
+    """Clear the long-distance path cache."""
+    global _long_distance_path_cache, _long_distance_destination, _long_distance_waypoint_index
+    _long_distance_path_cache = None
+    _long_distance_destination = None
+    _long_distance_waypoint_index = 0
+    print("[LONG_DISTANCE_CACHE] Cache cleared")
+
+
+def is_long_distance_path_complete():
+    """Check if we've reached the end of the cached long-distance path."""
+    global _long_distance_path_cache, _long_distance_waypoint_index
+    if _long_distance_path_cache is None:
+        return True
+    return _long_distance_waypoint_index >= len(_long_distance_path_cache)
+
 
 def _is_same_door(door_plan: dict) -> bool:
     """
@@ -92,25 +148,25 @@ def _handle_door_opening(door_plan: dict, fresh_payload: dict, ui) -> bool:
         # Use fresh door data for clicking
         d = (fresh_door_plan.get("door") or {})
         b = d.get("bounds")
-
-        if isinstance(b, dict) and all(k in b for k in ("x", "y", "width", "height")):
+        if isinstance(b, dict):
             step = emit({
                 "action": "open-door",
                 "click": {"type": "rect-center"},
                 "target": {"domain": "object", "name": d.get("name") or "Door", "bounds": b},
-                "postconditions": [],
-                "timeout_ms": 1200
+                "postconditions": [f"doorOpen@{door_x},{door_y} == true"],
+                "timeout_ms": 2000
             })
         else:
-            c = d.get("canvas") or d.get("tileCanvas")
-            if not (isinstance(c, dict) and "x" in c and "y" in c):
+            # Fallback to canvas point if bounds not available
+            c = d.get("canvas")
+            if not (isinstance(c, dict) and isinstance(c.get("x"), (int, float)) and isinstance(c.get("y"), (int, float))):
                 break  # Can't get coordinates, skip door opening
             step = emit({
                 "action": "open-door",
                 "click": {"type": "point", "x": int(c["x"]), "y": int(c["y"])},
                 "target": {"domain": "object", "name": d.get("name") or "Door"},
-                "postconditions": [],
-                "timeout_ms": 1200
+                "postconditions": [f"doorOpen@{door_x},{door_y} == true"],
+                "timeout_ms": 2000
             })
 
         door_result = dispatch_with_camera(step, ui=get_ui(), payload=get_payload(), aim_ms=420)
@@ -118,21 +174,24 @@ def _handle_door_opening(door_plan: dict, fresh_payload: dict, ui) -> bool:
             # Wait up to 5 seconds for door to open
             door_wait_start = time.time()
             while (time.time() - door_wait_start) * 1000 < 5000:
-                fresh_payload = get_payload()  # Get fresh payload
+                fresh_payload = get_payload()
                 if _door_is_open(fresh_door_plan, fresh_payload):
                     # Door opened successfully, mark it as recently traversed
                     _most_recently_traversed_door = fresh_door_plan
                     print(f"[DEBUG] Door opened successfully, marking as recently traversed")
-                    return True
-                time.sleep(0.1)  # Check every 100ms
+                    door_opened = True
+                    break
+                time.sleep(0.1)
 
         if not door_opened:
             door_retry_count += 1
             if door_retry_count < max_door_retries:
-                time.sleep(0.5)  # Wait before retry
+                print(f"[DEBUG] Door opening attempt {door_retry_count} failed, retrying...")
+                time.sleep(0.5)
 
     if not door_opened:
         # Door opening failed after retries
+        print(f"[DEBUG] Failed to open door after {max_door_retries} attempts")
         return False
     
     return True
@@ -152,7 +211,7 @@ def _door_is_open(door_plan: dict, payload: dict) -> bool:
     door_p = door_plan.get("p", 0)  # Default to plane 0 if not specified
     
     if not isinstance(door_x, int) or not isinstance(door_y, int):
-        return True  # Can't verify, assume open
+        return True
     
     # Use IPC to get current door state
     from ..helpers.ipc import ipc_send
@@ -171,587 +230,25 @@ def _door_is_open(door_plan: dict, payload: dict) -> bool:
     og_door_id = door_plan['door'].get('id')
     new_door_id = resp['wall_object'].get('id')
     if not og_door_id == new_door_id:
-        return True
-
-    return False
-
-
-def _get_hovered_tile_info(payload: dict) -> dict | None:
-    """Get information about the currently hovered tile from payload."""
-    return payload.get("hoveredTile")
+        return True  # Door ID changed, it's open
+    
+    return False  # Door still exists with same ID, it's closed
 
 
-def _validate_hovered_tile(expected_world_x: int, expected_world_y: int, payload: dict, tolerance: int = 3) -> bool:
+def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None, center: bool = False) -> dict | None:
     """
-    Validate that the hovered tile matches the expected coordinates within tolerance.
-    
-    Args:
-        expected_world_x: Expected world X coordinate
-        expected_world_y: Expected world Y coordinate  
-        payload: Game state payload
-        tolerance: Maximum distance allowed between expected and hovered coordinates
-        
-    Returns:
-        True if hovered tile is within tolerance of expected coordinates
-    """
-    hovered_tile = _get_hovered_tile_info(payload)
-    if not hovered_tile:
-        return False
-        
-    hovered_x = hovered_tile.get("worldX")
-    hovered_y = hovered_tile.get("worldY")
-    
-    if not isinstance(hovered_x, int) or not isinstance(hovered_y, int):
-        return False
-    
-    # Calculate distance between expected and hovered coordinates
-    distance = _calculate_distance(expected_world_x, expected_world_y, hovered_x, hovered_y)
-    return distance <= tolerance
-
-
-def _get_expected_action_for_tile(world_x: int, world_y: int, payload: dict) -> str | None:
-    """
-    Determine the expected action for a tile based on its contents.
-    
-    Args:
-        world_x: World X coordinate
-        world_y: World Y coordinate
-        payload: Game state payload
-        
-    Returns:
-        Expected action string ("Walk here", "Open", etc.) or None
-    """
-    hovered_tile = _get_hovered_tile_info(payload)
-    if not hovered_tile:
-        return None
-        
-    # Check if this is the expected tile
-    if not _validate_hovered_tile(world_x, world_y, payload):
-        return None
-    
-    # Check for doors/gates on the tile
-    game_objects = hovered_tile.get("gameObjects", [])
-    for obj in game_objects:
-        actions = obj.get("actions", [])
-        if actions and "Open" in actions:
-            return "Open"
-    
-    # Default to walk here for ground tiles
-    return "Walk here"
-
-
-def _verify_click_action(expected_action: str, payload: dict) -> bool:
-    """
-    Verify that the last interaction matches the expected action.
-    
-    Args:
-        expected_action: Expected action string
-        payload: Game state payload
-        
-    Returns:
-        True if the last interaction matches expected action
-    """
-    last_interaction = payload.get("lastInteraction", {})
-    if not last_interaction:
-        return False
-        
-    action = last_interaction.get("action", "")
-    return expected_action.lower() in action.lower()
-
-
-def _hover_over_tile(step_dict: dict, ui) -> None:
-    """
-    Hover the mouse over the target tile coordinates.
-    
-    Args:
-        step_dict: Step dictionary containing click coordinates
-        ui: UI instance for dispatching hover actions
-    """
-    click_info = step_dict.get("click", {})
-    if not click_info:
-        return
-    
-    # Extract coordinates from the step
-    x = click_info.get("x")
-    y = click_info.get("y")
-    
-    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-        print(f"[DEBUG] No valid coordinates found for hover: {click_info}")
-        return
-    
-    # Try different approaches to move the mouse to the target location
-    try:
-        # Method 1: Try using the IPC directly to move mouse
-        from ..helpers.context import get_payload
-        payload = get_payload()
-        if payload and hasattr(ui, 'ipc') and hasattr(ui.ipc, 'move_mouse'):
-            ui.ipc.move_mouse(int(x), int(y))
-            print(f"[DEBUG] Moved mouse to coordinates ({x}, {y}) via IPC")
-            return
-        
-        # Method 2: Try a right-click action (which moves mouse but doesn't click)
-        hover_step = {
-            "action": "right-click",
-            "click": {"type": "point", "x": int(x), "y": int(y)},
-            "target": step_dict.get("target", {})
-        }
-        ui.dispatch(hover_step)
-        print(f"[DEBUG] Moved mouse via right-click action to ({x}, {y})")
-        
-    except Exception as e:
-        print(f"[DEBUG] Mouse movement failed: {e}")
-        # Method 3: Fallback - just wait and hope the coordinates are close enough
-        print(f"[DEBUG] Using fallback - no mouse movement, relying on coordinate accuracy")
-
-
-def _wait_for_camera_and_click(step: dict | list, ui, payload: dict | None = None, aim_ms: int = 450,
-                              hover_delay_ms: int = 200, click_delay_ms: int = 100) -> dict | None:
-    """
-    Improved camera movement and clicking with better timing and validation.
-    
-    Args:
-        step: Action step to execute (dict or list containing dict)
-        ui: UI instance
-        payload: Game state payload
-        aim_ms: Maximum time for camera aiming
-        hover_delay_ms: Delay after camera movement before clicking
-        click_delay_ms: Additional delay before actual click
-        
-    Returns:
-        Dispatch result or None if failed
-    """
-    if payload is None:
-        payload = get_payload() or {}
-    
-    # Handle both dict and list formats
-    if isinstance(step, list) and len(step) > 0:
-        step_dict = step[0]  # Take first element if it's a list
-        print(f"[DEBUG] Step was list format, extracted dict: {step_dict.get('action', 'unknown')}")
-    elif isinstance(step, dict):
-        step_dict = step
-        print(f"[DEBUG] Step was dict format: {step_dict.get('action', 'unknown')}")
-    else:
-        # Fallback to original behavior if format is unexpected
-        print(f"[DEBUG] Unexpected step format: {type(step)}, using original dispatch_with_camera")
-        return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=aim_ms)
-    
-    # Extract target information
-    target = step_dict.get("target", {})
-    world = target.get("world", {})
-    world_x = world.get("x")
-    world_y = world.get("y")
-    
-    if not isinstance(world_x, int) or not isinstance(world_y, int):
-        # Fallback to original behavior if no world coordinates
-        print(f"[DEBUG] No world coordinates found, using original dispatch_with_camera")
-        return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=aim_ms)
-    
-    # Step 1: Move camera to target (asynchronous)
-    try:
-        from ..services.camera_integration import aim_midtop_at_world
-        aim_midtop_at_world(world_x, world_y, max_ms=aim_ms, payload=payload)
-    except Exception:
-        pass  # Continue even if camera movement fails
-    
-    # Step 2: Wait for camera movement to settle
-    time.sleep(hover_delay_ms / 1000.0)
-    
-    # Step 3: Skip hover validation for now - just proceed with click
-    print(f"[DEBUG] Proceeding with click at target tile ({world_x}, {world_y})")
-    fresh_payload = get_payload()
-    
-    # Step 4: Get expected action (optional validation)
-    expected_action = _get_expected_action_for_tile(world_x, world_y, fresh_payload)
-    if not expected_action:
-        # Default to "Walk here" if we can't determine action
-        expected_action = "Walk here"
-        print(f"[DEBUG] Couldn't determine expected action, defaulting to 'Walk here'")
-    
-    # Step 5: Additional delay before clicking
-    time.sleep(click_delay_ms / 1000.0)
-    
-    # Step 6: Get fresh coordinates right before clicking
-    fresh_payload = get_payload()
-    fresh_hovered_tile = _get_hovered_tile_info(fresh_payload)
-    
-    if fresh_hovered_tile:
-        # Use the currently hovered tile coordinates for the click
-        fresh_canvas_x = fresh_hovered_tile.get("canvasX")
-        fresh_canvas_y = fresh_hovered_tile.get("canvasY")
-        
-        if isinstance(fresh_canvas_x, (int, float)) and isinstance(fresh_canvas_y, (int, float)):
-            # Update the step with fresh coordinates
-            step_dict["click"]["x"] = int(fresh_canvas_x)
-            step_dict["click"]["y"] = int(fresh_canvas_y)
-            print(f"[DEBUG] Updated click coordinates to fresh hovered tile: ({fresh_canvas_x}, {fresh_canvas_y})")
-        else:
-            # Try to get fresh coordinates via IPC
-            try:
-                from ..helpers.ipc import ipc_send
-                ipc_result = ipc_send({
-                    "cmd": "tilexy",
-                    "x": world_x,
-                    "y": world_y
-                }, fresh_payload)
-                
-                if ipc_result and ipc_result.get("ok") and ipc_result.get("onscreen"):
-                    fresh_canvas = ipc_result.get("canvas", {})
-                    fresh_canvas_x = fresh_canvas.get("x")
-                    fresh_canvas_y = fresh_canvas.get("y")
-                    
-                    if isinstance(fresh_canvas_x, (int, float)) and isinstance(fresh_canvas_y, (int, float)):
-                        step_dict["click"]["x"] = int(fresh_canvas_x)
-                        step_dict["click"]["y"] = int(fresh_canvas_y)
-                        print(f"[DEBUG] Updated click coordinates via IPC: ({fresh_canvas_x}, {fresh_canvas_y})")
-                    else:
-                        print(f"[DEBUG] IPC returned invalid coordinates")
-                else:
-                    print(f"[DEBUG] IPC failed to get fresh coordinates")
-            except Exception as e:
-                print(f"[DEBUG] IPC fallback failed: {e}")
-    else:
-        # Try to get fresh coordinates via IPC as fallback
-        try:
-            from ..helpers.ipc import ipc_send
-            ipc_result = ipc_send({
-                "cmd": "tilexy",
-                "x": world_x,
-                "y": world_y
-            }, fresh_payload)
-            
-            if ipc_result and ipc_result.get("ok") and ipc_result.get("onscreen"):
-                fresh_canvas = ipc_result.get("canvas", {})
-                fresh_canvas_x = fresh_canvas.get("x")
-                fresh_canvas_y = fresh_canvas.get("y")
-                
-                if isinstance(fresh_canvas_x, (int, float)) and isinstance(fresh_canvas_y, (int, float)):
-                    step_dict["click"]["x"] = int(fresh_canvas_x)
-                    step_dict["click"]["y"] = int(fresh_canvas_y)
-                    print(f"[DEBUG] Updated click coordinates via IPC fallback: ({fresh_canvas_x}, {fresh_canvas_y})")
-                else:
-                    print(f"[DEBUG] IPC fallback returned invalid coordinates")
-            else:
-                print(f"[DEBUG] IPC fallback failed, using original coordinates")
-        except Exception as e:
-            print(f"[DEBUG] IPC fallback failed: {e}")
-            print(f"[DEBUG] Using original coordinates")
-    
-    # Step 7: Execute the click with fresh coordinates
-    print(f"[DEBUG] Executing click at ({step_dict['click']['x']}, {step_dict['click']['y']}) with action: {step_dict.get('action', 'unknown')}")
-    result = ui.dispatch(step_dict)
-    print(f"[DEBUG] Click result: {result}")
-    
-    # Step 8: Verify the action was performed correctly
-    if result:
-        time.sleep(0.1)  # Brief wait for action to register
-        verify_payload = get_payload()
-        action_verified = _verify_click_action(expected_action, verify_payload)
-        
-        if not action_verified:
-            # Debug: Log verification failure
-            last_interaction = verify_payload.get("lastInteraction", {})
-            actual_action = last_interaction.get("action", "None")
-            print(f"[DEBUG] Action verification failed. Expected: '{expected_action}', Got: '{actual_action}'")
-            print(f"[DEBUG] Click failed validation - returning None")
-            return None
-        else:
-            print(f"[DEBUG] Action verification successful: '{expected_action}'")
-    
-    return result
-
-
-def _is_blocking_door(door: dict) -> bool:
-    if not isinstance(door, dict):
-        return False
-    if not door.get("present"):
-        return False
-    # If 'closed' missing, be conservative and treat as blocking
-    return door.get("closed", True) is True
-
-def _pick_click_from_door(door: dict):
-    """Prefer hull center, then tile center; return (x, y) or None."""
-    if not isinstance(door, dict):
-        return None
-    c = door.get("canvas")
-    if isinstance(c, dict) and "x" in c and "y" in c:
-        return int(c["x"]), int(c["y"])
-    tc = door.get("tileCanvas")
-    if isinstance(tc, dict) and "x" in tc and "y" in tc:
-        return int(tc["x"]), int(tc["y"])
-    # As a last resort, if bounds are there, click rect center
-    b = door.get("bounds")
-    if isinstance(b, dict) and all(k in b for k in ("x", "y", "width", "height")):
-        return int(b["x"] + b["width"] // 2), int(b["y"] + b["height"] // 2)
-    return None
-
-def _should_use_long_distance_travel(rect_or_key: str | tuple | list, payload: dict) -> bool:
-    """
-    Determine if we should use long-distance travel for this route.
-    
-    Args:
-        rect_or_key: Region key or (minX, maxX, minY, maxY) tuple
-        payload: Game state payload
-        
-    Returns:
-        True if long-distance travel should be used
-    """
-    # Get current player position
-    player = payload.get("player", {})
-    current_x = player.get("worldX")
-    current_y = player.get("worldY")
-    
-    if not isinstance(current_x, int) or not isinstance(current_y, int):
-        return False
-    
-    # Get target position
-    if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
-        target_x = (rect_or_key[0] + rect_or_key[1]) / 2
-        target_y = (rect_or_key[2] + rect_or_key[3]) / 2
-    else:
-        rect_key = str(rect_or_key)
-        rect = get_nav_rect(rect_key)
-        if not rect:
-            return False
-        target_x = (rect[0] + rect[1]) / 2
-        target_y = (rect[2] + rect[3]) / 2
-    
-    # Calculate distance
-    distance = abs(current_x - target_x) + abs(current_y - target_y)
-    
-    # Use long-distance travel for routes longer than 30 tiles
-    # This is more aggressive than the original 50 tiles
-    if distance > 30:
-        print(f"[TRAVEL] Distance {distance:.1f} > 30, using long-distance travel")
-        return True
-    
-    # Check for specific complex routes that benefit from collision-aware pathfinding
-    current_region = _get_current_region(current_x, current_y)
-    target_region = _get_target_region(rect_or_key)
-    
-    complex_routes = [
-        ('Lumbridge', 'Grand Exchange'),
-        ('Lumbridge', 'Falador'),
-        ('Falador', 'Grand Exchange'),
-        ('Lumbridge', 'Draynor'),
-        ('Draynor', 'Grand Exchange'),
-    ]
-    
-    if (current_region, target_region) in complex_routes:
-        print(f"[TRAVEL] Complex route {current_region} -> {target_region}, using long-distance travel")
-        return True
-    
-    return False
-
-
-def _get_current_region(x: int, y: int) -> str:
-    """Determine current region based on coordinates."""
-    if 3200 <= x <= 3300 and 3200 <= y <= 3300:
-        return 'Lumbridge'
-    elif 3140 <= x <= 3200 and 3450 <= y <= 3500:
-        return 'Grand Exchange'
-    elif 3000 <= x <= 3100 and 3300 <= y <= 3400:
-        return 'Falador'
-    elif 3080 <= x <= 3120 and 3240 <= y <= 3280:
-        return 'Draynor'
-    else:
-        return 'Unknown'
-
-
-def _get_target_region(rect_or_key: str | tuple | list) -> str:
-    """Determine target region."""
-    if isinstance(rect_or_key, str):
-        if 'GE' in rect_or_key.upper() or 'grand' in rect_or_key.lower():
-            return 'Grand Exchange'
-        elif 'lumbridge' in rect_or_key.lower():
-            return 'Lumbridge'
-        elif 'falador' in rect_or_key.lower():
-            return 'Falador'
-    return 'Unknown'
-
-
-def _execute_long_distance_movement(waypoints: list, rect_or_key: str | tuple | list, payload: dict, ui) -> dict | None:
-    """
-    Execute movement using long-distance waypoints with local pathfinding.
-    
-    Args:
-        waypoints: List of intermediate waypoints from long-distance pathfinding
-        rect_or_key: Target destination
-        payload: Game state payload
-        ui: UI instance
-        
-    Returns:
-        Dispatch result or None if no action needed
-    """
-    from .long_distance_travel import clear_long_distance_waypoints
-    
-    print(f"[LONG_DISTANCE] _execute_long_distance_movement called with {len(waypoints) if waypoints else 0} waypoints")
-    
-    if not waypoints:
-        print(f"[LONG_DISTANCE] No waypoints available")
-        return None
-    
-    # Get current player position
-    player_x, player_y = _get_player_position(payload)
-    if not isinstance(player_x, int) or not isinstance(player_y, int):
-        print(f"[LONG_DISTANCE] Could not get player position")
-        return None
-    
-    print(f"[LONG_DISTANCE] Player at ({player_x}, {player_y})")
-    print(f"[LONG_DISTANCE] Available waypoints: {len(waypoints)}")
-    
-    # Check if we've reached the destination
-    if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
-        rect = tuple(rect_or_key)
-        if player_in_rect(payload, rect):
-            print(f"[LONG_DISTANCE] Reached destination, clearing waypoints")
-            clear_long_distance_waypoints()
-            return None
-    else:
-        rect_key = str(rect_or_key)
-        rect = get_nav_rect(rect_key)
-        if rect and player_in_rect(payload, rect):
-            print(f"[LONG_DISTANCE] Reached destination {rect_key}, clearing waypoints")
-            clear_long_distance_waypoints()
-            return None
-    
-    # Find the current target waypoint (closest uncompleted one)
-    current_target = None
-    min_distance = float('inf')
-    
-    for waypoint in waypoints:
-        if waypoint.get("completed", False):
-            continue
-            
-        wp_x = waypoint.get("x")
-        wp_y = waypoint.get("y")
-        
-        if isinstance(wp_x, int) and isinstance(wp_y, int):
-            distance = _calculate_distance(player_x, player_y, wp_x, wp_y)
-            if distance < min_distance:
-                min_distance = distance
-                current_target = waypoint
-    
-    if not current_target:
-        print(f"[LONG_DISTANCE] No uncompleted waypoints found, using normal pathfinding")
-        return go_to(rect_or_key, payload, ui, use_long_distance=False)
-    
-    target_x = current_target.get("x")
-    target_y = current_target.get("y")
-    waypoint_index = current_target.get("index", 0)
-    
-    print(f"[LONG_DISTANCE] Target waypoint {waypoint_index}: ({target_x}, {target_y})")
-    print(f"[LONG_DISTANCE] Distance to target: {min_distance}")
-    
-    # Check if we're close enough to this waypoint to mark it as completed
-    if min_distance <= 5:  # Within 5 tiles of target
-        print(f"[LONG_DISTANCE] Reached waypoint {waypoint_index}, marking as completed")
-        current_target["completed"] = True
-        # Continue to next waypoint on next call
-        return None
-    
-    # Use local pathfinding to reach the current target waypoint
-    print(f"[LONG_DISTANCE] Using local pathfinding to reach waypoint {waypoint_index}")
-    
-    # Create a small rectangle around the target waypoint for local pathfinding
-    target_rect = (target_x - 3, target_x + 3, target_y - 3, target_y + 3)
-    print(f"[LONG_DISTANCE] Target rectangle: {target_rect}")
-    
-    # Use normal go_to with the target rectangle
-    result = go_to(target_rect, payload, ui, use_long_distance=False)
-    print(f"[LONG_DISTANCE] go_to result: {result}")
-    return result
-
-
-def _first_blocking_door(proj_rows: list[dict], up_to_index: int | None = None) -> dict | None:
-    """
-    Scan projected rows (which now include door metadata) and return a click plan
-    for the earliest blocking door. Treat missing 'closed' as blocking.
-    """
-    limit = len(proj_rows) if up_to_index is None else max(0, min(up_to_index + 1, len(proj_rows)))
-
-    for i in range(limit):
-        row = proj_rows[i] or {}
-        door = (row.get("door") or {})
-        if not door.get("present"):
-            continue
-
-        closed = door.get("closed")
-        if closed is False:
-            continue  # already open
-
-        # Prefer rect-center if bounds exist, else use canvas point
-        if isinstance(door.get("bounds"), dict):
-            click = {"type": "rect-center"}
-            target_anchor = {"bounds": door["bounds"]}
-        elif isinstance(door.get("canvas"), dict) and \
-             isinstance(door["canvas"].get("x"), (int, float)) and isinstance(door["canvas"].get("y"), (int, float)):
-            click = {"type": "point", "x": int(door["canvas"]["x"]), "y": int(door["canvas"]["y"])}
-            target_anchor = {}
-        else:
-            # no geometry → skip; we’ll just walk this tick
-            continue
-
-        wx = row.get("world", {}).get("x", row.get("x"))
-        wy = row.get("world", {}).get("y", row.get("y"))
-        wp = row.get("world", {}).get("p", row.get("p"))
-
-        name = door.get("name") or "Door"
-        ident = {"id": door.get("id"), "name": name, "world": {"x": wx, "y": wy, "p": wp}}
-
-        return {
-            "index": i,
-            "click": click,
-            "target": {"domain": "object", "name": name, **target_anchor},
-            # Your executor already supports postconditions (used in open_bank)
-            # Wire a simple predicate your state loop can satisfy when the door flips open.
-            "postconditions": [f"doorOpen@{wx},{wy} == true"],
-            "timeout_ms": 2000
-        }
-
-    return None
-
-
-def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None, center: bool = False, use_long_distance: bool = True) -> dict | None:
-    """
-    One movement click toward an area, door-aware.
-    If a CLOSED door is on the returned segment before the chosen waypoint,
-    click it first and wait (with timeout) for it to open.
-    Also aims camera at the door/ground point before dispatch.
+    One movement click toward an area.
     
     Args:
         rect_or_key: Region key or (minX, maxX, minY, maxY) tuple
         payload: Game state payload
         ui: UI instance for dispatching actions
         center: If True, go to center of region instead of stopping at boundary
-        use_long_distance: If True, use enhanced long-distance travel for complex routes
     """
-    global _most_recently_traversed_door
-    
     if payload is None:
         payload = get_payload()
     if ui is None:
         ui = get_ui()
-    
-    # Check if we should use long-distance travel for complex routes
-    if use_long_distance and _should_use_long_distance_travel(rect_or_key, payload):
-        print(f"[TRAVEL] Using long-distance travel for {rect_or_key}")
-        from .long_distance_travel import travel_to_long_distance, get_long_distance_waypoints, clear_long_distance_waypoints
-        
-        # Check if we already have long-distance waypoints for this destination
-        long_distance_waypoints = get_long_distance_waypoints()
-        if not long_distance_waypoints:
-            # Generate new long-distance path
-            success = travel_to_long_distance(rect_or_key, payload, ui)
-            if not success:
-                print(f"[TRAVEL] Long-distance travel failed, falling back to normal travel")
-                # Fall through to normal travel logic
-            else:
-                long_distance_waypoints = get_long_distance_waypoints()
-        
-        if long_distance_waypoints:
-            # Use long-distance waypoints for movement
-            print(f"[TRAVEL] Using {len(long_distance_waypoints)} long-distance waypoints")
-            return _execute_long_distance_movement(long_distance_waypoints, rect_or_key, payload, ui)
 
     # accept key or explicit (minX, maxX, minY, maxY)
     if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
@@ -762,155 +259,95 @@ def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None,
         rect = get_nav_rect(rect_key)
         if not (isinstance(rect, (tuple, list)) and len(rect) == 4):
             return None
-
-    # Get fresh payload for path calculation
+        
+    # Get fresh payload and player position
     fresh_payload = get_payload()
-    
-    # Path + projection with fresh data
-    wps, dbg_path = ipc_path(fresh_payload, rect=tuple(rect))
-    if not wps:
-        print(f"[DEBUG] No waypoints found for {rect_key}, refreshing path...")
-        # Try once more with fresh payload
-        time.sleep(0.1)
-        fresh_payload = get_payload()
-        wps, dbg_path = ipc_path(fresh_payload, rect=tuple(rect))
-
-    proj, dbg_proj = ipc_project_many(fresh_payload, wps)
-    proj = _merge_door_into_projection(wps, proj)
-
-    usable = [p for p in proj if isinstance(p, dict) and p.get("canvas")]
-    if not usable:
-        print(f"[DEBUG] No usable waypoints after projection, refreshing...")
-        # Try once more with fresh payload
-        time.sleep(0.1)
-        fresh_payload = get_payload()
-        wps, dbg_path = ipc_path(fresh_payload, rect=tuple(rect))
-        if wps:
-            proj, dbg_proj = ipc_project_many(fresh_payload, wps)
-            proj = _merge_door_into_projection(wps, proj)
-            usable = [p for p in proj if isinstance(p, dict) and p.get("canvas")]
-        
-        if not usable:
-            print(f"[DEBUG] Still no usable waypoints after refresh, giving up")
-            return None
-    
-    # If we have fewer than 10 waypoints, refresh the path
-    if len(usable) < 10:
-        print(f"[DEBUG] Only {len(usable)} waypoints remaining, refreshing path...")
-        time.sleep(0.1)
-        fresh_payload = get_payload()
-        wps, dbg_path = ipc_path(fresh_payload, rect=tuple(rect))
-        if wps:
-            proj, dbg_proj = ipc_project_many(fresh_payload, wps)
-            proj = _merge_door_into_projection(wps, proj)
-            usable = [p for p in proj if isinstance(p, dict) and p.get("canvas")]
-            print(f"[DEBUG] Refreshed path, now have {len(usable)} waypoints")
-    
-    # Check if player is at or near the last waypoint - if so, refresh the path
     player_x, player_y = _get_player_position(fresh_payload)
-    if isinstance(player_x, int) and isinstance(player_y, int) and usable:
-        last_waypoint = usable[-1]
-        last_wp_x = last_waypoint["world"].get("x")
-        last_wp_y = last_waypoint["world"].get("y")
+    
+    if not isinstance(player_x, int) or not isinstance(player_y, int):
+        print(f"[GO_TO] Could not get player position")
+        return None
+    
+    # Calculate distance to destination
+    min_x, max_x, min_y, max_y = rect
+    dest_center_x = (min_x + max_x) // 2
+    dest_center_y = (min_y + max_y) // 2
+    distance = _calculate_distance(player_x, player_y, dest_center_x, dest_center_y)
+    
+    print(f"[GO_TO] Distance to {rect_key}: {distance}")
+    
+    if distance > 50:
+        # LONG DISTANCE: Get cached path and click ~25 tiles away
+        print(f"[GO_TO] Using long-distance pathfinding")
         
-        if isinstance(last_wp_x, int) and isinstance(last_wp_y, int):
-            distance_to_last = _calculate_distance(player_x, player_y, last_wp_x, last_wp_y)
-            print(f"[DEBUG] Distance to last waypoint: {distance_to_last}")
-            
-            # If player is close to the last waypoint, refresh the path
-            if distance_to_last <= 3:  # Within 3 tiles of last waypoint
-                print(f"[DEBUG] Player near last waypoint, refreshing path...")
-                time.sleep(0.1)
-                fresh_payload = get_payload()
-                wps, dbg_path = ipc_path(fresh_payload, rect=tuple(rect))
-                if wps:
-                    proj, dbg_proj = ipc_project_many(fresh_payload, wps)
-                    proj = _merge_door_into_projection(wps, proj)
-                    usable = [p for p in proj if isinstance(p, dict) and p.get("canvas")]
-                    print(f"[DEBUG] Refreshed path, now have {len(usable)} usable waypoints")
-                else:
-                    print(f"[DEBUG] No waypoints after refresh, checking if at destination...")
-                    # Check if we're actually at the destination
-                    if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
-                        rect = tuple(rect_or_key)
-                        if player_in_rect(fresh_payload, rect):
-                            print(f"[DEBUG] Player is at destination, no action needed")
-                            return None
-                    else:
-                        rect_key = str(rect_or_key)
-                        rect = get_nav_rect(rect_key)
-                        if rect and player_in_rect(fresh_payload, rect):
-                            print(f"[DEBUG] Player is at destination {rect_key}, no action needed")
-
-    if center:
-        # When going to center, choose from waypoints closer to the center of the region
-        center_x = (rect[0] + rect[1]) / 2
-        center_y = (rect[2] + rect[3]) / 2
+        # Get next batch of waypoints from cache
+        waypoint_batch = _get_next_long_distance_waypoints(rect_key, fresh_payload, 35)
+        if not waypoint_batch:
+            print(f"[GO_TO] Could not get long-distance waypoints")
+            return None
         
-        # Calculate distance from each waypoint to center and sort by distance
-        def distance_to_center(wp):
-            wx = wp.get("x", 0)
-            wy = wp.get("y", 0)
-            return ((wx - center_x) ** 2 + (wy - center_y) ** 2) ** 0.5
+        # Find waypoint ~25 tiles away from player
+        target_waypoint = None
+        for waypoint in waypoint_batch:
+            waypoint_dist = _calculate_distance(player_x, player_y, waypoint[0], waypoint[1])
+            if waypoint_dist >= 25:
+                target_waypoint = waypoint
+                break
         
-        # Sort by distance to center, take the closest 5
-        sorted_by_distance = sorted(usable, key=distance_to_center)
-        candidates = sorted_by_distance[-5:]
+        if target_waypoint is None:
+            target_waypoint = waypoint_batch[-1]  # Use last waypoint if none are 25+ tiles away
+        
+        # Project waypoint to screen coordinates
+        waypoint_wps, _ = ipc_path(fresh_payload, rect=(target_waypoint[0]-1, target_waypoint[0]+1, target_waypoint[1]-1, target_waypoint[1]+1))
+        if waypoint_wps:
+            waypoint_proj, _ = ipc_project_many(fresh_payload, waypoint_wps)
+            waypoint_usable = [p for p in waypoint_proj if isinstance(p, dict) and p.get("canvas")]
+            if waypoint_usable:
+                chosen = waypoint_usable[-1]
+                world_coords = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
+            else:
+                world_coords = {"x": target_waypoint[0], "y": target_waypoint[1], "p": 0}
+        else:
+            world_coords = {"x": target_waypoint[0], "y": target_waypoint[1], "p": 0}
+    
     else:
-        # Choose randomly among the furthest 5 within the first <20 tiles (i.e., indices 15..19 when available)
-        max_stride = min(19, len(usable) - 1)           # cap at index 19 (20 tiles from start)
-        min_stride = max(0, max_stride - 4)             # last five within that window
-        candidates = usable[min_stride:max_stride + 1]  # typical slice = [15..19]
-
-    # Prefer tiles without a blocking door flag
-    def _is_blocking(p):
-        d = p.get("door") or {}
-        if not d.get("present"):
-            return False
-        closed = d.get("closed")
-        return (closed is True) or (closed is None)
-
-    preferred = [p for p in candidates if not _is_blocking(p)]
-    pool = preferred if preferred else candidates
-    
-    # Avoid clicking on the same waypoint repeatedly
-    # Filter out waypoints that are too close to the player's current position
-    if isinstance(player_x, int) and isinstance(player_y, int):
-        filtered_pool = []
-        for p in pool:
-            wp_x = p.get("x")
-            wp_y = p.get("y")
-            if isinstance(wp_x, int) and isinstance(wp_y, int):
-                distance = _calculate_distance(player_x, player_y, wp_x, wp_y)
-                if distance > 1:  # Only consider waypoints more than 1 tile away
-                    filtered_pool.append(p)
+        # SHORT DISTANCE: Use standard local pathing
+        print(f"[GO_TO] Using local pathfinding")
         
-        if filtered_pool:
-            pool = filtered_pool
-            print(f"[DEBUG] Filtered waypoints to avoid clicking too close, {len(pool)} candidates remaining")
-    
-    chosen = random.choice(pool)
-    chosen_idx = proj.index(chosen)
-
-    # 1) Check for doors on the path to the destination
-    if usable:
-        # Get the destination coordinates from the last waypoint
-        last_waypoint = usable[-1]
-        gx = last_waypoint["world"].get("x")
-        gy = last_waypoint["world"].get("y")
+        wps, dbg_path = ipc_path(fresh_payload, rect=tuple(rect))
+        if not wps:
+            print(f"[GO_TO] No waypoints found for {rect_key}")
+            return None
         
-        if isinstance(gx, int) and isinstance(gy, int):
-            wps, dbg_path = ipc_path(fresh_payload, goal=(gx, gy))
-            door_plan = _first_blocking_door_from_waypoints(wps)
-            if door_plan:
-                # Handle door opening with retry logic and recently traversed door tracking
-                if _handle_door_opening(door_plan, fresh_payload, ui):
-                    pass
-                else:
-                    return
-
-    # Normal ground move using centralized function
-    world_coords = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
+        proj, dbg_proj = ipc_project_many(fresh_payload, wps)
+        proj = _merge_door_into_projection(wps, proj)
+        
+        usable = [p for p in proj if isinstance(p, dict) and p.get("canvas")]
+        if not usable:
+            print(f"[GO_TO] No usable waypoints after projection")
+            return None
+        
+        # Check for doors on the path and handle them
+        if usable:
+            last_waypoint = usable[-1]
+            gx = last_waypoint["world"].get("x")
+            gy = last_waypoint["world"].get("y")
+            
+            if isinstance(gx, int) and isinstance(gy, int):
+                wps, dbg_path = ipc_path(fresh_payload, goal=(gx, gy))
+                door_plan = _first_blocking_door_from_waypoints(wps)
+                if door_plan:
+                    if not _handle_door_opening(door_plan, fresh_payload, ui):
+                        return None  # Door opening failed
+        
+        # Pick from the last 3 waypoints (or all if less than 3)
+        if len(usable) <= 3:
+            chosen = random.choice(usable)
+        else:
+            chosen = random.choice(usable[-3:])
+        
+        world_coords = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
+    
     from ..services.click_with_camera import click_ground_with_camera
     return click_ground_with_camera(
         world_coords=world_coords,
@@ -944,10 +381,13 @@ def _should_click_next_waypoint(current_waypoint: dict, player_x: int, player_y:
         proximity_threshold: Distance threshold to trigger next waypoint click
         
     Returns:
-        True if player is close enough to current waypoint to click next one
+        True if should click next waypoint, False otherwise
     """
-    waypoint_x = current_waypoint.get("x")
-    waypoint_y = current_waypoint.get("y")
+    if not current_waypoint:
+        return False
+    
+    waypoint_x = current_waypoint.get("world", {}).get("x", current_waypoint.get("x"))
+    waypoint_y = current_waypoint.get("world", {}).get("y", current_waypoint.get("y"))
     
     if not isinstance(waypoint_x, int) or not isinstance(waypoint_y, int):
         return False
@@ -956,23 +396,131 @@ def _should_click_next_waypoint(current_waypoint: dict, player_x: int, player_y:
     return distance <= proximity_threshold
 
 
-def go_to_with_proximity_awareness(rect_or_key: str | tuple | list, payload: dict | None = None, 
-                                 ui=None, center: bool = False, proximity_threshold: int = 2) -> dict | None:
+def _is_blocking_door(door: dict) -> bool:
+    if not isinstance(door, dict):
+        return False
+    if not door.get("present"):
+        return False
+    return door.get("closed", True) is True
+
+
+def _pick_click_from_door(door: dict):
+    if not isinstance(door, dict):
+        return None, None
+    c = door.get("canvas")
+    if not isinstance(c, dict):
+        return None, None
+    tc = door.get("tileCanvas")
+    if not isinstance(tc, dict):
+        return None, None
+    b = door.get("bounds")
+    if not isinstance(b, dict):
+        return None, None
+    return {"type": "point", "x": int(c["x"]), "y": int(c["y"])}, {"bounds": b}
+
+
+def _first_blocking_door(proj_rows: list[dict], up_to_index: int | None = None) -> dict | None:
     """
-    Enhanced go_to function with proximity-aware waypoint clicking.
+    Scan projected rows (which now include door metadata) and return a click plan
+    for the earliest blocking door. Treat missing 'closed' as blocking.
+    """
+    limit = len(proj_rows) if up_to_index is None else max(0, min(up_to_index + 1, len(proj_rows)))
+
+    for i in range(limit):
+        row = proj_rows[i] or {}
+        door = (row.get("door") or {})
+        if not door.get("present"):
+            continue
+
+        closed = door.get("closed")
+        if closed is False:
+            continue  # already open
+
+        # Prefer rect-center if bounds exist, else use canvas point
+        if isinstance(door.get("bounds"), dict):
+            click = {"type": "rect-center"}
+            target_anchor = {"bounds": door["bounds"]}
+        elif isinstance(door.get("canvas"), dict) and \
+             isinstance(door["canvas"].get("x"), (int, float)) and isinstance(door["canvas"].get("y"), (int, float)):
+            click = {"type": "point", "x": int(door["canvas"]["x"]), "y": int(door["canvas"]["y"])}
+            target_anchor = {}
+        else:
+            # no geometry → skip; we'll just walk this tick
+            continue
+
+        wx = row.get("world", {}).get("x", row.get("x"))
+        wy = row.get("world", {}).get("y", row.get("y"))
+        wp = row.get("world", {}).get("p", row.get("p"))
+
+        name = door.get("name") or "Door"
+        ident = {"id": door.get("id"), "name": name, "world": {"x": wx, "y": wy, "p": wp}}
+
+        return {
+            "index": i,
+            "click": click,
+            "target": {"domain": "object", "name": name, **target_anchor},
+            # Your executor already supports postconditions (used in open_bank)
+            # Wire a simple predicate your state loop can satisfy when the door flips open.
+            "postconditions": [f"doorOpen@{wx},{wy} == true"],
+            "timeout_ms": 2000
+        }
+
+    return None
+
+
+def _first_blocking_door_from_waypoints(waypoints: list[dict]) -> dict | None:
+    """
+    Find the first blocking door from a list of waypoints.
+    """
+    if not waypoints:
+            return None
     
-    This function intelligently clicks waypoints based on player proximity to the current target,
-    preventing rapid clicking and improving movement efficiency.
+    for i, wp in enumerate(waypoints):
+        door_info = wp.get("door", {})
+        if not door_info.get("present"):
+            continue
+        
+        closed = door_info.get("closed")
+        if closed is False:
+            continue  # already open
+        
+        # Check if door has clickable geometry
+        bounds = door_info.get("bounds")
+        canvas = door_info.get("canvas")
+        
+        if not isinstance(bounds, dict) and not isinstance(canvas, dict):
+            continue  # no clickable geometry
+        
+        # Create door plan
+        wx = wp.get("x")
+        wy = wp.get("y")
+        wp_plane = wp.get("p", 0)
+        
+        if not isinstance(wx, int) or not isinstance(wy, int):
+            continue
+        
+        door_plan = {
+            "x": wx,
+            "y": wy,
+            "p": wp_plane,
+            "door": door_info
+        }
+        
+        return door_plan
+    
+    return None
+
+
+def go_to_with_proximity_awareness(rect_or_key: str | tuple | list, payload: dict | None = None, 
+                                 ui=None, proximity_threshold: int = 2) -> dict | None:
+    """
+    Enhanced go_to with proximity awareness to prevent getting stuck.
     
     Args:
         rect_or_key: Region key or (minX, maxX, minY, maxY) tuple
         payload: Game state payload
         ui: UI instance for dispatching actions
-        center: If True, go to center of region instead of stopping at boundary
         proximity_threshold: Distance threshold to trigger next waypoint click
-        
-    Returns:
-        Dispatch result or None if no action needed
     """
     if payload is None:
         payload = get_payload()
@@ -982,108 +530,174 @@ def go_to_with_proximity_awareness(rect_or_key: str | tuple | list, payload: dic
     # Get current player position
     player_x, player_y = _get_player_position(payload)
     if not isinstance(player_x, int) or not isinstance(player_y, int):
-        # Fallback to original go_to if no player position
-        return go_to(rect_or_key, payload, ui, center)
+        print(f"[DEBUG] Could not get player position, using basic go_to")
+        return go_to(rect_or_key, payload, ui)
     
-    # Check if we're already close to our destination
+    # Check if we're already close to the target
     if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
-        rect = tuple(rect_or_key)
-        if player_in_rect(payload, rect):
-            return None  # Already in target area
+        min_x, max_x, min_y, max_y = rect_or_key
+        if min_x <= player_x <= max_x and min_y <= player_y <= max_y:
+            print(f"[DEBUG] Player already in target area")
+            return None
     else:
-        rect_key = str(rect_or_key)
-        rect = get_nav_rect(rect_key)
-        if rect and player_in_rect(payload, rect):
-            return None  # Already in target area
-    
-    # Get path and waypoints
-    wps, dbg_path = ipc_path(payload, rect=tuple(rect))
-    if not wps:
+        rect = get_nav_rect(str(rect_or_key))
+        if isinstance(rect, (tuple, list)) and len(rect) == 4:
+            min_x, max_x, min_y, max_y = rect
+            if min_x <= player_x <= max_x and min_y <= player_y <= max_y:
+                print(f"[DEBUG] Player already in target area")
         return None
     
-    proj, dbg_proj = ipc_project_many(payload, wps)
-    proj = _merge_door_into_projection(wps, proj)
-    
-    usable = [p for p in proj if isinstance(p, dict) and p.get("canvas")]
-    if not usable:
-        return None
-    
-    # Find the waypoint the player is currently approaching
-    current_target = None
-    for i, waypoint in enumerate(usable):
-        waypoint_x = waypoint.get("x")
-        waypoint_y = waypoint.get("y")
-        
-        if isinstance(waypoint_x, int) and isinstance(waypoint_y, int):
-            distance = _calculate_distance(player_x, player_y, waypoint_x, waypoint_y)
-            if distance <= proximity_threshold * 2:  # Within reasonable range
-                current_target = waypoint
-                break
-    
-    # If no current target or player is close to current target, find next waypoint
-    if current_target is None or _should_click_next_waypoint(current_target, player_x, player_y, proximity_threshold):
-        # Use the original go_to logic to select next waypoint
-        return go_to(rect_or_key, payload, ui, center)
-    
-    # Player is still approaching current target, no need to click yet
-    return None
+    # Use regular go_to
+    return go_to(rect_or_key, payload, ui)
 
 
 def go_to_closest_bank(payload: dict | None = None, ui=None) -> dict | None:
-    """
-    If not already in the nearest bank region, dispatch one move step toward it.
-    Returns ui.dispatch(step) on success, else None if already inside or no waypoint this tick.
-    """
+    """Go to the closest bank."""
     if payload is None:
         payload = get_payload()
     if ui is None:
         ui = get_ui()
 
-    key = closest_bank_key(payload)
-    rect = bank_rect(key)
-    if rect and player_in_rect(payload, rect):
-        return None
+    bank_key = closest_bank_key(payload)
+    if bank_key:
+        return go_to(bank_key, payload, ui)
 
-    return go_to(key, payload, ui)
 
 def go_to_ge(payload: dict | None = None, ui=None) -> dict | None:
-    """
-    If not already inside the Grand Exchange area, dispatch one move step toward it.
-    Returns ui.dispatch(step) on success, else None if already inside or no GE rect is configured.
-    """
+    """Go to the Grand Exchange."""
     if payload is None:
         payload = get_payload()
     if ui is None:
         ui = get_ui()
 
-    # Try common keys you may have configured for the GE nav rectangle.
-    rect_key = None
-    rect = None
-    for k in ("grand_exchange", "ge"):
-        r = get_nav_rect(k)
-        if isinstance(r, (tuple, list)) and len(r) == 4:
-            rect_key, rect = k, r
-            break
+    return go_to("GE", payload, ui)
 
-    if rect_key is None:
-        return None  # no GE area configured
 
-    if player_in_rect(payload, rect):
-        return None  # already there
+def in_area(area_key: str, payload: dict | None = None) -> bool:
+    """Check if player is in the specified area."""
+    if payload is None:
+        payload = get_payload()
+    
+    # Get player position
+    player_x, player_y = _get_player_position(payload)
+    if not isinstance(player_x, int) or not isinstance(player_y, int):
+        return False
+    
+    # Get area rectangle
+    rect = get_nav_rect(area_key)
+    if not (isinstance(rect, (tuple, list)) and len(rect) == 4):
+        return False
+    
+    min_x, max_x, min_y, max_y = rect
+    return min_x <= player_x <= max_x and min_y <= player_y <= max_y
 
-    return go_to(rect_key, payload, ui)
 
-def in_area(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None):
+def get_long_distance_waypoints(destination_key: str, payload: dict | None = None) -> list[tuple[int, int]] | None:
+    """
+    Generate waypoints for long-distance travel using the collision map pathfinder.
+    
+    Args:
+        destination_key: Key for the destination area (e.g., "GE", "LUMBRIDGE_NEW_PLAYER_SPAWN")
+        payload: Game state payload (optional)
+        
+    Returns:
+        List of (x, y) waypoint tuples, or None if pathfinding fails
+    """
     if payload is None:
         payload = get_payload()
 
-    # accept key or explicit (minX, maxX, minY, maxY)
-    if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
-        rect = tuple(rect_or_key)
-        rect_key = "custom"
-    else:
-        rect_key = str(rect_or_key)
-        rect = get_nav_rect(rect_key)
-        if not (isinstance(rect, (tuple, list)) and len(rect) == 4):
+    try:
+        # Import pathfinder functions
+        from ..pathfinder import (
+            load_collision_data, 
+            get_walkable_tiles, 
+            astar_pathfinding, 
+            simple_greedy_path,
+            get_current_player_position
+        )
+        from ..helpers.navigation import get_nav_rect
+        
+        print(f"[LONG_DISTANCE] Generating waypoints to {destination_key}")
+        
+        # Get current player position
+        current_pos = get_current_player_position()
+        if not current_pos:
+            print("[LONG_DISTANCE] Could not get current player position")
             return None
-    return player_in_rect(payload, rect)
+        
+        # Get destination coordinates
+        dest_rect = get_nav_rect(destination_key)
+        if not (isinstance(dest_rect, (tuple, list)) and len(dest_rect) == 4):
+            print(f"[LONG_DISTANCE] Invalid destination area: {destination_key}")
+            return None
+        
+        min_x, max_x, min_y, max_y = dest_rect
+        dest_center_x = (min_x + max_x) // 2
+        dest_center_y = (min_y + max_y) // 2
+        destination = (dest_center_x, dest_center_y)
+        
+        print(f"[LONG_DISTANCE] From {current_pos} to {destination}")
+        
+        # Load collision data
+        collision_data = load_collision_data()
+        if not collision_data:
+            print("[LONG_DISTANCE] Could not load collision data")
+            return None
+        
+        # Get walkable tiles
+        walkable_tiles, blocked_tiles = get_walkable_tiles(collision_data)
+        print(f"[LONG_DISTANCE] Walkable tiles: {len(walkable_tiles)}")
+        
+        # Find closest walkable tiles to start and goal
+        def find_closest_walkable(target, candidates):
+            min_dist = float('inf')
+            closest = None
+            for candidate in candidates:
+                dist = ((target[0] - candidate[0])**2 + (target[1] - candidate[1])**2)**0.5
+                if dist < min_dist:
+                    min_dist = dist
+                    closest = candidate
+            return closest
+        
+        # Find walkable tiles near current position
+        current_walkable = []
+        for x in range(current_pos[0] - 10, current_pos[0] + 11):
+            for y in range(current_pos[1] - 10, current_pos[1] + 11):
+                if (x, y) in walkable_tiles:
+                    current_walkable.append((x, y))
+        
+        # Find walkable tiles near destination
+        dest_walkable = []
+        for x in range(dest_center_x - 10, dest_center_x + 11):
+            for y in range(dest_center_y - 10, dest_center_y + 11):
+                if (x, y) in walkable_tiles:
+                    dest_walkable.append((x, y))
+        
+        if not current_walkable:
+            print("[LONG_DISTANCE] No walkable tiles found near current position")
+            return None
+        
+        if not dest_walkable:
+            print("[LONG_DISTANCE] No walkable tiles found near destination")
+            return None
+        
+        # Find closest walkable tiles
+        start = find_closest_walkable(current_pos, current_walkable)
+        goal = find_closest_walkable(destination, dest_walkable)
+        
+        print(f"[LONG_DISTANCE] Start: {start}, Goal: {goal}")
+        
+        # Use A* pathfinding directly
+        print("[LONG_DISTANCE] Using A* pathfinding...")
+        path = astar_pathfinding(start, goal, walkable_tiles)
+        
+        if not path:
+            print("[LONG_DISTANCE] All pathfinding failed")
+            return None
+        
+        print(f"[LONG_DISTANCE] Path found with {len(path)} waypoints")
+        return path
+        
+    except Exception as e:
+        print(f"[LONG_DISTANCE] Error generating waypoints: {e}")
+        return None

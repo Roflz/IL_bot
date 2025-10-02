@@ -98,9 +98,9 @@ def open_ge(payload: dict | None = None, ui=None) -> dict | None:
             "id": "ge-open-clerk",
             "action": "open-ge-context",
             "description": "Open GE (clerk via context menu: Exchange)",
+            "option": "exchange",  # case-insensitive
             "click": {
                 "type": "context-select",   # uses IPC 'menu' to match rows by text + rect
-                "option": "exchange",       # case-insensitive
                 "target": "grand exchange clerk",  # substring match against target text
                 "x": cx,                    # right-click anchor (canvas)
                 "y": cy,
@@ -381,6 +381,10 @@ def buy_item_from_ge(item, ui) -> bool | None:
             # Confirm buy
             confirm_buy()
             wait_until(lambda: ge_buy_confirm_widget() is None, min_wait_ms=600, max_wait_ms=3000)
+            wait_until(has_collect, max_wait_ms=60000)
+            if has_collect():
+                collect_to_inventory()
+                return None
             return None
 
     # Close GE after all items are bought

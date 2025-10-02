@@ -77,7 +77,7 @@ def save_collision_data(data, cache_dir=""):
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
     
-    cache_file = cache_path / "ilbot/ui/simple_recorder/collision_cache/collision_map.json"
+    cache_file = cache_path / "collision_cache/collision_map.json"
     
     # Load existing data
     existing_data = {}

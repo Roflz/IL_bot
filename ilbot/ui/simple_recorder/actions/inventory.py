@@ -158,6 +158,49 @@ def is_empty(payload: dict | None = None) -> bool:
             for item in inv
         )
 
+
+def get_empty_slots_count(payload: dict | None = None) -> int:
+    """
+    Returns the number of empty inventory slots.
+    
+    Args:
+        payload: Optional payload, will get fresh if None
+        
+    Returns:
+        Number of empty slots (0-28, where 28 is completely empty)
+    """
+    if payload is None:
+        payload = get_payload()
+    
+    try:
+        # Use IPC command to get inventory data
+        from ..helpers.ipc import ipc_send
+        resp = ipc_send({"cmd": "get_inventory"}, payload)
+        
+        if not resp or not resp.get("ok"):
+            print(f"[INVENTORY] Failed to get inventory data: {resp.get('err', 'Unknown error')}")
+            return 28  # Assume all slots empty if can't get data
+        
+        slots = resp.get("slots", [])
+        
+        # Count empty slots
+        empty_count = 0
+        for slot in slots:
+            # Check if slot is empty
+            item_name = slot.get("itemName", "").strip()
+            quantity = int(slot.get("quantity", 0))
+            
+            # Slot is empty if no item name or quantity is 0
+            if not item_name or quantity <= 0:
+                empty_count += 1
+        
+        return empty_count
+        
+    except Exception as e:
+        print(f"[INVENTORY] Error counting empty slots: {e}")
+        # Fallback: assume all slots are empty if we can't read the data
+        return 28
+
 def use_item_on_item(item1_name: str, item2_name: str, payload: Optional[dict] = None, ui=None, max_retries: int = 3) -> Optional[dict]:
     """
     Use an item in the inventory on another item in the inventory.

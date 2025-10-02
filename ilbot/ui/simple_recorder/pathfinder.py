@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Pathfinding script for RuneScape collision map.
-Generates a path from Lumbridge to Grand Exchange and overlays it on the collision map PNG.
+Generates a path from current player position to Grand Exchange and overlays it on the collision map PNG.
 """
 import json
 import math
@@ -10,6 +10,8 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 import sys
 import os
+
+# Removed problematic import
 
 # Add the current directory to the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -101,8 +103,27 @@ def get_neighbors(pos, walkable_tiles):
 
 
 
-def astar_pathfinding(start, goal, walkable_tiles):
-    """Find path using A* algorithm."""
+def find_closest_walkable_tile(goal, walkable_tiles, search_radius=50):
+    """Find the closest walkable tile to the given goal position."""
+    goal_x, goal_y = goal
+    
+    # Search in expanding squares around the goal
+    for radius in range(1, search_radius + 1):
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                # Only check tiles on the perimeter of the current square
+                if abs(dx) == radius or abs(dy) == radius:
+                    candidate = (goal_x + dx, goal_y + dy)
+                    if candidate in walkable_tiles:
+                        print(f"[DEBUG] Found closest walkable tile to {goal}: {candidate} (distance: {radius})")
+                        return candidate
+    
+    print(f"[DEBUG] No walkable tile found within {search_radius} tiles of {goal}")
+    return None
+
+
+def astar_pathfinding(start, goal, walkable_tiles, max_iterations=20000):
+    """Find path using A* algorithm with optimizations."""
     print(f"[DEBUG] Finding path from {start} to {goal}")
     print(f"[DEBUG] Walkable tiles: {len(walkable_tiles)}")
     
@@ -111,27 +132,43 @@ def astar_pathfinding(start, goal, walkable_tiles):
         return None
     
     if goal not in walkable_tiles:
-        print(f"ERROR: Goal position {goal} is not walkable")
-        return None
+        print(f"[DEBUG] Goal position {goal} is not walkable, finding closest walkable tile...")
+        closest_goal = find_closest_walkable_tile(goal, walkable_tiles)
+        if closest_goal is None:
+            print(f"ERROR: No walkable tile found near goal {goal}")
+            return None
+        goal = closest_goal
+        print(f"[DEBUG] Using closest walkable goal: {goal}")
+    
+    # Early exit if start and goal are very close
+    distance = abs(start[0] - goal[0]) + abs(start[1] - goal[1])
+    if distance <= 2:
+        return [start, goal]
     
     # Priority queue: (f_score, tie_breaker, position)
-    # Use a counter for tie-breaking to ensure more comprehensive exploration
     tie_breaker = 0
     open_set = [(0, tie_breaker, start)]
     came_from = {}
     g_score = {start: 0}
     f_score = {start: heuristic(start, goal)}
     visited = set()
-    in_open_set = {start}  # Track what's in the open set to avoid duplicates
+    in_open_set = {start}
     
     iterations = 0
+    max_queue_size = 1000  # Limit queue size for performance
     
-    while open_set:
+    while open_set and iterations < max_iterations:
         iterations += 1
-        if iterations % 1000 == 0:  # Less frequent debug output
+        if iterations % 2000 == 0:  # Less frequent debug output
             print(f"[DEBUG] Iteration {iterations}, visited {len(visited)} tiles, queue size {len(open_set)}")
             
-        current = heapq.heappop(open_set)[2]  # Get position (third element)
+        # Limit queue size to prevent memory issues
+        if len(open_set) > max_queue_size:
+            # Keep only the best candidates
+            open_set = open_set[:max_queue_size]
+            heapq.heapify(open_set)
+            
+        current = heapq.heappop(open_set)[2]
         in_open_set.discard(current)
         
         if current in visited:
@@ -147,6 +184,20 @@ def astar_pathfinding(start, goal, walkable_tiles):
             path.append(start)
             path.reverse()
             print(f"[DEBUG] Path found with {len(path)} waypoints after {iterations} iterations")
+            return path
+        
+        # Check if we're close enough to goal (within 5 tiles)
+        if abs(current[0] - goal[0]) + abs(current[1] - goal[1]) <= 5:
+            # Direct path to goal
+            path = []
+            temp_current = current
+            while temp_current in came_from:
+                path.append(temp_current)
+                temp_current = came_from[temp_current]
+            path.append(start)
+            path.reverse()
+            path.append(goal)
+            print(f"[DEBUG] Early path found with {len(path)} waypoints after {iterations} iterations")
             return path
         
         for neighbor in get_neighbors(current, walkable_tiles):
@@ -170,6 +221,21 @@ def astar_pathfinding(start, goal, walkable_tiles):
                     tie_breaker += 1
                     heapq.heappush(open_set, (f_score[neighbor], tie_breaker, neighbor))
                     in_open_set.add(neighbor)
+    
+    if iterations >= max_iterations:
+        print(f"WARNING: Pathfinding stopped after {max_iterations} iterations")
+        # Try to return a partial path to the closest point we found
+        if visited:
+            closest_to_goal = min(visited, key=lambda pos: abs(pos[0] - goal[0]) + abs(pos[1] - goal[1]))
+            path = []
+            current = closest_to_goal
+            while current in came_from:
+                path.append(current)
+                current = came_from[current]
+            path.append(start)
+            path.reverse()
+            print(f"[DEBUG] Partial path found with {len(path)} waypoints")
+            return path
     
     print(f"ERROR: No path found after {iterations} iterations")
     print(f"Visited {len(visited)} tiles")
@@ -203,7 +269,7 @@ def world_to_map_coords(world_x, world_y, min_x, min_y, max_y, tile_size=16, pad
     return int(map_x), int(map_y)
 
 
-def draw_path_on_map(image_path, path, collision_data, output_path):
+def draw_path_on_map(image_path, path, collision_data, output_path, start_pos=None, goal_pos=None):
     """Draw the path on the collision map image."""
     print(f"[DEBUG] Loading image from: {image_path}")
     img = Image.open(image_path)
@@ -219,28 +285,39 @@ def draw_path_on_map(image_path, path, collision_data, output_path):
     
     print(f"[DEBUG] Map bounds: ({min_x}, {min_y}) to ({max_x}, {max_y})")
     
-    # Calculate proper pixel coordinates for Lumbridge spawn and GE
-    lumbridge_world = (3236, 3227)  # Lumbridge spawn world coordinates (walkable tile)
-    ge_world = (3164, 3487)         # GE world coordinates (walkable tile)
+    # Use provided positions or fallback to path start/end
+    if start_pos:
+        start_world = start_pos
+    elif path and len(path) > 0:
+        start_world = path[0]
+    else:
+        start_world = (3236, 3227)  # Fallback to Lumbridge
     
-    lumbridge_pixel = world_to_map_coords(lumbridge_world[0], lumbridge_world[1], min_x, min_y, max_y)
-    ge_pixel = world_to_map_coords(ge_world[0], ge_world[1], min_x, min_y, max_y)
+    if goal_pos:
+        goal_world = goal_pos
+    elif path and len(path) > 0:
+        goal_world = path[-1]
+    else:
+        goal_world = (3164, 3487)  # Fallback to GE
     
-    print(f"[DEBUG] Lumbridge: World {lumbridge_world} -> Pixel {lumbridge_pixel}")
-    print(f"[DEBUG] GE: World {ge_world} -> Pixel {ge_pixel}")
-    print(f"[DEBUG] Drawing path from Lumbridge {lumbridge_pixel} to GE {ge_pixel}")
+    start_pixel = world_to_map_coords(start_world[0], start_world[1], min_x, min_y, max_y)
+    goal_pixel = world_to_map_coords(goal_world[0], goal_world[1], min_x, min_y, max_y)
+    
+    print(f"[DEBUG] Start: World {start_world} -> Pixel {start_pixel}")
+    print(f"[DEBUG] Goal: World {goal_world} -> Pixel {goal_pixel}")
+    print(f"[DEBUG] Drawing path from {start_pixel} to {goal_pixel}")
     
     # Draw straight line first so you can see the actual start/end points
-    print(f"[DEBUG] Drawing straight line from Lumbridge {lumbridge_pixel} to GE {ge_pixel}")
-    draw.line([lumbridge_pixel, ge_pixel], fill=(255, 255, 0), width=4)  # Yellow straight line
+    print(f"[DEBUG] Drawing straight line from {start_pixel} to {goal_pixel}")
+    draw.line([start_pixel, goal_pixel], fill=(255, 255, 0), width=4)  # Yellow straight line
     
-    # Draw start and end points (ALWAYS use the actual GE coordinates, not pathfinding result)
-    print(f"[DEBUG] Drawing start point at {lumbridge_pixel}")
-    draw.ellipse([lumbridge_pixel[0]-10, lumbridge_pixel[1]-10, lumbridge_pixel[0]+10, lumbridge_pixel[1]+10], 
+    # Draw start and end points
+    print(f"[DEBUG] Drawing start point at {start_pixel}")
+    draw.ellipse([start_pixel[0]-10, start_pixel[1]-10, start_pixel[0]+10, start_pixel[1]+10], 
                 fill=(0, 255, 0), outline=(255, 255, 255), width=3)  # Green start
     
-    print(f"[DEBUG] Drawing end point at {ge_pixel} (ACTUAL GE COORDINATES)")
-    draw.ellipse([ge_pixel[0]-10, ge_pixel[1]-10, ge_pixel[0]+10, ge_pixel[1]+10], 
+    print(f"[DEBUG] Drawing end point at {goal_pixel}")
+    draw.ellipse([goal_pixel[0]-10, goal_pixel[1]-10, goal_pixel[0]+10, goal_pixel[1]+10], 
                 fill=(255, 0, 0), outline=(255, 255, 255), width=3)  # Red end
     
     # Draw path (if we have one)
@@ -273,21 +350,7 @@ def draw_path_on_map(image_path, path, collision_data, output_path):
                 # Draw anyway but with a warning
                 draw.line([start, end], fill=(0, 255, 255), width=6)
         
-        # Draw start and end points with larger circles
-        if map_path:
-            # Start point (green circle) - use actual Lumbridge coordinates
-            start = lumbridge_pixel
-            print(f"[DEBUG] Drawing start point at {start} (ACTUAL LUMBRIDGE)")
-            draw.ellipse([start[0]-10, start[1]-10, start[0]+10, start[1]+10], 
-                        fill=(0, 255, 0), outline=(255, 255, 255), width=3)
-            
-            # End point (red circle) - use actual GE coordinates, NOT pathfinding result
-            end = ge_pixel
-            print(f"[DEBUG] Drawing end point at {end} (ACTUAL GE COORDINATES)")
-            draw.ellipse([end[0]-10, end[1]-10, end[0]+10, end[1]+10], 
-                        fill=(255, 0, 0), outline=(255, 255, 255), width=3)
-        
-        print(f"[DEBUG] Path drawn from {lumbridge_pixel} to {ge_pixel} (ACTUAL COORDINATES)")
+        print(f"[DEBUG] Path drawn from {start_pixel} to {goal_pixel}")
     else:
         print("WARNING: No path to draw")
     
@@ -413,10 +476,71 @@ def simple_path(start, goal, blocked_tiles):
     return path
 
 
+def get_current_player_position():
+    """Get current player position using IPC."""
+    print("[DEBUG] Getting current player position...")
+    
+    try:
+        # Import the necessary modules
+        from ilbot.ui.simple_recorder.services.ipc_client import RuneLiteIPC
+        from ilbot.ui.simple_recorder.helpers.context import set_payload
+        from ilbot.ui.simple_recorder.actions.player import get_x, get_y
+        
+        # Create IPC connection (try common ports)
+        ipc = None
+        for port in range(17000, 17021):  # Try ports 17000-17020
+            try:
+                print(f"[DEBUG] Trying IPC connection on port {port}...")
+                ipc = RuneLiteIPC(port=port, pre_action_ms=120, timeout_s=0.5)  # Shorter timeout
+                # Test the connection
+                test_response = ipc._send({"cmd": "get_player"})
+                if test_response and test_response.get("ok"):
+                    print(f"[DEBUG] Successfully connected to RuneLite on port {port}")
+                    break
+                else:
+                    ipc = None
+            except Exception as e:
+                # Don't print every failed port to avoid spam
+                if port % 5 == 0:  # Print every 5th port
+                    print(f"[DEBUG] Port {port} failed: {e}")
+                ipc = None
+                continue
+        
+        if not ipc:
+            print("[ERROR] Could not connect to RuneLite on any port")
+            return None
+        
+        # Create a payload with the IPC connection
+        payload = {"__ipc": ipc, "__ipc_port": ipc.port}
+        set_payload(payload)
+        
+        # Get player position using the IPC functions
+        x = get_x(payload)
+        y = get_y(payload)
+        
+        if x is not None and y is not None:
+            position = (x, y)
+            print(f"[DEBUG] Got player position: {position}")
+            return position
+        else:
+            print("[ERROR] Could not get valid player coordinates")
+            return None
+            
+    except Exception as e:
+        print(f"[ERROR] Exception getting player position: {e}")
+        return None
+
+
 def main():
     """Main pathfinding function."""
-    print("RUNESCAPE PATHFINDER")
+    print("RUNESCAPE PATHFINDER - CURRENT POSITION TO GE")
     print("=" * 50)
+    
+    # Get current player position
+    current_pos = get_current_player_position()
+    if not current_pos:
+        print("ERROR: Could not get current player position")
+        return False
     
     # Load collision data first
     collision_data = load_collision_data()
@@ -428,30 +552,25 @@ def main():
     print(f"Walkable tiles: {len(walkable_tiles)}")
     print(f"Blocked tiles: {len(blocked_tiles)}")
     
-    # Find actual walkable tiles in the collision data
-    # LUMBRIDGE_NEW_PLAYER_SPAWN: (3231, 3240, 3212, 3224) - rectangle
-    # GE: (3155, 3173, 3479, 3498) - rectangle
+    # GE coordinates from constants
+    GE_TARGET = (3164, 3487)  # GE coordinates
     
-    # Find closest walkable tiles to the target coordinates
-    LUMBRIDGE_TARGET = (3236, 3227)  # ACTUAL Lumbridge spawn coordinates from the green circle
-    GE_TARGET = (3164, 3487)         # ACTUAL GE coordinates from the red circle
-    
-    # Find closest walkable tile to Lumbridge
-    lumbridge_walkable = []
-    for x in range(3230, 3245):  # Around (3236, 3227)
-        for y in range(3220, 3235):
+    # Find closest walkable tile to current position
+    current_walkable = []
+    for x in range(current_pos[0] - 10, current_pos[0] + 11):  # Search around current position
+        for y in range(current_pos[1] - 10, current_pos[1] + 11):
             if (x, y) in walkable_tiles:
-                lumbridge_walkable.append((x, y))
+                current_walkable.append((x, y))
     
     # Find closest walkable tile to GE
     ge_walkable = []
-    for x in range(3155, 3175):  # Around (3164, 3487)
+    for x in range(3155, 3175):  # Around GE
         for y in range(3480, 3495):
             if (x, y) in walkable_tiles:
                 ge_walkable.append((x, y))
     
-    if not lumbridge_walkable:
-        print("ERROR: No walkable tiles found near Lumbridge")
+    if not current_walkable:
+        print("ERROR: No walkable tiles found near current position")
         return False
     
     if not ge_walkable:
@@ -469,19 +588,13 @@ def main():
                 closest = candidate
         return closest
     
-    LUMBRIDGE_SPAWN = find_closest(LUMBRIDGE_TARGET, lumbridge_walkable)
-    GE_COORDS = find_closest(GE_TARGET, ge_walkable)
+    start = find_closest(current_pos, current_walkable)
+    goal = find_closest(GE_TARGET, ge_walkable)
     
-    print(f"Start: Lumbridge spawn {LUMBRIDGE_SPAWN}")
-    print(f"Goal: Grand Exchange {GE_COORDS}")
+    print(f"Current position: {current_pos}")
+    print(f"Start (closest walkable): {start}")
+    print(f"Goal (GE): {goal}")
     print()
-    
-    # Use the original coordinates since everything is walkable by default
-    start = LUMBRIDGE_SPAWN
-    goal = GE_COORDS
-    
-    print(f"Start: {start}")
-    print(f"Goal: {goal}")
     
     # Calculate and show pixel coordinates
     all_x = [tile['x'] for tile in collision_data.values()]
@@ -515,9 +628,9 @@ def main():
     # Draw path on map
     script_dir = Path(__file__).parent
     input_image = script_dir / "collision_cache" / "detailed_collision_map.png"
-    output_image = script_dir / "collision_cache" / "path_lumbridge_to_ge.png"
+    output_image = script_dir / "collision_cache" / "path_current_to_ge.png"
     
-    draw_path_on_map(input_image, path, collision_data, output_image)
+    draw_path_on_map(input_image, path, collision_data, output_image, start_pos=current_pos, goal_pos=GE_TARGET)
     
     return True
 

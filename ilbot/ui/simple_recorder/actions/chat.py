@@ -161,58 +161,76 @@ def continue_dialogue(payload: Optional[dict] = None, ui=None) -> Optional[dict]
 
 def can_click_continue_widget(payload: Optional[dict] = None) -> bool:
     """
-    Check if the "Click here to continue" widget (ID 15007748) is visible and clickable.
+    Check if any "Click here to continue" widget is visible and clickable.
     """
     from ..helpers.widgets import widget_exists, get_widget_info
     
-    if not widget_exists(15007748):  # Messagebox.CONTINUE widget
-        return False
+    # Check Messagebox.CONTINUE widget (ID 15007748)
+    if widget_exists(15007748):
+        widget_info = get_widget_info(15007748)
+        if widget_info and widget_info.get("ok"):
+            widget_data = widget_info.get("widget", {})
+            if widget_data.get("visible", False) and widget_data.get("hasListener", False):
+                return True
     
-    widget_info = get_widget_info(15007748)
-    if not widget_info or not widget_info.get("ok"):
-        return False
+    # Check LevelupDisplay.CONTINUE widget (ID 15269891)
+    if widget_exists(15269891):
+        widget_info = get_widget_info(15269891)
+        if widget_info and widget_info.get("ok"):
+            widget_data = widget_info.get("widget", {})
+            if widget_data.get("visible", False) and widget_data.get("hasListener", False):
+                return True
     
-    widget_data = widget_info.get("widget", {})
-    return widget_data.get("visible", False) and widget_data.get("hasListener", False)
+    return False
 
 def click_continue_widget(payload: Optional[dict] = None, ui=None) -> Optional[dict]:
     """
-    Action: Click the "Click here to continue" widget (ID 15007748).
+    Action: Click any "Click here to continue" widget.
     """
     if payload is None:
         payload = get_payload()
     if ui is None:
         ui = get_ui()
 
-    # Check if the continue widget exists and is visible
     from ..helpers.widgets import widget_exists, get_widget_info
     
-    if not widget_exists(15007748):  # Messagebox.CONTINUE widget
-        return None
+    # Try Messagebox.CONTINUE widget (ID 15007748) first
+    if widget_exists(15007748):
+        widget_info = get_widget_info(15007748)
+        if widget_info and widget_info.get("ok"):
+            widget_data = widget_info.get("widget", {})
+            if widget_data.get("visible", False):
+                bounds = widget_data.get("bounds")
+                if bounds:
+                    x = bounds.get("x", 0) + bounds.get("width", 0) // 2
+                    y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+                    
+                    step = emit({
+                        "action": "click-continue-widget",
+                        "click": {"type": "point", "x": x, "y": y},
+                        "target": {"domain": "chat", "name": "continue_widget"},
+                    })
+                    return ui.dispatch(step)
     
-    # Get widget info to check if it's visible and get coordinates
-    widget_info = get_widget_info(15007748)
-    if not widget_info or not widget_info.get("ok"):
-        return None
+    # Try LevelupDisplay.CONTINUE widget (ID 15269891)
+    if widget_exists(15269891):
+        widget_info = get_widget_info(15269891)
+        if widget_info and widget_info.get("ok"):
+            widget_data = widget_info.get("widget", {})
+            if widget_data.get("visible", False):
+                bounds = widget_data.get("bounds")
+                if bounds:
+                    x = bounds.get("x", 0) + bounds.get("width", 0) // 2
+                    y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+                    
+                    step = emit({
+                        "action": "click-continue-widget",
+                        "click": {"type": "point", "x": x, "y": y},
+                        "target": {"domain": "chat", "name": "continue_widget"},
+                    })
+                    return ui.dispatch(step)
     
-    widget_data = widget_info.get("widget", {})
-    if not widget_data.get("visible", False):
-        return None
-    
-    # Get click coordinates from bounds
-    bounds = widget_data.get("bounds")
-    if not bounds:
-        return None
-    
-    x = bounds.get("x", 0) + bounds.get("width", 0) // 2
-    y = bounds.get("y", 0) + bounds.get("height", 0) // 2
-    
-    step = emit({
-        "action": "click-continue-widget",
-        "click": {"type": "point", "x": x, "y": y},
-        "target": {"domain": "chat", "name": "continue_widget"},
-    })
-    return ui.dispatch(step)
+    return None
 
 def choose_option(choice: Union[int, str], payload: Optional[dict] = None, ui=None) -> Optional[dict]:
     """

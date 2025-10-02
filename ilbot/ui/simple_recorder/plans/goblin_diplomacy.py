@@ -1,7 +1,7 @@
 # goblin_diplomacy.py
 import time
 
-from ..actions import objects, player
+from ..actions import objects, player, tab
 from ..actions.player import get_player_plane
 from ..actions.timing import wait_until
 from ..constants import BANK_REGIONS, REGIONS
@@ -26,6 +26,10 @@ class GoblinDiplomacyPlan(Plan):
         self.state = {"phase": "GO_TO_CLOSEST_BANK"}  # gate: ensure items first
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
+        
+        # Set up camera immediately during initialization
+        from ilbot.ui.simple_recorder.helpers.camera import setup_camera_optimal
+        setup_camera_optimal()
 
     def compute_phase(self, payload, craft_recent):
         return self.state.get("phase", "GO_TO_CLOSEST_BANK")
@@ -37,24 +41,28 @@ class GoblinDiplomacyPlan(Plan):
     def loop(self, ui, payload):
         phase = self.state.get("phase", "GO_TO_CLOSEST_BANK")
         if quest.quest_finished("Goblin Diplomacy"):
-            self.set_phase('DONE')
+            if chat.can_continue():
+                chat.continue_dialogue()
+                return
+            self.set_phase('DONE', ui)
+            return
 
         match(phase):
             case "GO_TO_CLOSEST_BANK":
                 if not near_any_bank(payload):
                     trav.go_to_closest_bank(payload)
                 else:
-                    self.state["phase"] = "CHECK_BANK_FOR_QUEST_ITEMS"
+                    self.set_phase("CHECK_BANK_FOR_QUEST_ITEMS", ui)
                 return
 
             case "CHECK_BANK_FOR_QUEST_ITEMS":
                 if bank.is_closed():
                     bank.open_bank()
-                    return
-                elif bank.is_open():
-                    # First, deposit everything to get a clean state
+                    wait_until(lambda: bank.is_open(), max_wait_ms=5000, min_wait_ms=200)
                     bank.deposit_inventory()
                     wait_until(inv.is_empty, max_wait_ms=5000, min_wait_ms=200)
+                    return
+                elif bank.is_open():
                     
                     # Now check what we have in the bank and what we need
                     required_items = ["Blue dye", "Orange dye", "Goblin mail"]
@@ -75,7 +83,7 @@ class GoblinDiplomacyPlan(Plan):
                         bank.close_bank()
                         if not wait_until(bank.is_closed, min_wait_ms=600, max_wait_ms=3000):
                             return
-                        self.set_phase("BUY_QUEST_ITEMS_FROM_GE")
+                        self.set_phase("BUY_QUEST_ITEMS_FROM_GE", ui)
                         return
                     elif needed_items:
                         # Ensure bank note mode is disabled (withdraw as items, not notes)
@@ -88,7 +96,7 @@ class GoblinDiplomacyPlan(Plan):
                                 bank.withdraw_item(item, withdraw_x=3)
                             else:
                                 bank.withdraw_item(item)
-                        
+
                         # Verify we have all items in inventory before proceeding
                         time.sleep(0.5)  # Brief wait for items to appear in inventory
                         
@@ -109,7 +117,7 @@ class GoblinDiplomacyPlan(Plan):
                             bank.close_bank()
                             if not wait_until(bank.is_closed, min_wait_ms=600, max_wait_ms=3000):
                                 return
-                            self.set_phase("MAKE_ARMOURS")
+                            self.set_phase("MAKE_ARMOURS", ui)
                             return
                         else:
                             # Items not properly withdrawn, try again next tick
@@ -131,7 +139,7 @@ class GoblinDiplomacyPlan(Plan):
                         bank.close_bank()
                         if not wait_until(bank.is_closed, min_wait_ms=600, max_wait_ms=3000):
                             return
-                        self.set_phase("MAKE_ARMOURS")
+                        self.set_phase("MAKE_ARMOURS", ui)
                         return
 
             case "BUY_QUEST_ITEMS_FROM_GE":
@@ -156,15 +164,58 @@ class GoblinDiplomacyPlan(Plan):
                     if ge.is_open():
                         ge.close_ge()
                     else:
-                        self.set_phase("CHECK_BANK_FOR_QUEST_ITEMS")
+                        self.set_phase("CHECK_BANK_FOR_QUEST_ITEMS", ui)
                     return
                 
-                # Define items with quantities and price bumps
-                items_to_buy = {
-                    "Blue dye": (1, 5),
-                    "Orange dye": (1, 5),
-                    "Goblin mail": (3, 5)
-                }
+                # Open bank and deposit all inventory first
+                if bank.is_closed() and not bank.inv_has("coins"):
+                    bank.open_bank()
+                    return
+                if bank.inv_has("coins") and bank.is_open():
+                    bank.close_bank()
+                    return
+                
+                # Deposit all inventory items to get accurate counts
+                bank.deposit_inventory()
+                time.sleep(0.5)  # Brief wait for deposit to complete
+                
+                # Check if we already calculated items_to_buy in a previous loop
+                if "items_to_buy" not in self.state:
+                    # Now count what we have in the bank after depositing
+                    items_to_buy = {}
+                    
+                    # Check Blue dye (need 1 unnoted)
+                    blue_dye_count = bank.get_item_count("Blue dye")
+                    if blue_dye_count == 0:
+                        items_to_buy["Blue dye"] = (1, 5)
+                    
+                    # Check Orange dye (need 1 unnoted)
+                    orange_dye_count = bank.get_item_count("Orange dye")
+                    if orange_dye_count == 0:
+                        items_to_buy["Orange dye"] = (1, 5)
+                    
+                    # Check Goblin mail (need 3 total)
+                    current_goblin_mail = bank.get_item_count("Goblin mail")
+                    needed_goblin_mail = max(0, 3 - current_goblin_mail)
+                    if needed_goblin_mail > 0:
+                        items_to_buy["Goblin mail"] = (needed_goblin_mail, 5)
+                    
+                    # Save items_to_buy to state for future loops
+                    self.state["items_to_buy"] = items_to_buy
+                    ui.debug(f"[GD] Calculated items to buy: {items_to_buy}")
+                else:
+                    # Use previously calculated items_to_buy
+                    items_to_buy = self.state["items_to_buy"]
+                    ui.debug(f"[GD] Using cached items to buy: {items_to_buy}")
+                
+                # If we don't need to buy anything, move to next phase
+                if not items_to_buy:
+                    ui.debug("[GD] Already have all required items")
+                    if ge.is_open():
+                        ge.close_ge()
+                    else:
+                        self.set_phase("CHECK_BANK_FOR_QUEST_ITEMS", ui)
+                    return
                 
                 # Use the centralized GE buying method
                 ui.debug("[GD] Buying quest items from GE...")
@@ -180,10 +231,13 @@ class GoblinDiplomacyPlan(Plan):
                 
                 # If we get here, all items should be bought - verify and go to bank
                 time.sleep(0.5)  # Brief wait for items to appear in inventory
-                self.set_phase("CHECK_BANK_FOR_QUEST_ITEMS")
+                self.set_phase("CHECK_BANK_FOR_QUEST_ITEMS", ui)
                 return
 
             case "MAKE_ARMOURS":
+                if not tab.is_tab_open("INVENTORY"):
+                    tab.open_tab("INVENTORY")
+                    return
                 # Use blue dye on one goblin mail
                 if not inv.has_item("Blue goblin mail"):
                     result = inv.use_item_on_item("Blue dye", "Goblin mail")
@@ -198,12 +252,12 @@ class GoblinDiplomacyPlan(Plan):
 
                 # Move to next phase when both are dyed
                 if inv.has_item("Blue goblin mail") and inv.has_item("Orange goblin mail"):
-                    self.set_phase("START_QUEST")
+                    self.set_phase("START_QUEST", ui)
                     return
 
             case 'START_QUEST':
                 if quest.quest_in_progress("Goblin Diplomacy"):
-                    self.set_phase("TALK_TO_GENERAL_WARTFACE")
+                    self.set_phase("TALK_TO_GENERAL_WARTFACE", ui)
                     return
                     
                 # Go to Goblin Village to start the quest
@@ -225,7 +279,7 @@ class GoblinDiplomacyPlan(Plan):
             case "TALK_TO_GENERAL_WARTFACE":
                 if quest.quest_finished("Goblin Diplomacy"):
                     press_esc(payload, ui)
-                    self.set_phase("DONE")
+                    self.set_phase("DONE", ui)
                     return
 
                 if not trav.in_area("GOBLIN_VILLAGE") and not npc.closest_npc_by_name("General Bentnoze"):

@@ -15,6 +15,7 @@ import ilbot.ui.simple_recorder.actions.chat as chat
 from .base import Plan
 from ..helpers import quest
 from ..helpers.bank import near_any_bank
+from ..helpers.utils import press_esc
 
 
 class RomeoAndJulietPlan(Plan):
@@ -22,9 +23,13 @@ class RomeoAndJulietPlan(Plan):
     label = "Quest: Romeo & Juliet"
 
     def __init__(self):
-        self.state = {"phase": "GO_TO_CLOSEST_BANK"}  # gate: ensure items first
+        self.state = {"phase": "GIVE_POTION_TO_JULIET"}  # gate: ensure items first
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
+        
+        # Set up camera immediately during initialization
+        from ilbot.ui.simple_recorder.helpers.camera import setup_camera_optimal
+        setup_camera_optimal()
 
     def compute_phase(self, payload, craft_recent):
         return self.state.get("phase", "GO_TO_CLOSEST_BANK")
@@ -35,25 +40,16 @@ class RomeoAndJulietPlan(Plan):
 
     def loop(self, ui, payload):
         phase = self.state.get("phase", "GO_TO_CLOSEST_BANK")
-        # phase = "TEST_WALK"
-        # if phase == "GO_TO_CLOSEST_BANK":
-        #     self.set_phase("FATHER_LAWRENCE")
 
         match(phase):
-            case "TEST_WALK":
-                add_node("EDGEVILLE_BANK", 3095, 3493, 0)
-                add_node("GE_SOUTH", 3161, 3483, 0)
-                step = trav.go_to_node("EDGEVILLE_BANK", payload=payload, ui=ui)
-                step = trav.follow_nodes(["EDGEVILLE_BANK", "GE_SOUTH"], payload=payload, ui=ui)
-
             case "GO_TO_CLOSEST_BANK":
                 if inv.has_item("Cadava Berries") and quest.quest_state("Romeo & Juliet") == 'NOT_STARTED':
-                    self.set_phase("START_QUEST")
+                    self.set_phase("START_QUEST", ui)
                     return
                 if not near_any_bank(payload):
                     trav.go_to_closest_bank(payload)
                 else:
-                    self.state["phase"] = "CHECK_BANK_FOR_QUEST_ITEMS"
+                    self.set_phase("CHECK_BANK_FOR_QUEST_ITEMS", ui)
                 return
 
             case "CHECK_BANK_FOR_QUEST_ITEMS":
@@ -65,7 +61,7 @@ class RomeoAndJulietPlan(Plan):
                         bank.close_bank()
                         if not wait_until(bank.is_closed, min_wait_ms=600, max_wait_ms=3000):
                             return
-                        self.set_phase("START_QUEST")
+                        self.set_phase("START_QUEST", ui)
                         return
                     elif bank.has_item("Cadava berries"):
                         bank.deposit_inventory()
@@ -76,23 +72,23 @@ class RomeoAndJulietPlan(Plan):
                         bank.close_bank()
                         if not wait_until(bank.is_closed, min_wait_ms=600, max_wait_ms=3000):
                             return
-                        self.set_phase("BUY_QUEST_ITEMS_FROM_GE")
+                        self.set_phase("BUY_QUEST_ITEMS_FROM_GE", ui)
                         return
 
             case "BUY_QUEST_ITEMS_FROM_GE":
                 if inv.has_item("Cadava berries") and ge.is_closed():
-                    self.set_phase("START_QUEST")
+                    self.set_phase("START_QUEST", ui)
                     return
                 
                 # Use the centralized GE buying method
                 result = ge.buy_item_from_ge("Cadava berries", ui)
                 if result is True:
-                    self.set_phase("START_QUEST")
+                    self.set_phase("START_QUEST", ui)
                     return
 
             case 'START_QUEST':
                 if quest.quest_in_progress("Romeo & Juliet"):
-                    self.set_phase("TALK_TO_JULIET_1")
+                    self.set_phase("TALK_TO_JULIET_1", ui)
                 if not trav.in_area(REGIONS["VARROCK_SQUARE"]):
                     trav.go_to("VARROCK_SQUARE")
                     return
@@ -115,25 +111,28 @@ class RomeoAndJulietPlan(Plan):
 
             case "TALK_TO_JULIET_1":
                 if inv.has_item("Message"):
-                    self.set_phase("TALK_TO_ROMEO_1")
+                    self.set_phase("TALK_TO_ROMEO_1", ui)
                     return
                 elif not trav.in_area(REGIONS["JULIET_MANSION"]) and get_player_plane() == 0:
                     trav.go_to("JULIET_MANSION")
                 elif get_player_plane() == 0:
                     objects.click("Staircase")
+                    return 2000
                 elif get_player_plane() == 1 and not chat.dialogue_is_open():
                     npc.click_npc("Juliet")
+                    return
                 elif chat.dialogue_is_open():
                     chat.continue_dialogue()
                     return
 
             case "TALK_TO_ROMEO_1":
-                if chat.dialogue_contains("Oh yes, Father Lawrence..."):
+                if chat.dialogue_contains("Oh yes, Father Lawrence...") or not inv.has_item("Message"):
                     chat.continue_dialogue()
-                    self.set_phase("FATHER_LAWRENCE")
+                    self.set_phase("FATHER_LAWRENCE", ui)
+                    return
                 if get_player_plane() == 1:
                     objects.click("Staircase")
-                    return
+                    return 2000
                 elif not trav.in_area(REGIONS["VARROCK_SQUARE"]):
                     trav.go_to("VARROCK_SQUARE")
                     return
@@ -147,7 +146,7 @@ class RomeoAndJulietPlan(Plan):
             case "FATHER_LAWRENCE":
                 if chat.dialogue_contains("Apart from the strong overtones") or chat.dialogue_contains("Ah, have you found the Apothecary yet?"):
                     chat.continue_dialogue()
-                    self.set_phase("GET_POTION")
+                    self.set_phase("GET_POTION", ui)
                     return
                 if not trav.in_area(REGIONS["VARROCK_CHURCH"]):
                     trav.go_to("VARROCK_CHURCH")
@@ -161,7 +160,7 @@ class RomeoAndJulietPlan(Plan):
 
             case "GET_POTION":
                 if inv.has_item("Cadava potion"):
-                    self.set_phase("GIVE_POTION_TO_JULIET")
+                    self.set_phase("GIVE_POTION_TO_JULIET", ui)
                     return
                 elif not trav.in_area(REGIONS["VARROCK_APOTHECARY"]):
                     trav.go_to("VARROCK_APOTHECARY")
@@ -182,13 +181,14 @@ class RomeoAndJulietPlan(Plan):
 
             case "GIVE_POTION_TO_JULIET":
                 if not inv.has_item("Cadava potion"):
-                    self.set_phase("FINISH_QUEST")
+                    self.set_phase("FINISH_QUEST", ui)
+                    return
                 if not trav.in_area(REGIONS["JULIET_MANSION"]) and get_player_plane() == 0:
                     trav.go_to("JULIET_MANSION")
                     return
                 elif get_player_plane() == 0:
                     objects.click("Staircase")
-                    return
+                    return 3000
                 elif get_player_plane() == 1 and not chat.can_continue() and not player.in_cutscene():
                     npc.click_npc("Juliet")
                     return
@@ -204,20 +204,24 @@ class RomeoAndJulietPlan(Plan):
 
             case "FINISH_QUEST":
                 if quest.quest_state("Romeo & Juliet") == "FINISHED":
-                    self.set_phase("DONE")
+                    self.set_phase("DONE", ui)
+                    press_esc()
                     return
                 if get_player_plane() == 1 and not player.in_cutscene():
                     objects.click("Staircase")
-                    return
+                    return 3000
                 elif not trav.in_area(REGIONS["VARROCK_SQUARE"]) and not player.in_cutscene():
                     trav.go_to("VARROCK_SQUARE")
+                    return
+                elif player.in_cutscene():
+                    chat.continue_dialogue()
                     return
                 elif not chat.dialogue_is_open() and not chat.can_continue() and not player.in_cutscene():
                     npc.click_npc("Romeo")
                     return 3000
                 elif chat.dialogue_is_open():
                     chat.continue_dialogue()
-                    return
+                    return 3000
 
 
 

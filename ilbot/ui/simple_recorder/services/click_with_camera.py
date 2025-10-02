@@ -270,6 +270,7 @@ def click_npc_with_camera(
                 "start_dy": 10,
                 "open_delay_ms": 120,
             },
+            "option": action,
             "target": {"domain": "npc", "name": npc_name_fresh, **anchor, "world": world_coords},
             "anchor": point,
         })

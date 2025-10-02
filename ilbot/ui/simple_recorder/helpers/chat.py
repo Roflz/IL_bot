@@ -101,6 +101,15 @@ def can_continue(payload: Optional[dict] = None) -> bool:
             if "continue" in text:
                 return True
 
+    # Check for LevelupDisplay.CONTINUE widget (ID 15269891) - "Click here to continue"
+    if widget_exists(15269891):
+        widget_info = get_widget_info(15269891)
+        if widget_info:
+            widget_data = widget_info.get("data", {})
+            text = widget_data.get("text", "").lower()
+            if "continue" in text:
+                return True
+
     L = _dlg_left(payload)
     R = _dlg_right(payload)
     OB = _dlg_objectbox(payload)
