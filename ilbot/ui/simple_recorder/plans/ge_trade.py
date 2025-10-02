@@ -47,11 +47,6 @@ class GeTradePlan(Plan):
                     # Use enhanced long-distance travel for GE
                     print("[GE_TRADE] Using enhanced travel to reach Grand Exchange...")
                     result = trav.go_to("GE", use_long_distance=True)
-                    if result and result.get("success"):
-                        print("[GE_TRADE] Successfully reached Grand Exchange")
-                        self.set_phase("TRADE_PLAYER")
-                    else:
-                        print("[GE_TRADE] Travel to GE in progress...")
                     return
 
             case "TRADE_PLAYER":

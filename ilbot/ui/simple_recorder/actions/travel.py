@@ -518,12 +518,13 @@ def _should_use_long_distance_travel(rect_or_key: str | tuple | list, payload: d
     # Calculate distance
     distance = abs(current_x - target_x) + abs(current_y - target_y)
     
-    # Use long-distance travel for routes longer than 50 tiles
-    # or for specific known complex routes
-    if distance > 50:
+    # Use long-distance travel for routes longer than 30 tiles
+    # This is more aggressive than the original 50 tiles
+    if distance > 30:
+        print(f"[TRAVEL] Distance {distance:.1f} > 30, using long-distance travel")
         return True
     
-    # Check for specific complex routes
+    # Check for specific complex routes that benefit from collision-aware pathfinding
     current_region = _get_current_region(current_x, current_y)
     target_region = _get_target_region(rect_or_key)
     
@@ -531,9 +532,15 @@ def _should_use_long_distance_travel(rect_or_key: str | tuple | list, payload: d
         ('Lumbridge', 'Grand Exchange'),
         ('Lumbridge', 'Falador'),
         ('Falador', 'Grand Exchange'),
+        ('Lumbridge', 'Draynor'),
+        ('Draynor', 'Grand Exchange'),
     ]
     
-    return (current_region, target_region) in complex_routes
+    if (current_region, target_region) in complex_routes:
+        print(f"[TRAVEL] Complex route {current_region} -> {target_region}, using long-distance travel")
+        return True
+    
+    return False
 
 
 def _get_current_region(x: int, y: int) -> str:
@@ -560,6 +567,99 @@ def _get_target_region(rect_or_key: str | tuple | list) -> str:
         elif 'falador' in rect_or_key.lower():
             return 'Falador'
     return 'Unknown'
+
+
+def _execute_long_distance_movement(waypoints: list, rect_or_key: str | tuple | list, payload: dict, ui) -> dict | None:
+    """
+    Execute movement using long-distance waypoints with local pathfinding.
+    
+    Args:
+        waypoints: List of intermediate waypoints from long-distance pathfinding
+        rect_or_key: Target destination
+        payload: Game state payload
+        ui: UI instance
+        
+    Returns:
+        Dispatch result or None if no action needed
+    """
+    from .long_distance_travel import clear_long_distance_waypoints
+    
+    print(f"[LONG_DISTANCE] _execute_long_distance_movement called with {len(waypoints) if waypoints else 0} waypoints")
+    
+    if not waypoints:
+        print(f"[LONG_DISTANCE] No waypoints available")
+        return None
+    
+    # Get current player position
+    player_x, player_y = _get_player_position(payload)
+    if not isinstance(player_x, int) or not isinstance(player_y, int):
+        print(f"[LONG_DISTANCE] Could not get player position")
+        return None
+    
+    print(f"[LONG_DISTANCE] Player at ({player_x}, {player_y})")
+    print(f"[LONG_DISTANCE] Available waypoints: {len(waypoints)}")
+    
+    # Check if we've reached the destination
+    if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
+        rect = tuple(rect_or_key)
+        if player_in_rect(payload, rect):
+            print(f"[LONG_DISTANCE] Reached destination, clearing waypoints")
+            clear_long_distance_waypoints()
+            return None
+    else:
+        rect_key = str(rect_or_key)
+        rect = get_nav_rect(rect_key)
+        if rect and player_in_rect(payload, rect):
+            print(f"[LONG_DISTANCE] Reached destination {rect_key}, clearing waypoints")
+            clear_long_distance_waypoints()
+            return None
+    
+    # Find the current target waypoint (closest uncompleted one)
+    current_target = None
+    min_distance = float('inf')
+    
+    for waypoint in waypoints:
+        if waypoint.get("completed", False):
+            continue
+            
+        wp_x = waypoint.get("x")
+        wp_y = waypoint.get("y")
+        
+        if isinstance(wp_x, int) and isinstance(wp_y, int):
+            distance = _calculate_distance(player_x, player_y, wp_x, wp_y)
+            if distance < min_distance:
+                min_distance = distance
+                current_target = waypoint
+    
+    if not current_target:
+        print(f"[LONG_DISTANCE] No uncompleted waypoints found, using normal pathfinding")
+        return go_to(rect_or_key, payload, ui, use_long_distance=False)
+    
+    target_x = current_target.get("x")
+    target_y = current_target.get("y")
+    waypoint_index = current_target.get("index", 0)
+    
+    print(f"[LONG_DISTANCE] Target waypoint {waypoint_index}: ({target_x}, {target_y})")
+    print(f"[LONG_DISTANCE] Distance to target: {min_distance}")
+    
+    # Check if we're close enough to this waypoint to mark it as completed
+    if min_distance <= 5:  # Within 5 tiles of target
+        print(f"[LONG_DISTANCE] Reached waypoint {waypoint_index}, marking as completed")
+        current_target["completed"] = True
+        # Continue to next waypoint on next call
+        return None
+    
+    # Use local pathfinding to reach the current target waypoint
+    print(f"[LONG_DISTANCE] Using local pathfinding to reach waypoint {waypoint_index}")
+    
+    # Create a small rectangle around the target waypoint for local pathfinding
+    target_rect = (target_x - 3, target_x + 3, target_y - 3, target_y + 3)
+    print(f"[LONG_DISTANCE] Target rectangle: {target_rect}")
+    
+    # Use normal go_to with the target rectangle
+    result = go_to(target_rect, payload, ui, use_long_distance=False)
+    print(f"[LONG_DISTANCE] go_to result: {result}")
+    return result
 
 
 def _first_blocking_door(proj_rows: list[dict], up_to_index: int | None = None) -> dict | None:
@@ -635,14 +735,23 @@ def go_to(rect_or_key: str | tuple | list, payload: dict | None = None, ui=None,
     # Check if we should use long-distance travel for complex routes
     if use_long_distance and _should_use_long_distance_travel(rect_or_key, payload):
         print(f"[TRAVEL] Using long-distance travel for {rect_or_key}")
-        from .long_distance_travel import travel_to_long_distance
-        success = travel_to_long_distance(rect_or_key, payload, ui)
-        if success:
-            # Return a success indicator
-            return {"action": "long-distance-travel", "success": True, "destination": rect_or_key}
-        else:
-            print(f"[TRAVEL] Long-distance travel failed, falling back to normal travel")
-            # Fall through to normal travel logic
+        from .long_distance_travel import travel_to_long_distance, get_long_distance_waypoints, clear_long_distance_waypoints
+        
+        # Check if we already have long-distance waypoints for this destination
+        long_distance_waypoints = get_long_distance_waypoints()
+        if not long_distance_waypoints:
+            # Generate new long-distance path
+            success = travel_to_long_distance(rect_or_key, payload, ui)
+            if not success:
+                print(f"[TRAVEL] Long-distance travel failed, falling back to normal travel")
+                # Fall through to normal travel logic
+            else:
+                long_distance_waypoints = get_long_distance_waypoints()
+        
+        if long_distance_waypoints:
+            # Use long-distance waypoints for movement
+            print(f"[TRAVEL] Using {len(long_distance_waypoints)} long-distance waypoints")
+            return _execute_long_distance_movement(long_distance_waypoints, rect_or_key, payload, ui)
 
     # accept key or explicit (minX, maxX, minY, maxY)
     if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
