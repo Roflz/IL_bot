@@ -43,10 +43,17 @@ def get_walkable_tiles(collision_data):
     for tile_data in collision_data.values():
         x, y = tile_data['x'], tile_data['y']
         
-        # Block ALL wall tiles (doors) regardless of passability
+        # Check if tile has a door object
         if tile_data.get('door'):
-            blocked.add((x, y))
-        # Only walkable=true tiles are walkable
+            door_info = tile_data.get('door', {})
+            passable = door_info.get('passable', False)
+            
+            # Only walkable if the door is passable
+            if passable:
+                walkable.add((x, y))
+            else:
+                blocked.add((x, y))
+        # For tiles without doors, use walkable flag
         elif tile_data.get('walkable', False):
             walkable.add((x, y))
         else:
