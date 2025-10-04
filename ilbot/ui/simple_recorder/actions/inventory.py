@@ -116,16 +116,17 @@ def has_noted_item(name: str, payload: dict | None = None) -> bool:
     
     return False
 
-def has_unnoted_item(name: str, payload: dict | None = None) -> bool:
+def count_unnoted_item(name: str, payload: dict | None = None) -> int:
     """
-    True if inventory contains unnoted version of item `name`.
-    This is the normal item, not the noted version.
+    Count the total quantity of unnoted version of item `name`.
+    This counts the normal item, not the noted version.
     """
     if payload is None:
         payload = get_payload()
     
     items = ((payload or {}).get("inventory") or {}).get("slots") or []
     target_name = (name or "").strip().lower()
+    total_count = 0
     
     for item in items:
         item_name = (item.get("itemName") or "").strip().lower()
@@ -134,9 +135,38 @@ def has_unnoted_item(name: str, payload: dict | None = None) -> bool:
             
         # Exact match and not noted
         if item_name == target_name and not item.get("isNoted"):
-            return True
+            quantity = int(item.get("quantity") or 0)
+            total_count += quantity
     
-    return False
+    return total_count
+
+
+def has_unnoted_item(name: str, payload: dict | None = None, min_qty: int = 1) -> bool:
+    """
+    True if inventory contains at least min_qty unnoted version of item `name`.
+    This is the normal item, not the noted version.
+    """
+    if payload is None:
+        payload = get_payload()
+    
+    if min_qty <= 1:
+        # Original behavior - just check if exists
+        items = ((payload or {}).get("inventory") or {}).get("slots") or []
+        target_name = (name or "").strip().lower()
+        
+        for item in items:
+            item_name = (item.get("itemName") or "").strip().lower()
+            if not item_name:
+                continue
+                
+            # Exact match and not noted
+            if item_name == target_name and not item.get("isNoted"):
+                return True
+        
+        return False
+    else:
+        # Use count method for quantity check
+        return count_unnoted_item(name, payload) >= min_qty
 
 
 
@@ -588,3 +618,17 @@ def interact(item_name: str, menu_option: str, payload: Optional[dict] = None, u
         "target": {"domain": "inventory", "name": item_name, "menu_option": menu_option},
     })
     return ui.dispatch(step)
+
+
+def is_full(payload: dict | None = None) -> bool:
+    """
+    Check if inventory is full (no empty slots).
+    
+    Args:
+        payload: Optional payload, will get fresh if None
+        
+    Returns:
+        True if inventory is full (0 empty slots), False otherwise
+    """
+    empty_slots = get_empty_slots_count(payload)
+    return empty_slots == 0

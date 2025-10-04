@@ -35,6 +35,7 @@ REGIONS = {
     "MAGIC_TUTORIAL": (3137, 3144, 3082, 3091),
     "LUMBRIDGE_NEW_PLAYER_SPAWN": (3231, 3240, 3212, 3224),
     "FALADOR_COWS": (3021, 3044, 3297, 3313),
+    "VARROCK_WEST_TREES": (3117, 3148, 3423, 3444)
 }
 
 # Grand Exchange region bounds (hardcoded)

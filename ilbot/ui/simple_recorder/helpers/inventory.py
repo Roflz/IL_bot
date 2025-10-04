@@ -12,11 +12,14 @@ def inv_slots(payload: dict | None = None) -> list[dict]:
         payload = get_payload()
     return (payload.get("inventory", {}) or {}).get("slots", []) or []
 
-def inv_has(name: str, payload: dict | None = None) -> bool:
+def inv_has(name: str, payload: dict | None = None, min_qty: int = 1) -> bool:
     if payload is None:
         payload = get_payload()
     n = norm_name(name)
-    return any(norm_name(s.get("itemName")) == n for s in inv_slots(payload))
+    if min_qty <= 1:
+        return any(norm_name(s.get("itemName")) == n for s in inv_slots(payload))
+    else:
+        return inv_count(name, payload) >= min_qty
 
 def inv_count(name: str, payload: dict | None = None) -> int:
     if payload is None:

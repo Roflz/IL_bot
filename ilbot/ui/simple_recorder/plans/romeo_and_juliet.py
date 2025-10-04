@@ -23,7 +23,7 @@ class RomeoAndJulietPlan(Plan):
     label = "Quest: Romeo & Juliet"
 
     def __init__(self):
-        self.state = {"phase": "GIVE_POTION_TO_JULIET"}  # gate: ensure items first
+        self.state = {"phase": "FINISH_QUEST"}  # gate: ensure items first
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
         
@@ -89,8 +89,8 @@ class RomeoAndJulietPlan(Plan):
             case 'START_QUEST':
                 if quest.quest_in_progress("Romeo & Juliet"):
                     self.set_phase("TALK_TO_JULIET_1", ui)
-                if not trav.in_area(REGIONS["VARROCK_SQUARE"]):
-                    trav.go_to("VARROCK_SQUARE")
+                if not trav.in_area(REGIONS["VARROCK_SQUARE"]) or not chat.dialogue_is_open():
+                    trav.go_to_and_find_npc("VARROCK_SQUARE", "Romeo")
                     return
                 elif npc.closest_npc_by_name("Romeo"):
                     if not chat.dialogue_is_open() and not chat.can_choose_option():

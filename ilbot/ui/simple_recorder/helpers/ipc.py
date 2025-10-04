@@ -28,7 +28,7 @@ def ipc_send(msg: dict, payload: dict | None = None, timeout: float = 0.35) -> O
                 data += ch
         resp = json.loads(data.decode("utf-8")) if data else None
         dt = int((time.time() - t0)*1000)
-        # print(f"[<-IPC] {resp} ({dt} ms)")
+        print(f"[<-IPC] {resp} ({dt} ms)")
         return resp
     except Exception as e:
         dt = int((time.time() - t0)*1000)

@@ -123,7 +123,7 @@ def find_closest_walkable_tile(goal, walkable_tiles, search_radius=50):
 
 
 def astar_pathfinding(start, goal, walkable_tiles, max_iterations=20000):
-    """Find path using A* algorithm with optimizations."""
+    """Find path using A* algorithm with optimizations and path consistency."""
     print(f"[DEBUG] Finding path from {start} to {goal}")
     print(f"[DEBUG] Walkable tiles: {len(walkable_tiles)}")
     
@@ -146,6 +146,7 @@ def astar_pathfinding(start, goal, walkable_tiles, max_iterations=20000):
         return [start, goal]
     
     # Priority queue: (f_score, tie_breaker, position)
+    # Use deterministic tie-breaking for path consistency
     tie_breaker = 0
     open_set = [(0, tie_breaker, start)]
     came_from = {}
@@ -156,6 +157,29 @@ def astar_pathfinding(start, goal, walkable_tiles, max_iterations=20000):
     
     iterations = 0
     max_queue_size = 1000  # Limit queue size for performance
+    
+    # Path consistency: prefer paths that go in a consistent direction
+    def get_direction_consistency_score(pos):
+        """Calculate a score based on how consistent the path direction is."""
+        if pos == start:
+            return 0
+        
+        # Calculate direction from start to current position
+        dx = pos[0] - start[0]
+        dy = pos[1] - start[1]
+        
+        # Calculate direction from current position to goal
+        gx = goal[0] - pos[0]
+        gy = goal[1] - pos[1]
+        
+        # Dot product to measure direction consistency
+        if dx != 0 or dy != 0:
+            dot_product = dx * gx + dy * gy
+            start_length = (dx**2 + dy**2)**0.5
+            goal_length = (gx**2 + gy**2)**0.5
+            if start_length > 0 and goal_length > 0:
+                return (dot_product / (start_length * goal_length)) * 2  # Small bonus for consistency
+        return 0
     
     while open_set and iterations < max_iterations:
         iterations += 1
@@ -186,8 +210,8 @@ def astar_pathfinding(start, goal, walkable_tiles, max_iterations=20000):
             print(f"[DEBUG] Path found with {len(path)} waypoints after {iterations} iterations")
             return path
         
-        # Check if we're close enough to goal (within 5 tiles)
-        if abs(current[0] - goal[0]) + abs(current[1] - goal[1]) <= 5:
+        # Check if we're close enough to goal (within 2 tiles)
+        if abs(current[0] - goal[0]) + abs(current[1] - goal[1]) <= 2:
             # Direct path to goal
             path = []
             temp_current = current
@@ -214,12 +238,17 @@ def astar_pathfinding(start, goal, walkable_tiles, max_iterations=20000):
             if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
                 came_from[neighbor] = current
                 g_score[neighbor] = tentative_g_score
-                f_score[neighbor] = tentative_g_score + heuristic(neighbor, goal)
+                
+                # Use direction consistency to break ties and prefer consistent paths
+                direction_bonus = get_direction_consistency_score(neighbor)
+                f_score[neighbor] = tentative_g_score + heuristic(neighbor, goal) - direction_bonus
                 
                 # Only add to open set if not already there
                 if neighbor not in in_open_set:
                     tie_breaker += 1
-                    heapq.heappush(open_set, (f_score[neighbor], tie_breaker, neighbor))
+                    # Use deterministic tie-breaking based on position for consistency
+                    position_tie_breaker = neighbor[0] * 1000 + neighbor[1]
+                    heapq.heappush(open_set, (f_score[neighbor], position_tie_breaker, neighbor))
                     in_open_set.add(neighbor)
     
     if iterations >= max_iterations:

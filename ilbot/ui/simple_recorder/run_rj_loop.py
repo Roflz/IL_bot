@@ -7,6 +7,7 @@ import time
 import argparse
 import sys
 from pathlib import Path
+from datetime import datetime, timedelta
 
 from ilbot.ui.simple_recorder.helpers.context import set_payload, set_ui, get_payload
 from ilbot.ui.simple_recorder.services.ipc_client import RuneLiteIPC
@@ -18,6 +19,7 @@ from ilbot.ui.simple_recorder.plans.goblin_diplomacy import GoblinDiplomacyPlan
 from ilbot.ui.simple_recorder.plans.tutorial_island import TutorialIslandPlan
 from ilbot.ui.simple_recorder.plans.ge_trade import GeTradePlan
 from ilbot.ui.simple_recorder.plans.falador_cows import FaladorCowsPlan
+from ilbot.ui.simple_recorder.plans.woodcutting import WoodcuttingPlan
 
 # Plan registry - add new plans here
 AVAILABLE_PLANS = {
@@ -26,6 +28,7 @@ AVAILABLE_PLANS = {
     "tutorial_island": TutorialIslandPlan,
     "ge_trade": GeTradePlan,
     "falador_cows": FaladorCowsPlan,
+    "woodcutting": WoodcuttingPlan,
     # Add more plans here as you create them
     # "cook_assistant": CookAssistantPlan,
     # "sheep_shearer": SheepShearerPlan,
@@ -211,7 +214,10 @@ class UIShim:
             if key:
                 try:
                     self.ipc.focus()
-                    self.ipc.key_hold(key, dur)
+                    # Use key press/release for better control
+                    self.ipc.key_press(key)
+                    time.sleep(dur / 1000.0)  # Convert ms to seconds
+                    self.ipc.key_release(key)
                 except Exception as e:
                     self.debug(f"[IPC] key-hold error: {e}")
             return
@@ -400,6 +406,12 @@ Examples:
         default=120, 
         help="Loop interval in milliseconds (default: 120)"
     )
+    parser.add_argument(
+        "--max-runtime", 
+        type=int, 
+        default=120, 
+        help="Maximum runtime in minutes before auto-stop (default: 120 minutes = 2 hours)"
+    )
     
     args = parser.parse_args()
     
@@ -442,9 +454,21 @@ Examples:
     ui.debug(f"Session dir: {args.session_dir}")
     ui.debug(f"IPC port: {args.port}")
     ui.debug(f"Canvas offset: {canvas_offset}")
+    ui.debug(f"Max runtime: {args.max_runtime} minutes")
+    
+    # Set up auto-stop timer
+    start_time = datetime.now()
+    end_time = start_time + timedelta(minutes=args.max_runtime)
+    ui.debug(f"Auto-stop scheduled for: {end_time.strftime('%H:%M:%S')}")
     
     try:
         while True:
+            # Check if we've exceeded the maximum runtime
+            current_time = datetime.now()
+            if current_time >= end_time:
+                runtime_minutes = (current_time - start_time).total_seconds() / 60
+                ui.debug(f"Maximum runtime of {args.max_runtime} minutes reached ({runtime_minutes:.1f} minutes elapsed). Stopping...")
+                break
             # Always refresh payload for this tick
             payload = ui.latest_payload()
             set_payload(payload)
@@ -453,7 +477,10 @@ Examples:
             try:
                 delay_ms = plan.loop(ui, payload)
             except Exception as e:
+                import traceback
                 ui.debug(f"[PLAN] error in loop: {e}")
+                ui.debug(f"[PLAN] error type: {type(e).__name__}")
+                ui.debug(f"[PLAN] traceback: {traceback.format_exc()}")
                 delay_ms = getattr(plan, "loop_interval_ms", args.interval)
             
             # Optional: log current phase
@@ -472,10 +499,21 @@ Examples:
             
             time.sleep(delay_ms / 1000.0)
     except KeyboardInterrupt:
+        import traceback
         ui.debug("Stopped by user.")
+        ui.debug("Interrupted at:")
+        ui.debug(f"Main thread traceback: {traceback.format_exc()}")
     except Exception as e:
+        import traceback
         ui.debug(f"Fatal error: {e}")
+        ui.debug(f"Fatal error type: {type(e).__name__}")
+        ui.debug(f"Fatal error traceback: {traceback.format_exc()}")
         sys.exit(1)
+    finally:
+        # Show final runtime statistics
+        final_time = datetime.now()
+        total_runtime = (final_time - start_time).total_seconds() / 60
+        ui.debug(f"Script completed. Total runtime: {total_runtime:.1f} minutes")
 
 
 if __name__ == "__main__":

@@ -6,66 +6,7 @@ import time
 from ..helpers.context import get_payload, get_ui
 from ..helpers.ipc import ipc_send
 from ..helpers.rects import unwrap_rect, rect_center_xy
-from .camera_integration import aim_midtop_at_world_iterative
-
-
-def _wait_for_camera_movement_complete(payload: dict, max_wait_ms: int = 2000, check_interval_ms: int = 50) -> None:
-    """
-    Wait for camera movement to complete by checking if camera values are stable.
-    
-    Args:
-        payload: Game payload
-        max_wait_ms: Maximum time to wait for camera movement to complete
-        check_interval_ms: Interval between camera value checks
-    """
-    print(f"[CLICK_WITH_CAMERA] Waiting for camera movement to complete (max {max_wait_ms}ms)...")
-    
-    start_time = time.time()
-    previous_scale = None
-    previous_pitch = None
-    previous_yaw = None
-    stable_count = 0
-    required_stable_checks = 3  # Need 3 consecutive stable readings
-    
-    while (time.time() - start_time) * 1000 < max_wait_ms:
-        # Get current camera values
-        camera_resp = ipc_send({"cmd": "get_camera"}, payload)
-        if camera_resp and camera_resp.get("ok"):
-            camera_data = camera_resp.get("camera", {})
-            current_scale = camera_data.get("scale")
-            current_pitch = camera_data.get("pitch")
-            current_yaw = camera_data.get("yaw")
-            
-            # Check if values are different from previous
-            if (previous_scale is not None and 
-                previous_pitch is not None and 
-                previous_yaw is not None):
-                
-                scale_changed = abs(current_scale - previous_scale) > 0.001
-                pitch_changed = abs(current_pitch - previous_pitch) > 0.001
-                yaw_changed = abs(current_yaw - previous_yaw) > 0.001
-                
-                if scale_changed or pitch_changed or yaw_changed:
-                    # Camera is still moving
-                    stable_count = 0
-                    print(f"[CLICK_WITH_CAMERA] Camera still moving: scale={current_scale:.3f}, pitch={current_pitch:.3f}, yaw={current_yaw:.3f}")
-                else:
-                    # Camera values are stable
-                    stable_count += 1
-                    print(f"[CLICK_WITH_CAMERA] Camera stable check {stable_count}/{required_stable_checks}")
-                    
-                    if stable_count >= required_stable_checks:
-                        print(f"[CLICK_WITH_CAMERA] Camera movement completed after {int((time.time() - start_time) * 1000)}ms")
-                        return
-            
-            # Update previous values
-            previous_scale = current_scale
-            previous_pitch = current_pitch
-            previous_yaw = current_yaw
-        
-        time.sleep(check_interval_ms / 1000.0)
-    
-    print(f"[CLICK_WITH_CAMERA] Camera movement wait timed out after {max_wait_ms}ms")
+from ..services.camera_integration import aim_midtop_at_world
 
 
 def click_object_with_camera(
@@ -79,18 +20,6 @@ def click_object_with_camera(
 ) -> dict | None:
     """
     Click an object with camera movement and fresh coordinate recalculation.
-    
-    Args:
-        object_name: Name of the object to click
-        action: Specific action to perform (optional)
-        action_index: Index of the action in context menu (optional)
-        world_coords: World coordinates of the object
-        ui: UI instance
-        payload: Game payload
-        aim_ms: Camera movement time in ms
-        
-    Returns:
-        UI dispatch result or None if failed
     """
     if payload is None:
         payload = get_payload()
@@ -101,15 +30,11 @@ def click_object_with_camera(
         print(f"[CLICK_WITH_CAMERA] No world coordinates provided for {object_name}")
         return None
     
-    # STEP 1: Move camera to aim at object (NO CLICK YET)
+    # STEP 1: Move camera to aim at object
     print(f"[CLICK_WITH_CAMERA] Moving camera to aim at {object_name} at world coords ({world_coords['x']}, {world_coords['y']})")
-    aim_midtop_at_world_iterative(world_coords['x'], world_coords['y'], max_ms=aim_ms, payload=payload)
+    aim_midtop_at_world(world_coords['x'], world_coords['y'], max_ms=aim_ms, payload=payload)
     
-    # Wait for camera movement to complete by checking if camera values are stable
-    print(f"[CLICK_WITH_CAMERA] Waiting for camera movement to complete...")
-    _wait_for_camera_movement_complete(payload)
-    
-    # STEP 2: After camera movement, get FRESH coordinates using OPTIMIZED IPC command
+    # STEP 2: After camera movement, get FRESH coordinates
     print(f"[CLICK_WITH_CAMERA] Camera movement completed, getting fresh object coordinates")
     fresh_payload = get_payload()
     obj_resp = ipc_send({"cmd": "find_object", "name": object_name, "types": ["GAME"]}, fresh_payload)
@@ -124,7 +49,7 @@ def click_object_with_camera(
         print(f"[CLICK_WITH_CAMERA] Could not find {object_name} after camera movement")
         return None
     
-    # Get FRESH coordinates using SAME logic as before
+    # Get FRESH coordinates
     rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
     obj_name = target.get("name") or object_name
     
@@ -142,7 +67,7 @@ def click_object_with_camera(
     
     print(f"[CLICK_WITH_CAMERA] Fresh coordinates after camera movement: ({cx}, {cy})")
     
-    # STEP 3: Click with FRESH coordinates (no camera movement)
+    # STEP 3: Click with FRESH coordinates
     from ..actions.runtime import emit
     
     if not action or action_index is None or action_index == 0:
@@ -186,18 +111,6 @@ def click_npc_with_camera(
 ) -> dict | None:
     """
     Click an NPC with camera movement and fresh coordinate recalculation.
-    
-    Args:
-        npc_name: Name of the NPC to click
-        action: Specific action to perform (optional)
-        action_index: Index of the action in context menu (optional)
-        world_coords: World coordinates of the NPC
-        ui: UI instance
-        payload: Game payload
-        aim_ms: Camera movement time in ms
-        
-    Returns:
-        UI dispatch result or None if failed
     """
     if payload is None:
         payload = get_payload()
@@ -208,15 +121,11 @@ def click_npc_with_camera(
         print(f"[CLICK_WITH_CAMERA] No world coordinates provided for {npc_name}")
         return None
     
-    # STEP 1: Move camera to aim at NPC (NO CLICK YET)
+    # STEP 1: Move camera to aim at NPC
     print(f"[CLICK_WITH_CAMERA] Moving camera to aim at {npc_name} at world coords ({world_coords['x']}, {world_coords['y']})")
-    aim_midtop_at_world_iterative(world_coords['x'], world_coords['y'], max_ms=aim_ms, payload=payload)
+    aim_midtop_at_world(world_coords['x'], world_coords['y'], max_ms=aim_ms, payload=payload)
     
-    # Wait for camera movement to complete by checking if camera values are stable
-    print(f"[CLICK_WITH_CAMERA] Waiting for camera movement to complete...")
-    _wait_for_camera_movement_complete(payload)
-    
-    # STEP 2: After camera movement, get FRESH coordinates using OPTIMIZED IPC command
+    # STEP 2: After camera movement, get FRESH coordinates
     print(f"[CLICK_WITH_CAMERA] Camera movement completed, getting fresh NPC coordinates")
     fresh_payload = get_payload()
     npc_resp = ipc_send({"cmd": "find_npc", "name": npc_name}, fresh_payload)
@@ -231,7 +140,7 @@ def click_npc_with_camera(
         print(f"[CLICK_WITH_CAMERA] Could not find {npc_name} after camera movement")
         return None
     
-    # Get FRESH coordinates using SAME logic as before
+    # Get FRESH coordinates
     rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
     npc_name_fresh = target.get("name") or npc_name
     
@@ -249,7 +158,7 @@ def click_npc_with_camera(
     
     print(f"[CLICK_WITH_CAMERA] Fresh coordinates after camera movement: ({cx}, {cy})")
     
-    # STEP 3: Click with FRESH coordinates (no camera movement)
+    # STEP 3: Click with FRESH coordinates
     from ..actions.runtime import emit
     
     if not action or action_index is None or action_index == 0:
@@ -291,16 +200,6 @@ def click_ground_with_camera(
 ) -> dict | None:
     """
     Click ground with camera movement and fresh coordinate recalculation.
-    
-    Args:
-        world_coords: World coordinates of the ground click
-        description: Description of the movement
-        ui: UI instance
-        payload: Game payload
-        aim_ms: Camera movement time in ms
-        
-    Returns:
-        UI dispatch result or None if failed
     """
     if payload is None:
         payload = get_payload()
@@ -311,15 +210,11 @@ def click_ground_with_camera(
         print(f"[CLICK_WITH_CAMERA] No world coordinates provided for ground click")
         return None
     
-    # STEP 1: Move camera to aim at ground point (NO CLICK YET)
+    # STEP 1: Move camera to aim at ground point
     print(f"[CLICK_WITH_CAMERA] Moving camera to aim at ground at world coords ({world_coords['x']}, {world_coords['y']})")
-    aim_midtop_at_world_iterative(world_coords['x'], world_coords['y'], max_ms=aim_ms, payload=payload)
+    aim_midtop_at_world(world_coords['x'], world_coords['y'], max_ms=aim_ms, payload=payload)
     
-    # Wait for camera movement to complete by checking if camera values are stable
-    print(f"[CLICK_WITH_CAMERA] Waiting for camera movement to complete...")
-    _wait_for_camera_movement_complete(payload)
-    
-    # STEP 2: After camera movement, get FRESH coordinates using SAME IPC command
+    # STEP 2: After camera movement, get FRESH coordinates
     print(f"[CLICK_WITH_CAMERA] Camera movement completed, getting fresh ground coordinates")
     fresh_payload = get_payload()
     
@@ -338,7 +233,7 @@ def click_ground_with_camera(
     
     print(f"[CLICK_WITH_CAMERA] Fresh coordinates after camera movement: ({cx}, {cy})")
     
-    # STEP 3: Click with FRESH coordinates (no camera movement)
+    # STEP 3: Click with FRESH coordinates
     from ..actions.runtime import emit
     
     step = emit({

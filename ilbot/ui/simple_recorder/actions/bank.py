@@ -216,13 +216,13 @@ def deposit_inventory(payload: dict | None = None, ui=None) -> dict | None:
     rect = deposit_all_button_bounds(payload)
     if not rect:
         return None
-    step = emit({
+    step = {
         "action": "bank-deposit-inv",
         "click": {"type": "rect-center"},
         "target": {"domain": "bank-widget", "name": "Deposit Inventory", "bounds": rect},
         "postconditions": [],
-    })
-    return dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)
+    }
+    return ui.dispatch(step)
 
 
 def withdraw_item(
@@ -383,13 +383,13 @@ def close_bank(ui=None) -> dict | None:
     if ui is None:
         ui = get_ui()
 
-    step = emit({
+    step = {
         "action": "close-bank",
         "click": {"type": "key", "key": "esc"},
         "target": {"domain": "bank", "name": "Close"},
         "postconditions": ["bankOpen == false"],
-    })
-    return dispatch_with_camera(step, ui=ui, payload=get_payload(), aim_ms=420)
+    }
+    return ui.dispatch(step)
 
 def toggle_note_mode(payload: dict | None = None, ui=None) -> dict | None:
     """Toggle bank note mode (withdraw as note/withdraw as item)"""
@@ -516,9 +516,9 @@ def _try_action(item_name: str, action: str, bounds: dict, canvas: dict, payload
     # Create context click step
     step = emit({
         "action": "bank-inventory-interact",
+        "option": action,
         "click": {
             "type": "context-select",
-            "option": action,
             "target": item_name.lower(),
             "x": int(canvas["x"]),
             "y": int(canvas["y"]),

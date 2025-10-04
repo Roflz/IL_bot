@@ -1333,8 +1333,10 @@ class SimpleRecorderWindow(ttk.Frame):
                 self._debug(f"[DBG] key-hold → {key} for {dur}ms")
 
                 try:
-
-                    self.ipc.key_hold(key, dur)
+                    # Use key press/release for better control
+                    self.ipc.key_press(key)
+                    time.sleep(dur / 1000.0)  # Convert ms to seconds
+                    self.ipc.key_release(key)
 
                 except Exception as e:
 
@@ -2313,11 +2315,7 @@ class SimpleRecorderWindow(ttk.Frame):
         True  -> target within buffered window; caller may click this tick
         False -> we issued a camera input this tick; caller should SKIP click
 
-        Rules:
-          - If y is above the TOP buffer -> pitch DOWN (key 'DOWN')
-          - Else if outside X buffer -> yaw (LEFT=clockwise, RIGHT=counter-clockwise)
-          - Else if y is below the BOTTOM buffer -> yaw toward it based on x
-          - Else inside buffered window -> allow click
+        Uses continuous checking to ensure camera movement is effective.
         """
         try:
             tx, ty = int(target_xy[0]), int(target_xy[1])
@@ -2336,6 +2334,11 @@ class SimpleRecorderWindow(ttk.Frame):
         by_top = buf_y_top
         by_bot = max(0, h - buf_y_bot)
 
+        # Check if target is already in buffered window
+        if (bx0 <= tx <= bx1) and (by_top <= ty <= by_bot):
+            return True  # inside buffered window
+
+        # Determine what adjustment is needed
         key = None
         reason = ""
 
@@ -2357,25 +2360,43 @@ class SimpleRecorderWindow(ttk.Frame):
             key = "RIGHT" if tx < (w // 2) else "LEFT"
             reason = f"below bottom-buffer {by_bot} → yaw toward target (x={tx})"
 
-        else:
-            return True  # inside buffered window
+        if not key:
+            return True
 
-        self._debug(f"[CAM] guard: target ({tx},{ty}) outside → {reason} for {hold_ms}ms")
+        self._debug(f"[CAM] guard: target ({tx},{ty}) outside → {reason}")
 
-        # unified send
+        # Use continuous checking for camera movement
         if not self._ensure_ipc():
             self._debug("[CAM] guard: IPC not ready; skipping camera input")
             return False
-        pong = self.ipc._send({"cmd": "ping"})
-        if not (isinstance(pong, dict) and pong.get("ok")):
-            self._debug(f"[CAM] guard: ping failed @ {getattr(self.ipc, 'port', None)}: {pong}")
-            return False
+
+        # Press the key and hold until target is in buffered window
         try:
             self.ipc.focus()
-            self.ipc.key_hold(key, int(hold_ms))
-            time.sleep(max(0.0, (hold_ms + 60) / 1000.0))
+            self.ipc.key_press(key)
+            
+            # Continuous checking with timeout
+            max_aim_time = 2.0  # Maximum 2 seconds for camera adjustment
+            check_interval = 0.05  # Check every 50ms
+            start_time = time.time()
+
+            while time.time() - start_time < max_aim_time:
+                # Check if target is now in buffered window
+                if (bx0 <= tx <= bx1) and (by_top <= ty <= by_bot):
+                    self._debug("[CAM] guard: target now in buffered window")
+                    return True
+
+                # Wait before next check
+                time.sleep(check_interval)
+
         except Exception as e:
-            self._debug(f"[CAM] guard: key-hold error: {type(e).__name__}: {e}")
+            self._debug(f"[CAM] guard: key-press error: {type(e).__name__}: {e}")
+        finally:
+            # Always release the key
+            try:
+                self.ipc.key_release(key)
+            except Exception as e:
+                self._debug(f"[CAM] guard: key-release error: {type(e).__name__}: {e}")
 
         return False
 
@@ -2478,7 +2499,10 @@ class SimpleRecorderWindow(ttk.Frame):
             if key:
                 if self._ensure_ipc():
                     try:
-                        self.ipc.key_hold(key, dur)
+                        # Use key press/release for better control
+                        self.ipc.key_press(key)
+                        time.sleep(dur / 1000.0)  # Convert ms to seconds
+                        self.ipc.key_release(key)
                     except Exception as e:
                         self._debug(f"[ERR] key-hold IPC failed: {e}")
             return

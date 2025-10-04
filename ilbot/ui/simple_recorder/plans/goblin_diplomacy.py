@@ -105,7 +105,7 @@ class GoblinDiplomacyPlan(Plan):
                         for item in required_items:
                             if item == "Goblin mail":
                                 # Need 3 goblin mail
-                                if not inv.has_item(item, min_qty=3):
+                                if not bank.inv_has(item, min_qty=3):
                                     has_all_required = False
                                     break
                             else:
@@ -115,9 +115,9 @@ class GoblinDiplomacyPlan(Plan):
                         
                         if has_all_required:
                             bank.close_bank()
-                            if not wait_until(bank.is_closed, min_wait_ms=600, max_wait_ms=3000):
+                            if wait_until(lambda: bank.is_closed(), min_wait_ms=600, max_wait_ms=3000):
+                                self.set_phase("MAKE_ARMOURS", ui)
                                 return
-                            self.set_phase("MAKE_ARMOURS", ui)
                             return
                         else:
                             # Items not properly withdrawn, try again next tick
@@ -143,6 +143,9 @@ class GoblinDiplomacyPlan(Plan):
                         return
 
             case "BUY_QUEST_ITEMS_FROM_GE":
+                if not trav.in_area("GE"):
+                    trav.go_to("GE")
+                    return
                 # Define required items
                 required_items = ["Blue dye", "Orange dye", "Goblin mail"]
                 
@@ -198,7 +201,7 @@ class GoblinDiplomacyPlan(Plan):
                     current_goblin_mail = bank.get_item_count("Goblin mail")
                     needed_goblin_mail = max(0, 3 - current_goblin_mail)
                     if needed_goblin_mail > 0:
-                        items_to_buy["Goblin mail"] = (needed_goblin_mail, 5)
+                        items_to_buy["Goblin mail"] = (needed_goblin_mail, 10)
                     
                     # Save items_to_buy to state for future loops
                     self.state["items_to_buy"] = items_to_buy

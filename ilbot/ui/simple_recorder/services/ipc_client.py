@@ -64,6 +64,12 @@ class RuneLiteIPC:
 
     def key_hold(self, key: str, ms: int = 180):
         return self._send({"cmd": "keyHold", "key": str(key), "ms": int(ms)})
+    
+    def key_press(self, key: str):
+        return self._send({"cmd": "keyPress", "key": str(key)})
+    
+    def key_release(self, key: str):
+        return self._send({"cmd": "keyRelease", "key": str(key)})
 
     def scroll(self, amount: int) -> dict:
         """

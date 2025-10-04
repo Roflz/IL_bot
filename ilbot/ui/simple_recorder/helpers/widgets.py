@@ -324,7 +324,6 @@ def widget_exists(widget_id: int, payload: dict = None) -> bool:
             # Return true only if widget exists AND is visible
             return response.get("exists", False) and response.get("visible", False)
         else:
-            print(f"[ERROR] IPC widget existence check failed: {response.get('err', 'unknown error')}")
             return False
             
     except Exception as e:
