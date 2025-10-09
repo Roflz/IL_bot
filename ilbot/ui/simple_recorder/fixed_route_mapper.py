@@ -85,6 +85,22 @@ def save_collision_data(data, cache_dir=""):
         try:
             with open(cache_file, 'r') as f:
                 existing_data = json.load(f)
+            
+            # Fix existing door data for special walkable wall IDs
+            collision_data = existing_data.get("collision_data", {})
+            fixed_doors = 0
+            for key, tile in collision_data.items():
+                if tile.get("door") and tile["door"].get("id") in [11787, 11786, 23751, 23752, 23750]:
+                    if not tile["door"].get("passable", True):
+                        tile["door"]["passable"] = True
+                        fixed_doors += 1
+            
+            if fixed_doors > 0:
+                print(f"[DOOR_FIX] Fixed {fixed_doors} existing door entries to be passable")
+                # Save the fixed data back
+                with open(cache_file, 'w') as f:
+                    json.dump(existing_data, f, indent=2)
+                    
         except Exception as e:
             print(f"[WARNING] Could not load existing cache: {e}")
     
@@ -97,7 +113,17 @@ def save_collision_data(data, cache_dir=""):
     for tile in data.get("collisionData", []):
         key = f"{tile['x']},{tile['y']},{tile['p']}"
         if key not in collision_data:
-            collision_data[key] = tile
+            # Check if this tile has a door with special walkable wall IDs and make it passable
+            if tile.get("door") and tile["door"].get("id") in [11787, 11786, 23751, 23752, 23750]:
+                # Create a copy of the tile and modify the door to be passable
+                modified_tile = tile.copy()
+                if "door" in modified_tile:
+                    modified_tile["door"] = modified_tile["door"].copy()
+                    modified_tile["door"]["passable"] = True
+                collision_data[key] = modified_tile
+                print(f"  [DOOR_FIX] Made door ID {modified_tile['door']['id']} at {key} passable")
+            else:
+                collision_data[key] = tile
             new_tiles += 1
     
     # Only save if there are new tiles

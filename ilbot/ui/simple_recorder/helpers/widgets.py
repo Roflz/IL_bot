@@ -1,14 +1,18 @@
-from ilbot.ui.simple_recorder.helpers.context import get_payload
 from ilbot.ui.simple_recorder.helpers.rects import unwrap_rect, rect_center_xy
+from ilbot.ui.simple_recorder.helpers.runtime_utils import ipc
 
 
-def craft_widget_rect(payload: dict, key: str) -> dict | None:
-    w = (payload.get("crafting_widgets", {}) or {}).get(key)
+def craft_widget_rect(key: str) -> dict | None:
+    from .runtime_utils import ipc
+    crafting_widgets_data = ipc.get_crafting_widgets()
+    w = crafting_widgets_data.get(key)
     return unwrap_rect((w or {}).get("bounds") if isinstance(w, dict) else None)
 
-def bank_widget_rect(payload: dict, key: str) -> dict | None:
+def bank_widget_rect(key: str) -> dict | None:
     """Return screen-rect for a bank widget exported under data.bank_widgets[key]."""
-    w = ((payload.get("bank_widgets") or {}).get(key) or {})
+    from .runtime_utils import ipc
+    bank_widgets_data = ipc.get_bank_widgets()
+    w = bank_widgets_data.get(key) or {}
     b = (w.get("bounds") if isinstance(w, dict) else None)
     if isinstance(b, dict) and all(k in b for k in ("x","y","width","height")):
         return b
@@ -18,124 +22,64 @@ def rect_center_from_widget(w: dict | None) -> tuple[int | None, int | None]:
     rect = unwrap_rect((w or {}).get("bounds"))
     return rect_center_xy(rect)
 
-def get_widget_text(widget_id: int, payload: dict = None) -> str | None:
+def get_widget_text(widget_id: int) -> str | None:
     """Get text content from a widget by its ID."""
-    if payload is None:
-        payload = get_payload() or {}
+    from .runtime_utils import ipc
+    widget_data = ipc.send({"cmd": "get_widget_info", "widget_id": widget_id}) or {}
     
-    # Try to find the widget in various possible locations in the payload
-    # This is a generic implementation that looks for widgets with the given ID
-    
-    # Check if there's a widgets section
-    widgets = payload.get("widgets", {})
-    if isinstance(widgets, dict):
-        widget = widgets.get(str(widget_id))
-        if isinstance(widget, dict):
-            return widget.get("text")
-    
-    # Check if there's a tutorial section with widgets
-    tutorial = payload.get("tutorial", {})
-    if isinstance(tutorial, dict):
-        # Look for widgets in tutorial data
-        for key, value in tutorial.items():
-            if isinstance(value, dict) and value.get("id") == widget_id:
-                return value.get("text")
-    
-    # Check other possible widget locations
-    for section_name in ["ui_widgets", "game_widgets", "interface_widgets"]:
-        section = payload.get(section_name, {})
-        if isinstance(section, dict):
-            widget = section.get(str(widget_id))
-            if isinstance(widget, dict):
-                return widget.get("text")
+    # Get widget text from the widget data
+    if widget_data and widget_data.get("ok"):
+        data = widget_data.get("data", {})
+        return data.get("text")
     
     return None
 
-def get_tutorial_set_name(payload: dict = None) -> dict | None:
+def get_tutorial_set_name() -> dict | None:
     """Get the tutorial SET_NAME widget."""
-    if payload is None:
-        payload = get_payload() or {}
+    from .runtime_utils import ipc
+    tutorial_data = ipc.send({"cmd": "get_tutorial"}) or {}
     
-    tutorial = payload.get("tutorial", {})
-    if isinstance(tutorial, dict):
-        return tutorial.get("setName")
+    if tutorial_data and tutorial_data.get("ok"):
+        return tutorial_data.get("setName")
     
     return None
 
-def get_tutorial_lookup_name(payload: dict = None) -> dict | None:
+def get_tutorial_lookup_name() -> dict | None:
     """Get the tutorial LOOK_UP_NAME widget."""
-    if payload is None:
-        payload = get_payload() or {}
+    from .runtime_utils import ipc
+    tutorial_data = ipc.send({"cmd": "get_tutorial"}) or {}
     
-    tutorial = payload.get("tutorial", {})
-    if isinstance(tutorial, dict):
-        return tutorial.get("lookupName")
+    if tutorial_data and tutorial_data.get("ok"):
+        return tutorial_data.get("lookupName")
     
     return None
 
-def get_character_design_widget(widget_id: int, payload: dict = None) -> dict | None:
+def get_character_design_widget(widget_id: int) -> dict | None:
     """Get a character design widget by its ID."""
-    if payload is None:
-        payload = get_payload() or {}
+    from .runtime_utils import ipc
+    widget_data = ipc.send({"cmd": "get_widget_info", "widget_id": widget_id}) or {}
     
-    # Check if there's a character_design section
-    character_design = payload.get("character_design", {})
-    if isinstance(character_design, dict):
-        widget = character_design.get(str(widget_id))
-        if isinstance(widget, dict):
-            return widget
-    
-    # Check if there's a player_design section
-    player_design = payload.get("player_design", {})
-    if isinstance(player_design, dict):
-        widget = player_design.get(str(widget_id))
-        if isinstance(widget, dict):
-            return widget
-    
-    # Check if there's a design section
-    design = payload.get("design", {})
-    if isinstance(design, dict):
-        widget = design.get(str(widget_id))
-        if isinstance(widget, dict):
-            return widget
-    
-    # Check other possible widget locations
-    for section_name in ["widgets", "ui_widgets", "game_widgets", "interface_widgets"]:
-        section = payload.get(section_name, {})
-        if isinstance(section, dict):
-            widget = section.get(str(widget_id))
-            if isinstance(widget, dict):
-                return widget
+    # Get widget data from IPC response
+    if widget_data and widget_data.get("ok"):
+        return widget_data.get("data")
     
     return None
 
-def get_character_design_main(payload: dict = None) -> dict | None:
+def get_character_design_main() -> dict | None:
     """Get the main character design widget (PlayerDesign.MAIN)."""
-    return get_character_design_widget(44498948, payload)
+    return get_character_design_widget(44498948)
 
-def get_character_design_widgets(payload: dict = None) -> dict:
+def get_character_design_widgets() -> dict:
     """Get all character design widgets from the payload."""
-    if payload is None:
-        payload = get_payload() or {}
+    from .runtime_utils import ipc
+    character_design_data = ipc.send({"cmd": "get_character_design"}) or {}
     
     widgets = {}
     
-    # Check various possible sections for character design widgets
-    for section_name in ["character_design", "player_design", "design", "widgets", "ui_widgets", "game_widgets", "interface_widgets"]:
-        section = payload.get(section_name, {})
-        if isinstance(section, dict):
-            for key, value in section.items():
-                if isinstance(value, dict) and value.get("id"):
-                    widget_id = value.get("id")
-                    # Check if this is a character design related widget
-                    if (isinstance(widget_id, int) and 
-                        (widget_id >= 44498948 or  # PlayerDesign.MAIN and below
-                         "design" in key.lower() or 
-                         "character" in key.lower() or
-                         "player" in key.lower())):
-                        widgets[str(widget_id)] = value
+    if character_design_data and character_design_data.get("ok"):
+        return character_design_data.get("widgets", {})
     
-    return widgets
+    return {}
 
 # Character Design Widget IDs (PlayerDesign enum values)
 PLAYER_DESIGN_WIDGETS = {
@@ -306,21 +250,15 @@ def get_all_character_design_buttons() -> dict:
         traceback.print_exc()
         return {}
 
-def widget_exists(widget_id: int, payload: dict = None) -> bool:
+def widget_exists(widget_id: int) -> bool:
     """Check if a widget exists AND is visible via real-time IPC lookup by its ID."""
     try:
-        from ..services.ipc_client import RuneLiteIPC
+        from .runtime_utils import ipc
         
-        # Create IPC client
-        ipc = RuneLiteIPC()
+        # Check widget existence using dedicated IPC method
+        response = ipc.widget_exists(int(widget_id))
         
-        # Send widget existence check request
-        response = ipc._send({
-            "cmd": "widget_exists",
-            "widget_id": int(widget_id)
-        })
-        
-        if response.get("ok"):
+        if response and response.get("ok"):
             # Return true only if widget exists AND is visible
             return response.get("exists", False) and response.get("visible", False)
         else:
@@ -330,30 +268,22 @@ def widget_exists(widget_id: int, payload: dict = None) -> bool:
         print(f"[ERROR] Failed to check widget {widget_id} existence: {e}")
         return False
 
-def character_design_widget_exists(widget_name: str, payload: dict = None) -> bool:
+def character_design_widget_exists(widget_name: str) -> bool:
     """Check if a character design widget exists by name via IPC lookup."""
     if widget_name not in PLAYER_DESIGN_WIDGETS:
         return False
     
     widget_id = PLAYER_DESIGN_WIDGETS[widget_name]
-    return widget_exists(widget_id, payload)
+    return widget_exists(widget_id)
 
-def get_widget_info(widget_id: int, payload: dict = None) -> dict | None:
+def get_widget_info(widget_id: int) -> dict | None:
     """Get detailed information about a widget via IPC lookup if it exists."""
-    if not widget_exists(widget_id, payload):
+    if not widget_exists(widget_id):
         return None
     
     try:
-        from ..services.ipc_client import RuneLiteIPC
-        
-        # Create IPC client
-        ipc = RuneLiteIPC()
-        
         # Send widget info request
-        response = ipc._send({
-            "cmd": "get_widget_info",
-            "widget_id": int(widget_id)
-        })
+        response = ipc.get_widget_info(widget_id)
         
         if response.get("ok"):
             widget_data = response.get("widget")
@@ -372,3 +302,30 @@ def get_widget_info(widget_id: int, payload: dict = None) -> dict | None:
     except Exception as e:
         print(f"[ERROR] Failed to get widget {widget_id} info: {e}")
         return None
+
+
+def click_listener_on(widget_id: int) -> bool:
+    """
+    Check if a widget has an active click listener (OnOpListener).
+    
+    Args:
+        widget_id: The widget ID to check
+        
+    Returns:
+        True if the widget has an active click listener, False otherwise
+    """
+    try:
+        # Get widget info
+        response = ipc.get_widget_info(int(widget_id))
+        
+        if response and response.get("ok"):
+            widget_data = response.get("widget")
+            if widget_data:
+                on_op_listener = widget_data.get("onOpListener")
+                # Return True if onOpListener is not None and not empty
+                return on_op_listener is None
+        return False
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to check click listener for widget {widget_id}: {e}")
+        return False

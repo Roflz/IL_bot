@@ -1,7 +1,6 @@
 import time
 from typing import Dict, List, Optional, Tuple, Any
-from .context import get_payload
-from .ipc import ipc_send
+from .runtime_utils import ipc
 
 
 def check_door_traversal(door_x: int, door_y: int, door_p: int, max_time: float = 3.0) -> Dict[str, Any]:
@@ -16,7 +15,6 @@ def check_door_traversal(door_x: int, door_y: int, door_p: int, max_time: float 
         Dictionary with traversal status and tile information
     """
     start_time = time.time()
-    payload = get_payload()
     
     # Define tiles to check: door tile and adjacent tiles
     tiles_to_check = [
@@ -33,12 +31,7 @@ def check_door_traversal(door_x: int, door_y: int, door_p: int, max_time: float 
         
         for i, (x, y, p) in enumerate(tiles_to_check):
             # Get wall object info for this tile
-            resp = ipc_send({
-                "cmd": "door_state",
-                "door_x": x,
-                "door_y": y, 
-                "door_p": p
-            }, payload)
+            resp = ipc.door_state(x, y, p)
             
             if resp and resp.get("ok"):
                 tile_info[f"tile_{i}"] = {

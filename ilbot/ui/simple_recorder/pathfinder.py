@@ -11,6 +11,8 @@ from PIL import Image, ImageDraw
 import sys
 import os
 
+from ilbot.ui.simple_recorder.actions.player import get_player_position
+
 # Removed problematic import
 
 # Add the current directory to the path
@@ -38,9 +40,10 @@ def load_collision_data():
 
 
 def get_walkable_tiles(collision_data):
-    """Convert collision data to a set of walkable coordinates."""
+    """Convert collision data to a set of walkable coordinates with wall orientation handling."""
     walkable = set()
     blocked = set()
+    wall_orientations = {}  # Store wall orientation data for directional blocking
     
     for tile_data in collision_data.values():
         x, y = tile_data['x'], tile_data['y']
@@ -48,14 +51,25 @@ def get_walkable_tiles(collision_data):
         # Check if tile has a door object
         if tile_data.get('door'):
             door_info = tile_data.get('door', {})
+            door_id = door_info.get('id')
             passable = door_info.get('passable', False)
             
+            # Special case: Bank doors and specific walkable walls are always passable
+            if door_id in [11787, 11786, 23751, 23752, 23750]:
+                walkable.add((x, y))
             # Only walkable if the door is passable
-            if passable:
+            elif passable:
                 walkable.add((x, y))
             else:
                 blocked.add((x, y))
-        # For tiles without doors, use walkable flag
+        # Check for wall orientation data
+        elif tile_data.get('wall_orientation'):
+            # Wall tiles WITH orientation data are WALKABLE
+            # The orientation determines which directions are blocked
+            walkable.add((x, y))
+            wall_orientations[(x, y)] = tile_data['wall_orientation']
+            print(f"[DEBUG] Wall tile with orientation at ({x}, {y}): {tile_data['wall_orientation']}")
+        # For tiles without doors or wall orientation, use walkable flag
         elif tile_data.get('walkable', False):
             walkable.add((x, y))
         else:
@@ -75,7 +89,7 @@ def get_walkable_tiles(collision_data):
                 if (x, y) not in walkable and (x, y) not in blocked:
                     walkable.add((x, y))
     
-    return walkable, blocked
+    return walkable, blocked, wall_orientations
 
 
 def heuristic(a, b):
@@ -83,10 +97,13 @@ def heuristic(a, b):
     return ((a[0] - b[0])**2 + (a[1] - b[1])**2)**0.5
 
 
-def get_neighbors(pos, walkable_tiles):
-    """Get walkable neighbors of a position."""
+def get_neighbors(pos, walkable_tiles, wall_orientations=None):
+    """Get walkable neighbors of a position, respecting wall orientation blocking."""
     x, y = pos
     neighbors = []
+    
+    if wall_orientations is None:
+        wall_orientations = {}
     
     # 8-directional movement (including diagonals)
     for dx in [-1, 0, 1]:
@@ -94,11 +111,88 @@ def get_neighbors(pos, walkable_tiles):
             if dx == 0 and dy == 0:
                 continue
             new_pos = (x + dx, y + dy)
+            
             # Only walkable tiles are allowed
             if new_pos in walkable_tiles:
-                neighbors.append(new_pos)
+                # Check wall orientation blocking
+                if not is_movement_blocked(pos, new_pos, wall_orientations):
+                    # For diagonal movement, check corner-cutting prevention
+                    if dx != 0 and dy != 0:  # Diagonal movement
+                        # Check that both adjacent tiles are walkable to prevent corner-cutting
+                        adj1 = (x + dx, y)  # Horizontal adjacent
+                        adj2 = (x, y + dy)  # Vertical adjacent
+                        
+                        if (adj1 in walkable_tiles and adj2 in walkable_tiles and
+                            not is_movement_blocked(pos, adj1, wall_orientations) and
+                            not is_movement_blocked(pos, adj2, wall_orientations)):
+                            neighbors.append(new_pos)
+                        # If either adjacent tile is blocked, skip diagonal movement
+                    else:
+                        # Non-diagonal movement (horizontal/vertical) is allowed if not blocked by walls
+                        neighbors.append(new_pos)
     
     return neighbors
+
+
+def is_movement_blocked(from_pos, to_pos, wall_orientations):
+    """Check if movement from one position to another is blocked by wall orientation."""
+    from_x, from_y = from_pos
+    to_x, to_y = to_pos
+    
+    # Calculate direction of movement
+    dx = to_x - from_x
+    dy = to_y - from_y
+    
+    # Check if the source tile has wall orientation that blocks this direction
+    if from_pos in wall_orientations:
+        orientation = wall_orientations[from_pos]
+        if is_direction_blocked_by_orientation(dx, dy, orientation):
+            print(f"[DEBUG] Movement from {from_pos} to {to_pos} blocked by wall orientation: {orientation}")
+            return True
+    
+    # Check if the destination tile has wall orientation that blocks entry from this direction
+    if to_pos in wall_orientations:
+        orientation = wall_orientations[to_pos]
+        # For entry blocking, we need to check if the wall blocks movement FROM the opposite direction
+        if is_direction_blocked_by_orientation(-dx, -dy, orientation):
+            print(f"[DEBUG] Movement from {from_pos} to {to_pos} blocked by destination wall orientation: {orientation}")
+            return True
+    
+    return False
+
+
+def is_direction_blocked_by_orientation(dx, dy, orientation):
+    """Check if a movement direction is blocked by wall orientation data."""
+    # Wall orientation typically indicates which sides have walls
+    # This is a simplified interpretation - you may need to adjust based on your actual orientation data format
+    
+    # Common wall orientation values and their meanings:
+    # 1 = North wall, 2 = East wall, 4 = South wall, 8 = West wall
+    # Combinations: 3 = North+East, 5 = North+South, etc.
+    
+    if orientation is None:
+        return False
+    
+    # Convert direction to orientation bit
+    direction_bit = 0
+    if dy == -1:  # Moving north
+        direction_bit = 1
+    elif dx == 1:  # Moving east
+        direction_bit = 2
+    elif dy == 1:  # Moving south
+        direction_bit = 4
+    elif dx == -1:  # Moving west
+        direction_bit = 8
+    
+    # Check if the orientation has a wall in this direction
+    if isinstance(orientation, (int, float)):
+        return bool(int(orientation) & direction_bit)
+    elif isinstance(orientation, dict):
+        # Handle dictionary format if orientation is more complex
+        return orientation.get('blocked_directions', 0) & direction_bit
+    else:
+        # Handle other formats as needed
+        return False
 
 
 
@@ -122,10 +216,14 @@ def find_closest_walkable_tile(goal, walkable_tiles, search_radius=50):
     return None
 
 
-def astar_pathfinding(start, goal, walkable_tiles, max_iterations=20000):
-    """Find path using A* algorithm with optimizations and path consistency."""
+def astar_pathfinding(start, goal, walkable_tiles, wall_orientations=None, max_iterations=20000):
+    """Find path using A* algorithm with wall orientation support."""
     print(f"[DEBUG] Finding path from {start} to {goal}")
     print(f"[DEBUG] Walkable tiles: {len(walkable_tiles)}")
+    print(f"[DEBUG] Wall orientations: {len(wall_orientations) if wall_orientations else 0}")
+    
+    if wall_orientations is None:
+        wall_orientations = {}
     
     if start not in walkable_tiles:
         print(f"ERROR: Start position {start} is not walkable")
@@ -224,7 +322,7 @@ def astar_pathfinding(start, goal, walkable_tiles, max_iterations=20000):
             print(f"[DEBUG] Early path found with {len(path)} waypoints after {iterations} iterations")
             return path
         
-        for neighbor in get_neighbors(current, walkable_tiles):
+        for neighbor in get_neighbors(current, walkable_tiles, wall_orientations):
             if neighbor in visited:
                 continue
             
@@ -389,9 +487,12 @@ def draw_path_on_map(image_path, path, collision_data, output_path, start_pos=No
     print(f"[SUCCESS] Path image saved to: {output_path}")
 
 
-def simple_greedy_path(start, goal, walkable_tiles):
+def simple_greedy_path(start, goal, walkable_tiles, wall_orientations=None):
     """Simple greedy pathfinding that tries to get as close as possible to goal."""
     print(f"[DEBUG] Creating greedy path from {start} to {goal}")
+    
+    if wall_orientations is None:
+        wall_orientations = {}
     
     path = [start]
     current = start
@@ -415,8 +516,9 @@ def simple_greedy_path(start, goal, walkable_tiles):
                     
                 next_pos = (current[0] + dx, current[1] + dy)
                 
-                # Check if it's walkable and not visited
-                if next_pos in walkable_tiles and next_pos not in visited:
+                # Check if it's walkable, not visited, and not blocked by walls
+                if (next_pos in walkable_tiles and next_pos not in visited and
+                    not is_movement_blocked(current, next_pos, wall_orientations)):
                     # Calculate distance to goal
                     distance = ((goal[0] - next_pos[0])**2 + (goal[1] - next_pos[1])**2)**0.5
                     
@@ -429,7 +531,7 @@ def simple_greedy_path(start, goal, walkable_tiles):
             print(f"[WARNING] No direct neighbors at {current}, searching for nearby tiles...")
             min_dist = float('inf')
             for tile in walkable_tiles:
-                if tile not in visited:
+                if tile not in visited and not is_movement_blocked(current, tile, wall_orientations):
                     dist = ((current[0] - tile[0])**2 + (current[1] - tile[1])**2)**0.5
                     if dist < min_dist and dist < 10:  # Within 10 tiles
                         min_dist = dist
@@ -504,69 +606,18 @@ def simple_path(start, goal, blocked_tiles):
     print(f"[DEBUG] Simple path created with {len(path)} waypoints")
     return path
 
-
-def get_current_player_position():
-    """Get current player position using IPC."""
-    print("[DEBUG] Getting current player position...")
-    
-    try:
-        # Import the necessary modules
-        from ilbot.ui.simple_recorder.services.ipc_client import RuneLiteIPC
-        from ilbot.ui.simple_recorder.helpers.context import set_payload
-        from ilbot.ui.simple_recorder.actions.player import get_x, get_y
-        
-        # Create IPC connection (try common ports)
-        ipc = None
-        for port in range(17000, 17021):  # Try ports 17000-17020
-            try:
-                print(f"[DEBUG] Trying IPC connection on port {port}...")
-                ipc = RuneLiteIPC(port=port, pre_action_ms=120, timeout_s=0.5)  # Shorter timeout
-                # Test the connection
-                test_response = ipc._send({"cmd": "get_player"})
-                if test_response and test_response.get("ok"):
-                    print(f"[DEBUG] Successfully connected to RuneLite on port {port}")
-                    break
-                else:
-                    ipc = None
-            except Exception as e:
-                # Don't print every failed port to avoid spam
-                if port % 5 == 0:  # Print every 5th port
-                    print(f"[DEBUG] Port {port} failed: {e}")
-                ipc = None
-                continue
-        
-        if not ipc:
-            print("[ERROR] Could not connect to RuneLite on any port")
-            return None
-        
-        # Create a payload with the IPC connection
-        payload = {"__ipc": ipc, "__ipc_port": ipc.port}
-        set_payload(payload)
-        
-        # Get player position using the IPC functions
-        x = get_x(payload)
-        y = get_y(payload)
-        
-        if x is not None and y is not None:
-            position = (x, y)
-            print(f"[DEBUG] Got player position: {position}")
-            return position
-        else:
-            print("[ERROR] Could not get valid player coordinates")
-            return None
-            
-    except Exception as e:
-        print(f"[ERROR] Exception getting player position: {e}")
-        return None
-
-
-def main():
+def main(destination_x=None, destination_y=None):
     """Main pathfinding function."""
-    print("RUNESCAPE PATHFINDER - CURRENT POSITION TO GE")
+    print("RUNESCAPE PATHFINDER - CURRENT POSITION TO DESTINATION")
+    print("=" * 50)
+    print("Now with WALL ORIENTATION support!")
+    print("- Wall tiles WITH orientation data are WALKABLE")
+    print("- Wall tiles WITHOUT orientation data are BLOCKING")
+    print("- Wall orientation determines directional movement restrictions")
     print("=" * 50)
     
     # Get current player position
-    current_pos = get_current_player_position()
+    current_pos = get_player_position()
     if not current_pos:
         print("ERROR: Could not get current player position")
         return False
@@ -576,13 +627,19 @@ def main():
     if not collision_data:
         return False
     
-    # Get walkable tiles (only black and green tiles)
-    walkable_tiles, blocked_tiles = get_walkable_tiles(collision_data)
+    # Get walkable tiles with wall orientation support
+    walkable_tiles, blocked_tiles, wall_orientations = get_walkable_tiles(collision_data)
     print(f"Walkable tiles: {len(walkable_tiles)}")
     print(f"Blocked tiles: {len(blocked_tiles)}")
+    print(f"Wall orientations: {len(wall_orientations)}")
     
-    # GE coordinates from constants
-    GE_TARGET = (3164, 3487)  # GE coordinates
+    # Set destination - use provided coordinates or default to GE
+    if destination_x is not None and destination_y is not None:
+        DESTINATION_TARGET = (destination_x, destination_y)
+        print(f"Using provided destination: {DESTINATION_TARGET}")
+    else:
+        DESTINATION_TARGET = (3164, 3487)  # Default to GE coordinates
+        print(f"Using default destination (GE): {DESTINATION_TARGET}")
     
     # Find closest walkable tile to current position
     current_walkable = []
@@ -591,19 +648,19 @@ def main():
             if (x, y) in walkable_tiles:
                 current_walkable.append((x, y))
     
-    # Find closest walkable tile to GE
-    ge_walkable = []
-    for x in range(3155, 3175):  # Around GE
-        for y in range(3480, 3495):
+    # Find closest walkable tile to destination
+    dest_walkable = []
+    for x in range(DESTINATION_TARGET[0] - 10, DESTINATION_TARGET[0] + 11):  # Search around destination
+        for y in range(DESTINATION_TARGET[1] - 10, DESTINATION_TARGET[1] + 11):
             if (x, y) in walkable_tiles:
-                ge_walkable.append((x, y))
+                dest_walkable.append((x, y))
     
     if not current_walkable:
         print("ERROR: No walkable tiles found near current position")
         return False
     
-    if not ge_walkable:
-        print("ERROR: No walkable tiles found near GE")
+    if not dest_walkable:
+        print("ERROR: No walkable tiles found near destination")
         return False
     
     # Find closest tiles
@@ -618,11 +675,11 @@ def main():
         return closest
     
     start = find_closest(current_pos, current_walkable)
-    goal = find_closest(GE_TARGET, ge_walkable)
+    goal = find_closest(DESTINATION_TARGET, dest_walkable)
     
     print(f"Current position: {current_pos}")
     print(f"Start (closest walkable): {start}")
-    print(f"Goal (GE): {goal}")
+    print(f"Goal (destination): {goal}")
     print()
     
     # Calculate and show pixel coordinates
@@ -638,13 +695,13 @@ def main():
     print(f"Goal pixel coordinates: {goal_pixel}")
     print()
     
-    # Find path using only walkable tiles (black and green)
-    print("Finding path using only walkable tiles (black and green)...")
-    path = astar_pathfinding(start, goal, walkable_tiles)
+    # Find path using walkable tiles with wall orientation support
+    print("Finding path using walkable tiles with wall orientation support...")
+    path = astar_pathfinding(start, goal, walkable_tiles, wall_orientations)
     
     if not path:
         print("A* failed, trying simple greedy pathfinding...")
-        path = simple_greedy_path(start, goal, walkable_tiles)
+        path = simple_greedy_path(start, goal, walkable_tiles, wall_orientations)
     
     if not path:
         print("All pathfinding failed, falling back to straight line...")
@@ -659,14 +716,54 @@ def main():
     input_image = script_dir / "collision_cache" / "detailed_collision_map.png"
     output_image = script_dir / "collision_cache" / "path_current_to_ge.png"
     
-    draw_path_on_map(input_image, path, collision_data, output_image, start_pos=current_pos, goal_pos=GE_TARGET)
+    draw_path_on_map(input_image, path, collision_data, output_image, start_pos=current_pos, goal_pos=DESTINATION_TARGET)
     
     return True
 
 
 if __name__ == "__main__":
+    import sys
+    
+    # Parse command line arguments
+    destination_x = None
+    destination_y = None
+    port = None
+    
+    if len(sys.argv) >= 3:
+        try:
+            destination_x = int(sys.argv[1])
+            destination_y = int(sys.argv[2])
+            print(f"Using command line destination: ({destination_x}, {destination_y})")
+            
+            # Check for port argument
+            if len(sys.argv) >= 4:
+                port = int(sys.argv[3])
+                print(f"Using specified port: {port}")
+        except ValueError:
+            print("ERROR: Invalid coordinates provided. Usage: python pathfinder.py [x] [y] [port]")
+            print("Examples:")
+            print("  python pathfinder.py 3164 3487 17000  (Grand Exchange)")
+            print("  python pathfinder.py 3200 3200 17000  (Lumbridge area - test wall navigation)")
+            print("  python pathfinder.py 3100 3500 17000  (Falador area - test complex walls)")
+            print("  python pathfinder.py 3000 3000 17000  (Edgeville area - test different wall types)")
+            sys.exit(1)
+    elif len(sys.argv) > 1:
+        print("ERROR: Please provide both X and Y coordinates. Usage: python pathfinder.py [x] [y] [port]")
+        print("Examples:")
+        print("  python pathfinder.py 3164 3487 17000  (Grand Exchange)")
+        print("  python pathfinder.py 3200 3200 17000  (Lumbridge area - test wall navigation)")
+        print("  python pathfinder.py 3100 3500 17000  (Falador area - test complex walls)")
+        print("  python pathfinder.py 3000 3000 17000  (Edgeville area - test different wall types)")
+        sys.exit(1)
+    else:
+        print("No destination provided, using default (Grand Exchange)")
+        print("Try these test destinations to see wall orientation differences:")
+        print("  Lumbridge: 3200 3200")
+        print("  Falador: 3100 3500") 
+        print("  Edgeville: 3000 3000")
+    
     try:
-        success = main()
+        success = main(destination_x, destination_y)
         if success:
             print("\n[SUCCESS] Pathfinding completed successfully!")
         else:

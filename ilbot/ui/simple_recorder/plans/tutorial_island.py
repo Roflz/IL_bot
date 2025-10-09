@@ -1,19 +1,18 @@
 # tutorial_island.py
 import time
 import random
+import logging
+from ..helpers.runtime_utils import dispatch
 
 # Action method imports
 import ilbot.ui.simple_recorder.actions.travel as trav
 import ilbot.ui.simple_recorder.actions.tab as tab
 import ilbot.ui.simple_recorder.actions.bank as bank
 import ilbot.ui.simple_recorder.actions.chat as chat
-import ilbot.ui.simple_recorder.actions.combat as combat
-import ilbot.ui.simple_recorder.actions.ge as ge
 import ilbot.ui.simple_recorder.actions.inventory as inventory
 import ilbot.ui.simple_recorder.actions.npc as npc
 import ilbot.ui.simple_recorder.actions.objects as objects
 import ilbot.ui.simple_recorder.actions.player as player
-import ilbot.ui.simple_recorder.actions.timing as timing
 import ilbot.ui.simple_recorder.actions.widgets as widgets
 from ..actions import equipment, spellbook
 
@@ -25,7 +24,6 @@ from ..helpers import quest
 from ..helpers.tab import tab_exists
 from ..helpers.widgets import get_widget_text, rect_center_from_widget, get_character_design_widgets, get_character_design_main, get_character_design_button_realtime, get_all_character_design_buttons, widget_exists, character_design_widget_exists, get_widget_info
 from ..helpers.utils import press_enter, press_backspace, press_esc, press_spacebar, clean_rs
-from ..actions.runtime import emit
 
 class TutorialIslandPlan(Plan):
     id = "TUTORIAL_ISLAND"
@@ -40,12 +38,10 @@ class TutorialIslandPlan(Plan):
         from ilbot.ui.simple_recorder.helpers.camera import setup_camera_optimal
         setup_camera_optimal()
 
-    def compute_phase(self, payload, craft_recent):
-        return self.state.get("phase", "START_TUTORIAL")
 
-    def set_phase(self, phase: str, ui=None, camera_setup: bool = True):
+    def set_phase(self, phase: str, camera_setup: bool = True):
         from ..helpers.phase_utils import set_phase_with_camera
-        return set_phase_with_camera(self, phase, ui, camera_setup)
+        return set_phase_with_camera(self, phase, camera_setup)
 
     def loop(self, ui, payload):
         phase = self.state.get("phase", "START_TUTORIAL")
@@ -73,11 +69,11 @@ class TutorialIslandPlan(Plan):
                         if name_available is True:
                             # Name is available, click SET_NAME button
                             if click_tutorial_set_name(payload, ui):
-                                ui.debug("[TUTORIAL] SET_NAME button clicked, waiting for window to close...")
+                                logging.info("[TUTORIAL] SET_NAME button clicked, waiting for window to close...")
                                 wait_until(lambda: widget_exists(44498948))
                                 return
                             else:
-                                ui.debug("[TUTORIAL] Failed to click SET_NAME button")
+                                logging.info("[TUTORIAL] Failed to click SET_NAME button")
                         else:
                             # No status yet, try initial generated name
                             from ..constants import generate_player_name
@@ -86,16 +82,16 @@ class TutorialIslandPlan(Plan):
                                 type_tutorial_name(initial_name)
                                 # Note: type_tutorial_name already presses Enter
                             if wait_until(lambda: initial_name in get_widget_text(36569100)): # text input box for display name
-                                ui.debug(f"[TUTORIAL] Character name entered: {initial_name}")
+                                logging.info(f"[TUTORIAL] Character name entered: {initial_name}")
                                 # Note: type_tutorial_name already pressed Enter, looking for confirmation...
                                 # Wait for confirmation message or status update
                                 if wait_until(lambda: initial_name in get_widget_text(36569101)):
 
                                     status_text = get_widget_text(36569101) # confirmatino message text
-                                    ui.debug(f"[TUTORIAL] Confirmation message received: {status_text}")
+                                    logging.info(f"[TUTORIAL] Confirmation message received: {status_text}")
                                     
                                     if status_text and "not available" in status_text.lower():
-                                        ui.debug("[TUTORIAL] Name not available, trying new name...")
+                                        logging.info("[TUTORIAL] Name not available, trying new name...")
                                         # Backspace to clear the current name
                                         current_text = get_widget_text(36569100) or ""
                                         # Click on the name input field to focus it before backspacing
@@ -110,7 +106,7 @@ class TutorialIslandPlan(Plan):
                                                     "click": {"type": "point", "x": x, "y": y},
                                                     "target": {"domain": "tutorial", "name": "name_input_focus"}
                                                 })
-                                                ui.dispatch(step)
+                                                dispatch(step)
                                                 time.sleep(0.5)  # Wait for focus
                                         # Now backspace to clear the field
                                         for _ in range(len(current_text)):
@@ -122,15 +118,15 @@ class TutorialIslandPlan(Plan):
                                     elif status_text and "available" in status_text.lower():
                                         return
                                     else:
-                                        ui.debug(f"[TUTORIAL] Unknown status message: {status_text}")
+                                        logging.info(f"[TUTORIAL] Unknown status message: {status_text}")
                                 else:
-                                    ui.debug("[TUTORIAL] No confirmation message found")
+                                    logging.info("[TUTORIAL] No confirmation message found")
                             else:
-                                ui.debug("[TUTORIAL] Failed to enter character name")
+                                logging.info("[TUTORIAL] Failed to enter character name")
                     else:
-                        ui.debug("[TUTORIAL] Name input not visible, waiting...")
+                        logging.info("[TUTORIAL] Name input not visible, waiting...")
                 else:
-                    ui.debug("[TUTORIAL] Tutorial interface not open, waiting...")
+                    logging.info("[TUTORIAL] Tutorial interface not open, waiting...")
                 return
 
             case "CHARACTER_CREATION": #WORKING! RUN WITHOUT BREAKPOINTS
@@ -139,17 +135,18 @@ class TutorialIslandPlan(Plan):
                     return
 
                 # Get all character design buttons via real-time IPC
-                ui.debug("[TUTORIAL] Attempting to get character design buttons...")
+                logging.info("[TUTORIAL] Attempting to get character design buttons...")
                 design_buttons = get_all_character_design_buttons()
-                ui.debug(f"[TUTORIAL] get_all_character_design_buttons() returned: {design_buttons}")
+                logging.info(f"[TUTORIAL] get_all_character_design_buttons() returned: {design_buttons}")
                 
                 if design_buttons:
-                    ui.debug(f"[TUTORIAL] Found {len(design_buttons)} character design buttons via IPC")
+                    logging.info(f"[TUTORIAL] Found {len(design_buttons)} character design buttons via IPC")
                     
                     # Customize character appearance
-                    self.customize_character_appearance(design_buttons, ui)
+                    from ilbot.ui.simple_recorder.actions.character import customize_character_appearance
+                    customize_character_appearance(design_buttons, ui, self.id)
                 else:
-                    ui.debug("[TUTORIAL] No character design buttons found via IPC")
+                    logging.info("[TUTORIAL] No character design buttons found via IPC")
                 
                 # Move to next phase after customization
                 if not wait_until(lambda: not widget_exists(44498948)):
@@ -164,13 +161,13 @@ class TutorialIslandPlan(Plan):
 
                 # Check if we need to click "Click here to continue"
                 if can_click_continue_widget():
-                    ui.debug("[TUTORIAL] Found 'Click here to continue' widget, clicking it...")
+                    logging.info("[TUTORIAL] Found 'Click here to continue' widget, clicking it...")
                     if click_continue_widget():
-                        ui.debug("[TUTORIAL] Successfully clicked continue widget")
+                        logging.info("[TUTORIAL] Successfully clicked continue widget")
                         time.sleep(0.5)  # Wait for dialogue to advance
                         return
                     else:
-                        ui.debug("[TUTORIAL] Failed to click continue widget")
+                        logging.info("[TUTORIAL] Failed to click continue widget")
 
                 if "flashing spanner icon" in chat.get_dialogue_text_raw():
                     if widget_exists(10747945): # settings menu tab
@@ -210,7 +207,7 @@ class TutorialIslandPlan(Plan):
                         if player.make_fire():
                             return
                         else:
-                            ui.debug("[TUTORIAL] Failed to make fire")
+                            logging.info("[TUTORIAL] Failed to make fire")
                             return
                 if "Woodcutting" in chat.get_dialogue_text_raw():
                     if not inventory.has_item("logs"):
@@ -246,7 +243,7 @@ class TutorialIslandPlan(Plan):
                         if player.make_fire():
                             return
                         else:
-                            ui.debug("[TUTORIAL] Failed to make fire")
+                            logging.info("[TUTORIAL] Failed to make fire")
                             return
                     else:
                         # Already firemaking, wait for it to complete
@@ -490,96 +487,6 @@ class TutorialIslandPlan(Plan):
                     return
 
             case "DONE":
-                ui.debug("[TUTORIAL] Tutorial Island completed!")
+                logging.info("[TUTORIAL] Tutorial Island completed!")
                 return
 
-    def customize_character_appearance(self, design_buttons: dict, ui):
-        """Customize character appearance by randomly clicking LEFT/RIGHT buttons."""
-        ui.debug("[TUTORIAL] Starting character customization...")
-        
-        import random
-        
-        # Body part customizations
-        body_parts = ["HEAD", "JAW", "TORSO", "ARMS", "HANDS", "LEGS", "FEET"]
-        for part in body_parts:
-            # Randomly click LEFT or RIGHT 1-10 times for each body part
-            num_clicks = random.randint(1, 10)
-            direction = random.choice(["LEFT", "RIGHT"])
-            button_name = f"{part}_{direction}"
-            
-            if button_name in design_buttons:
-                widget = design_buttons[button_name]
-                ui.debug(f"[TUTORIAL] Clicking {button_name} {num_clicks} times")
-                
-                for click_num in range(num_clicks):
-                    if self.click_character_design_button(widget, button_name, ui):
-                        ui.debug(f"[TUTORIAL] Click {click_num + 1}/{num_clicks} on {part} {direction}")
-                        time.sleep(0.2)  # Wait between clicks
-                    else:
-                        ui.debug(f"[TUTORIAL] Failed to click {part} {direction}")
-                        break
-            else:
-                ui.debug(f"[TUTORIAL] Button {button_name} not found in design_buttons")
-        
-        # Color customizations
-        color_parts = ["HAIR", "TORSO_COL", "LEGS_COL", "FEET_COL", "SKIN"]
-        for part in color_parts:
-            # Randomly click LEFT or RIGHT 1-10 times for each color
-            num_clicks = random.randint(1, 10)
-            direction = random.choice(["LEFT", "RIGHT"])
-            button_name = f"{part}_{direction}"
-            
-            if button_name in design_buttons:
-                widget = design_buttons[button_name]
-                ui.debug(f"[TUTORIAL] Clicking {button_name} {num_clicks} times")
-                
-                for click_num in range(num_clicks):
-                    if self.click_character_design_button(widget, button_name, ui):
-                        ui.debug(f"[TUTORIAL] Click {click_num + 1}/{num_clicks} on {part} color {direction}")
-                        time.sleep(0.2)  # Wait between clicks
-                    else:
-                        ui.debug(f"[TUTORIAL] Failed to click {part} color {direction}")
-                        break
-            else:
-                ui.debug(f"[TUTORIAL] Button {button_name} not found in design_buttons")
-        
-        ui.debug("[TUTORIAL] Character customization completed!")
-        
-        # Click the CONFIRM button to finish character creation
-        confirm_widget = design_buttons.get("WIDGET_44499018")  # PlayerDesign.CONFIRM
-        if confirm_widget:
-            ui.debug("[TUTORIAL] Clicking CONFIRM button...")
-            if self.click_character_design_button(confirm_widget, "CONFIRM", ui):
-                ui.debug("[TUTORIAL] Successfully clicked CONFIRM button")
-                time.sleep(1.0)  # Wait for the interface to close
-            else:
-                ui.debug("[TUTORIAL] Failed to click CONFIRM button")
-        else:
-            ui.debug("[TUTORIAL] CONFIRM button not found in design_buttons")
-
-    def click_character_design_button(self, widget: dict, button_name: str, ui) -> bool:
-        """Click a character design button."""
-        if not widget or not widget.get("visible", False):
-            ui.debug(f"[TUTORIAL] Button {button_name} not visible")
-            return False
-        
-        # Get click coordinates
-        x, y = rect_center_from_widget(widget)
-        if x is None or y is None:
-            ui.debug(f"[TUTORIAL] Could not get coordinates for {button_name}")
-            return False
-        
-        # Click the button
-        step = emit({
-            "action": f"click-{button_name.lower()}",
-            "click": {"type": "point", "x": x, "y": y},
-            "target": {"domain": "character_design", "name": button_name.lower()}
-        })
-        
-        result = ui.dispatch(step)
-        if result is None:
-            ui.debug(f"[TUTORIAL] Failed to click {button_name}")
-            return False
-        
-        ui.debug(f"[TUTORIAL] Successfully clicked {button_name}")
-        return True

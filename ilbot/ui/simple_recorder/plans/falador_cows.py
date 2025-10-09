@@ -21,18 +21,18 @@ from pathlib import Path
 # Add the parent directory to the path for imports
 import sys
 
-from ..actions import bank, inventory, player, combat, equipment, chat
+from ..actions import bank, inventory, player, combat, equipment, chat, travel, ge
+from ..actions.equipment import get_best_weapon_for_level, get_best_armor_for_level, get_best_weapon_for_level_in_bank, \
+    get_best_armor_for_level_in_bank
+from ..actions.ge import check_and_buy_required_items, close_ge
 from ..actions.ground_items import loot
 from ..actions.timing import wait_until
+from ..helpers.bank import near_any_bank
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from ilbot.ui.simple_recorder.actions.travel import go_to, in_area
 from ilbot.ui.simple_recorder.actions.bank import open_bank, deposit_inventory, withdraw_item, withdraw_items
-from ilbot.ui.simple_recorder.actions.inventory import interact, has_item
-from ilbot.ui.simple_recorder.helpers.inventory import inv_count
-from ilbot.ui.simple_recorder.actions.runtime import emit
-from ilbot.ui.simple_recorder.helpers.context import get_payload, get_ui
 from ilbot.ui.simple_recorder.constants import FALADOR_BANK, FALADOR_COWS
 from .base import Plan
 
@@ -44,7 +44,7 @@ class FaladorCowsPlan(Plan):
     label = "Falador Cows - Kill cows and collect hides"
     
     def __init__(self):
-        self.state = {"phase": "KILL_COWS"}
+        self.state = {"phase": "GO_TO_CLOSEST_BANK"}
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
         
@@ -86,15 +86,214 @@ class FaladorCowsPlan(Plan):
                 {"name": "Mithril platelegs", "defence_req": 20},
                 {"name": "Adamant platelegs", "defence_req": 30},
                 {"name": "Rune platelegs", "defence_req": 40}
+            ],
+            "shield": [
+                {"name": "Bronze kiteshield", "defence_req": 1},
+                {"name": "Iron kiteshield", "defence_req": 1},
+                {"name": "Steel kiteshield", "defence_req": 5},
+                {"name": "Mithril kiteshield", "defence_req": 20},
+                {"name": "Adamant kiteshield", "defence_req": 30},
+                {"name": "Rune kiteshield", "defence_req": 40}
+            ]
+        }
+        
+        self.jewelry_tiers = {
+            "amulet": [
+                {"name": "Amulet of strength", "defence_req": 1}
             ]
         }
         
         self.food_item = "Trout"
         self.target_item = "Cowhide"
         
+        # GE buying configuration - individual item pricing
+        self.ge_config = {
+            # Food items
+            "Trout": {
+                "quantity": 50,
+                "bumps": 5,
+                "set_price": 0  # 0 = use bumps, >0 = use set price
+            },
+            
+            # Weapon items
+            "Bronze scimitar": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000  # Fixed price
+            },
+            "Iron scimitar": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000  # Fixed price
+            },
+            "Steel scimitar": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000  # Fixed price
+            },
+            "Mithril scimitar": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 2000  # Fixed price
+            },
+            "Adamant scimitar": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 5000  # Fixed price
+            },
+            "Rune scimitar": {
+                "quantity": 1,
+                "bumps": 5,
+                "set_price": 0  # Fixed price
+            },
+            
+            # Armor items
+            "Bronze full helm": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000
+            },
+            "Iron full helm": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000
+            },
+            "Steel full helm": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000
+            },
+            "Mithril full helm": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 3000
+            },
+            "Adamant full helm": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 5000
+            },
+            "Rune full helm": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 30000
+            },
+            
+            "Bronze platebody": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000
+            },
+            "Iron platebody": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000
+            },
+            "Steel platebody": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000
+            },
+            "Mithril platebody": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 10000
+            },
+            "Adamant platebody": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 20000
+            },
+            "Rune platebody": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 50000
+            },
+            
+            "Bronze platelegs": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000
+            },
+            "Iron platelegs": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000
+            },
+            "Steel platelegs": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000
+            },
+            "Mithril platelegs": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 2000
+            },
+            "Adamant platelegs": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 5000
+            },
+            "Rune platelegs": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 40000
+            },
+            
+            "Bronze kiteshield": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000
+            },
+            "Iron kiteshield": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000
+            },
+            "Steel kiteshield": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 1000
+            },
+            "Mithril kiteshield": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 2000
+            },
+            "Adamant kiteshield": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 5000
+            },
+            "Rune kiteshield": {
+                "quantity": 1,
+                "bumps": 0,
+                "set_price": 40000
+            },
+            
+            # Jewelry items
+            "Amulet of strength": {
+                "quantity": 1,
+                "bumps": 5,
+                "set_price": 0  # 0 = use bumps, >0 = use set price
+            }
+        }
+        
         # Areas
         self.bank_area = FALADOR_BANK
         self.cows_area = FALADOR_COWS
+        
+        # Required items for the plan
+        self.required_items = {
+            "food": self.food_item,
+            "weapon": None,  # Will be determined by skill level
+            "armor": None,   # Will be determined by skill level
+            "jewelry": None, # Will be determined by skill level
+        }
+        
+        # Track what we need to buy from GE
+        self.items_to_buy = []
         
         print(f"[{self.id}] Plan initialized")
         print(f"[{self.id}] Weapon tiers: {len(self.weapon_tiers)} available")
@@ -102,205 +301,228 @@ class FaladorCowsPlan(Plan):
         print(f"[{self.id}] Food: {self.food_item}")
         print(f"[{self.id}] Target loot: {self.target_item}")
     
-    def compute_phase(self, payload, craft_recent):
-        return self.state.get("phase", "GO_TO_BANK")
     
-    def set_phase(self, phase: str, ui=None, camera_setup: bool = True):
+    def set_phase(self, phase: str, camera_setup: bool = True):
         from ..helpers.phase_utils import set_phase_with_camera
-        return set_phase_with_camera(self, phase, ui, camera_setup)
+        return set_phase_with_camera(self, phase, camera_setup)
     
-    def get_best_weapon(self, payload):
-        """Get the best weapon available based on attack level and bank contents."""
-        from ilbot.ui.simple_recorder.actions.bank import get_bank_inventory, is_open
-        from ilbot.ui.simple_recorder.actions.player import get_skill_level
-        
-        # Get current attack level
-        attack_level = get_skill_level("attack")
-        print(f"[{self.id}] Getting best weapon for attack level {attack_level}")
-        
-        # Ensure bank is open before getting inventory
-        if not is_open():
-            print(f"[{self.id}] Bank not open, cannot get bank inventory")
-            return None
-        
-        # Get available items in bank
-        bank_items = get_bank_inventory()
-        available_items = [item.get("name", "") for item in bank_items if item.get("name")]
-        print(f"[{self.id}] Available bank items: {available_items[:10]}...")  # Show first 10 items
-        
-        # Find the best weapon we can use (NO FALLBACKS - only weapons we can actually use)
-        for weapon in reversed(self.weapon_tiers):  # Start from highest tier
-            print(f"[{self.id}] Checking weapon: {weapon['name']} (req: {weapon['attack_req']})")
-            if (weapon["attack_req"] <= attack_level and 
-                weapon["name"] in available_items):
-                print(f"[{self.id}] Selected weapon: {weapon['name']} (req: {weapon['attack_req']}, level: {attack_level})")
-                return weapon
-        
-        print(f"[{self.id}] No suitable weapons found in bank for attack level {attack_level}! Available items: {available_items}")
-        return None
     
-    def get_best_armor(self, payload):
-        """Get the best armor available based on defence level and bank contents."""
-        from ilbot.ui.simple_recorder.actions.bank import get_bank_inventory, is_open
-        from ilbot.ui.simple_recorder.actions.player import get_skill_level
-        
-        # Get current defence level
-        defence_level = get_skill_level("defence")
-        print(f"[{self.id}] Getting best armor for defence level {defence_level}")
-        
-        # Ensure bank is open before getting inventory
-        if not is_open():
-            print(f"[{self.id}] Bank not open, cannot get bank inventory")
-            return None
-        
-        # Get available items in bank
-        bank_items = get_bank_inventory()
-        available_items = [item.get("name", "") for item in bank_items if item.get("name")]
-        print(f"[{self.id}] Available bank items: {available_items[:10]}...")  # Show first 10 items
-        
-        # Find the best armor we can use for each type (NO FALLBACKS - only armor we can actually use)
-        best_armor = {}
-        for armour_type, armor_list in self.armor_tiers.items():
-            print(f"[{self.id}] Checking {armour_type} armor...")
-            for armor in reversed(armor_list):  # Start from highest tier
-                print(f"[{self.id}] Checking armor: {armor['name']} (req: {armor['defence_req']})")
-                if (armor["defence_req"] <= defence_level and 
-                    armor["name"] in available_items):
-                    print(f"[{self.id}] Selected {armour_type}: {armor['name']} (req: {armor['defence_req']}, level: {defence_level})")
-                    best_armor[armour_type] = armor
-                    break
-        
-        if not best_armor:
-            print(f"[{self.id}] No suitable armor found in bank for defence level {defence_level}! Available items: {available_items}")
-            return None
-        
-        print(f"[{self.id}] Selected armor: {list(best_armor.keys())}")
-        return best_armor
-    
-    def needs_equipment_change(self, target_weapon, target_armor_dict, payload):
-        """Check if we need to change equipment based on what's currently equipped vs what should be equipped."""
-        from ilbot.ui.simple_recorder.actions.player import get_skill_level
-        
-        # Get current skill levels
-        attack_level = get_skill_level("attack")
-        defence_level = get_skill_level("defence")
-        
-        # Check if we have a weapon equipped
-        current_weapon = None
-        for weapon in self.weapon_tiers:
-            if equipment.has_equipped(weapon["name"]):
-                current_weapon = weapon
-                break
-        
-        # Check if we have armor equipped
-        current_armor = {}
-        for armor_type, armor_list in self.armor_tiers.items():
-            for armor in armor_list:
-                if equipment.has_equipped(armor["name"]):
-                    current_armor[armor_type] = armor
-                    break
-        
-        print(f"[{self.id}] Current equipment - Weapon: {current_weapon['name'] if current_weapon else 'None'}")
-        armor_list = [f"{k}: {v['name']}" for k, v in current_armor.items()]
-        print(f"[{self.id}] Current armor: {armor_list}")
-        
-        # Check if we need to change weapon
-        needs_weapon_change = False
-        if target_weapon and current_weapon:
-            if current_weapon["attack_req"] < target_weapon["attack_req"]:
-                print(f"[{self.id}] Need weapon upgrade: {current_weapon['name']} -> {target_weapon['name']}")
-                needs_weapon_change = True
-            elif current_weapon["name"] != target_weapon["name"]:
-                print(f"[{self.id}] Need weapon change: {current_weapon['name']} -> {target_weapon['name']}")
-                needs_weapon_change = True
-        elif target_weapon and not current_weapon:
-            print(f"[{self.id}] Need to equip weapon: {target_weapon['name']}")
-            needs_weapon_change = True
-        
-        # Check if we need to change armor
-        needs_armor_change = False
-        if target_armor_dict:
-            for armor_type, target_armor in target_armor_dict.items():
-                current_armor_item = current_armor.get(armor_type)
-                if current_armor_item:
-                    if current_armor_item["defence_req"] < target_armor["defence_req"]:
-                        print(f"[{self.id}] Need {armor_type} upgrade: {current_armor_item['name']} -> {target_armor['name']}")
-                        needs_armor_change = True
-                    elif current_armor_item["name"] != target_armor["name"]:
-                        print(f"[{self.id}] Need {armor_type} change: {current_armor_item['name']} -> {target_armor['name']}")
-                        needs_armor_change = True
-                else:
-                    print(f"[{self.id}] Need to equip {armor_type}: {target_armor['name']}")
-                    needs_armor_change = True
-        
-        needs_change = needs_weapon_change or needs_armor_change
-        print(f"[{self.id}] Equipment change needed: {needs_change} (weapon: {needs_weapon_change}, armor: {needs_armor_change})")
-        return needs_change
-    
-    def select_combat_style_for_training(self, payload):
-        """Select combat style based on current skill levels and training goals."""
-        from ..actions.combat_interface import select_combat_style, current_combat_style
-        
-        # Get current skill levels
-        attack_level = player.get_skill_level("attack")
-        defence_level = player.get_skill_level("defence")
-        strength_level = player.get_skill_level("strength")
-        
-        print(f"[{self.id}] Current levels - Attack: {attack_level}, Defence: {defence_level}, Strength: {strength_level}")
-        
-        # Get current combat style
-        current_style = current_combat_style(payload)
-        
-        # Check if we should switch away from current style
-        should_switch = False
-        current_skill_level = 0
-        
-        if current_style == 0:  # Attack style
-            current_skill_level = attack_level
-            should_switch = (attack_level % 5 == 0 or attack_level >= 40)
-        elif current_style == 1:  # Strength style
-            current_skill_level = strength_level
-            should_switch = (strength_level % 5 == 0)
-        elif current_style == 3:  # Defence style
-            current_skill_level = defence_level
-            should_switch = (defence_level % 5 == 0 or defence_level >= 10)
-        
-        if not should_switch:
-            print(f"[{self.id}] Continuing with current combat style {current_style} (level {current_skill_level}, not at switching point)")
-            return
-        
-        # Find the lowest skill level to train next
-        # Check which skills are below their max levels
-        skills_to_train = []
-        
-        if defence_level < 10:
-            skills_to_train.append({"name": "Defence", "level": defence_level, "max": 10, "style": 3})
-        
-        if attack_level < 40:
-            skills_to_train.append({"name": "Attack", "level": attack_level, "max": 40, "style": 0})
-        
-        # Strength has no max level, so always include it
-        skills_to_train.append({"name": "Strength", "level": strength_level, "max": 999, "style": 1})
-        
-        # Find the skill with the lowest level
-        if skills_to_train:
-            lowest_skill = min(skills_to_train, key=lambda x: x["level"])
-            target_style = lowest_skill["style"]
-            reason = f"Switching to {lowest_skill['name']} training (level {lowest_skill['level']}, lowest level)"
-        else:
-            # Fallback to strength if no skills need training
-            target_style = 1
-            reason = f"Switching to Strength training (level {strength_level}, fallback)"
-        
-        print(f"[{self.id}] {reason}")
-        select_combat_style(target_style, payload)
-    
-    def loop(self, ui, payload):
+    def loop(self, ui):
         """Main loop method following standard plan protocol."""
-        phase = self.state.get("phase", "GO_TO_BANK")
+        phase = self.state.get("phase", "GO_TO_CLOSEST_BANK")
         
         match(phase):
-            case "GO_TO_BANK":
+            case "GO_TO_CLOSEST_BANK":
+                if not near_any_bank():
+                    travel.go_to_closest_bank()
+                else:
+                    self.set_phase("CHECK_BANK_ITEMS", ui)
+                return
+            
+            case "CHECK_BANK_ITEMS":
+                if ge.is_open():
+                    close_ge()
+                    return
+                if not bank.is_open():
+                    print(f"[{self.id}] Opening bank...")
+                    open_bank()
+                    return
+                else:
+                    # Bank is open, check what items we have and what we need
+                    print(f"[{self.id}] Checking bank, inventory, and equipped items...")
+                    
+                    # Determine what equipment we should have based on skill levels
+                    target_weapon = get_best_weapon_for_level(self.weapon_tiers, self.id)
+                    target_armor_dict = get_best_armor_for_level(self.armor_tiers, self.id)
+                    target_jewelry_dict = get_best_armor_for_level(self.jewelry_tiers, self.id)
+                    
+                    # Helper function to check if we have an item anywhere (bank, inventory, or equipped)
+                    def has_item_anywhere(item_name):
+                        return (bank.has_item(item_name) or 
+                                inventory.has_item(item_name) or 
+                                equipment.has_equipped(item_name))
+                    
+                    # Check what we have across all locations
+                    has_food = has_item_anywhere(self.food_item)
+                    has_weapon = target_weapon and has_item_anywhere(target_weapon["name"])
+                    has_armor = True
+                    has_jewelry = True
+                    
+                    # Check armor pieces
+                    if target_armor_dict:
+                        for armor_type, armor_item in target_armor_dict.items():
+                            if not has_item_anywhere(armor_item["name"]):
+                                has_armor = False
+                                break
+                    else:
+                        has_armor = False
+                    
+                    # Check jewelry pieces
+                    if target_jewelry_dict:
+                        for jewelry_type, jewelry_item in target_jewelry_dict.items():
+                            if not has_item_anywhere(jewelry_item["name"]):
+                                has_jewelry = False
+                                break
+                    else:
+                        has_jewelry = False
+                    
+                    # Determine what we need to buy - check each item individually
+                    items_needed = []
+                    if not has_food:
+                        items_needed.append(self.food_item)
+                    if not has_weapon and target_weapon:
+                        items_needed.append(target_weapon["name"])
+                    
+                    # Check each armor piece individually
+                    if target_armor_dict:
+                        for armor_type, armor_item in target_armor_dict.items():
+                            if not has_item_anywhere(armor_item["name"]):
+                                items_needed.append(armor_item["name"])
+                    
+                    # Check each jewelry piece individually
+                    if target_jewelry_dict:
+                        for jewelry_type, jewelry_item in target_jewelry_dict.items():
+                            if not has_item_anywhere(jewelry_item["name"]):
+                                items_needed.append(jewelry_item["name"])
+                    
+                    # Detailed logging of what we found where
+                    print(f"[{self.id}] Item check complete:")
+                    print(f"[{self.id}]   Food ({self.food_item}):")
+                    print(f"[{self.id}]     Bank: {bank.has_item(self.food_item)}")
+                    print(f"[{self.id}]     Inventory: {inventory.has_item(self.food_item)}")
+                    print(f"[{self.id}]     Equipped: {equipment.has_equipped(self.food_item)}")
+                    print(f"[{self.id}]     Total: {has_food}")
+                    
+                    if target_weapon:
+                        print(f"[{self.id}]   Weapon ({target_weapon['name']}):")
+                        print(f"[{self.id}]     Bank: {bank.has_item(target_weapon['name'])}")
+                        print(f"[{self.id}]     Inventory: {inventory.has_item(target_weapon['name'])}")
+                        print(f"[{self.id}]     Equipped: {equipment.has_equipped(target_weapon['name'])}")
+                        print(f"[{self.id}]     Total: {has_weapon}")
+                    
+                    if target_armor_dict:
+                        print(f"[{self.id}]   Armor pieces:")
+                        for armor_type, armor_item in target_armor_dict.items():
+                            print(f"[{self.id}]     {armor_item['name']}:")
+                            print(f"[{self.id}]       Bank: {bank.has_item(armor_item['name'])}")
+                            print(f"[{self.id}]       Inventory: {inventory.has_item(armor_item['name'])}")
+                            print(f"[{self.id}]       Equipped: {equipment.has_equipped(armor_item['name'])}")
+                            print(f"[{self.id}]       Total: {has_item_anywhere(armor_item['name'])}")
+                    
+                    if target_jewelry_dict:
+                        print(f"[{self.id}]   Jewelry pieces:")
+                        for jewelry_type, jewelry_item in target_jewelry_dict.items():
+                            print(f"[{self.id}]     {jewelry_item['name']}:")
+                            print(f"[{self.id}]       Bank: {bank.has_item(jewelry_item['name'])}")
+                            print(f"[{self.id}]       Inventory: {inventory.has_item(jewelry_item['name'])}")
+                            print(f"[{self.id}]       Equipped: {equipment.has_equipped(jewelry_item['name'])}")
+                            print(f"[{self.id}]       Total: {has_item_anywhere(jewelry_item['name'])}")
+                    
+                    print(f"[{self.id}]   Items needed: {items_needed}")
+                    
+                    if items_needed:
+                        self.items_to_buy = items_needed
+                        bank.close_bank()
+                        self.set_phase("GO_TO_GE")
+                        return
+                    else:
+                        print(f"[{self.id}] All required items found across bank, inventory, and equipment!")
+                        bank.close_bank()
+                        self.set_phase("GO_TO_FALADOR_BANK")
+                        return
+            
+            case "GO_TO_GE":
+                # Go to Grand Exchange to buy missing items
+                if not in_area("GE"):
+                    print(f"[{self.id}] Traveling to Grand Exchange...")
+                    go_to("GE")
+                    return
+                else:
+                    self.set_phase("BUY_ITEMS_AT_GE")
+                    return
+            
+            case "BUY_ITEMS_AT_GE":
+                # Define required items and their requirements using individual item configuration
+                required_items = []
+                item_requirements = {}
+                
+                # Add food requirement using individual item config
+                if self.food_item:
+                    required_items.append(self.food_item)
+                    if self.food_item in self.ge_config:
+                        food_config = self.ge_config[self.food_item]
+                        item_requirements[self.food_item] = (
+                            food_config["quantity"], 
+                            food_config["bumps"], 
+                            food_config["set_price"]
+                        )
+                    else:
+                        # Fallback if item not in config
+                        item_requirements[self.food_item] = (50, 5, 0)
+                
+                # Add weapon requirement using individual item config
+                target_weapon = get_best_weapon_for_level(self.weapon_tiers, self.id)
+                if target_weapon:
+                    required_items.append(target_weapon["name"])
+                    if target_weapon["name"] in self.ge_config:
+                        weapon_config = self.ge_config[target_weapon["name"]]
+                        item_requirements[target_weapon["name"]] = (
+                            weapon_config["quantity"], 
+                            weapon_config["bumps"], 
+                            weapon_config["set_price"]
+                        )
+                    else:
+                        # Fallback if item not in config
+                        item_requirements[target_weapon["name"]] = (1, 0, 1000)
+                
+                # Add armor requirements using individual item config
+                target_armor_dict = get_best_armor_for_level(self.armor_tiers, self.id)
+                if target_armor_dict:
+                    for armor_type, armor_item in target_armor_dict.items():
+                        required_items.append(armor_item["name"])
+                        if armor_item["name"] in self.ge_config:
+                            armor_config = self.ge_config[armor_item["name"]]
+                            item_requirements[armor_item["name"]] = (
+                                armor_config["quantity"], 
+                                armor_config["bumps"], 
+                                armor_config["set_price"]
+                            )
+                        else:
+                            # Fallback if item not in config
+                            item_requirements[armor_item["name"]] = (1, 0, 500)
+                
+                # Add jewelry requirements using individual item config
+                target_jewelry_dict = get_best_armor_for_level(self.jewelry_tiers, self.id)
+                if target_jewelry_dict:
+                    for jewelry_type, jewelry_item in target_jewelry_dict.items():
+                        required_items.append(jewelry_item["name"])
+                        if jewelry_item["name"] in self.ge_config:
+                            jewelry_config = self.ge_config[jewelry_item["name"]]
+                            item_requirements[jewelry_item["name"]] = (
+                                jewelry_config["quantity"], 
+                                jewelry_config["bumps"], 
+                                jewelry_config["set_price"]
+                            )
+                        else:
+                            # Fallback if item not in config
+                            item_requirements[jewelry_item["name"]] = (1, 5, 0)
+                
+                # Use the reusable method
+                result = check_and_buy_required_items(required_items, item_requirements, self.id)
+                
+                if result["status"] == "complete":
+                    print(f"[{self.id}] All items purchased! Returning to bank...")
+                    self.set_phase("GO_TO_CLOSEST_BANK")
+                    return
+                elif result["status"] == "buying":
+                    # Still working on buying items, continue in same phase
+                    return
+                elif result["status"] == "error":
+                    print(f"[{self.id}] Error buying items: {result.get('error', 'Unknown error')}")
+                    # Try again next loop
+                    return
+            
+            case "GO_TO_FALADOR_BANK":
                 if not in_area(self.bank_area):
                     print(f"[{self.id}] Traveling to bank...")
                     go_to(self.bank_area)
@@ -308,94 +530,185 @@ class FaladorCowsPlan(Plan):
                 else:
                     self.set_phase("PREPARE_AT_BANK")
                     return
-            
+
             case "PREPARE_AT_BANK":
-                has_food = inventory.has_item(self.food_item)
-                
+                # First check if we're in the right area
+                if not in_area(self.bank_area):
+                    print(f"[{self.id}] Traveling to bank...")
+                    go_to(self.bank_area)
+                    return
+
+                # Open bank if not already open
                 if not bank.is_open():
-                    if not in_area(self.bank_area):
-                        print(f"[{self.id}] Traveling to bank...")
-                        go_to(self.bank_area)
-                        return
                     print(f"[{self.id}] Opening bank...")
                     open_bank()
                     return
+
+                # Bank is open, now check what we need to do
+                print(f"[{self.id}] Bank is open, checking inventory and equipment...")
+
+                # Get target equipment based on skill levels - check bank, inventory, and equipped items
+                target_weapon = get_best_weapon_for_level(self.weapon_tiers, self.id)
+                target_armor_dict = get_best_armor_for_level(self.armor_tiers, self.id)
+                target_jewelry_dict = get_best_armor_for_level(self.jewelry_tiers, self.id)
+
+                # Check current inventory state
+                has_sufficient_food = inventory.has_unnoted_item(self.food_item, 5)
+                has_cowhides = inventory.has_item("Cowhide")
+
+                # Check current equipment state
+                has_correct_weapon = target_weapon and equipment.has_equipped(target_weapon["name"])
+
+                has_correct_armor = True
+                if target_armor_dict:
+                    for armor_type, armor_item in target_armor_dict.items():
+                        if not equipment.has_equipped(armor_item["name"]):
+                            has_correct_armor = False
+                            break
                 else:
-                    # Bank is open, now we can check equipment requirements
-                    # Get the specific weapon and armor that should be equipped based on skill levels
-                    target_weapon = self.get_best_weapon(payload)
-                    target_armor_dict = self.get_best_armor(payload)
+                    has_correct_armor = False
+
+                has_correct_jewelry = True
+                if target_jewelry_dict:
+                    for jewelry_type, jewelry_item in target_jewelry_dict.items():
+                        if not equipment.has_equipped(jewelry_item["name"]):
+                            has_correct_jewelry = False
+                            break
+                else:
+                    has_correct_jewelry = False
+
+                # Log current state
+                print(f"[{self.id}] Current state:")
+                print(f"[{self.id}]   Food ({self.food_item}): {has_sufficient_food}")
+                print(f"[{self.id}]   Cowhides in inventory: {has_cowhides}")
+                print(f"[{self.id}]   Correct weapon equipped: {has_correct_weapon}")
+                print(f"[{self.id}]   Correct armor equipped: {has_correct_armor}")
+                print(f"[{self.id}]   Correct jewelry equipped: {has_correct_jewelry}")
+
+                # If everything is ready, close bank and proceed
+                if (has_sufficient_food and
+                        has_correct_weapon and
+                        has_correct_armor and
+                        has_correct_jewelry and
+                        not has_cowhides):
+                    print(f"[{self.id}] All requirements met, closing bank...")
+                    bank.close_bank()
+                    self.set_phase("TRAVEL_TO_COWS")
+                    return
+
+                # We need to make changes - start with depositing inventory items
+                print(f"[{self.id}] Preparing inventory and equipment...")
+
+                # Deposit unwanted items first (cowhides, wrong food, etc.) but keep equipment we might need
+                items_to_deposit = []
+                
+                # Always deposit cowhides
+                if inventory.has_item("Cowhide"):
+                    items_to_deposit.append("Cowhide")
+                
+                # Deposit wrong food if we have too much or wrong type
+                if inventory.has_unnoted_item(self.food_item, 6):  # More than we need
+                    items_to_deposit.append(self.food_item)
+                
+                # Deposit any other items that aren't our target equipment
+                from ..helpers.inventory import inv_slots
+                inventory_slots = inv_slots()
+                for slot in inventory_slots:
+                    item_name = slot.get("itemName", "").strip()
+                    if not item_name or item_name in items_to_deposit:
+                        continue
+                        
+                    # Check if this item is target equipment we might need
+                    is_target_equipment = False
                     
-                    # Check if the correct weapon is equipped
-                    has_weapon = target_weapon and equipment.has_equipped(target_weapon["name"])
+                    # Check if it's our target weapon
+                    if target_weapon and item_name == target_weapon["name"]:
+                        is_target_equipment = True
                     
-                    # Check if all required armor pieces are equipped
-                    has_armor = True
+                    # Check if it's our target armor
                     if target_armor_dict:
                         for armor_type, armor_item in target_armor_dict.items():
-                            if not equipment.has_equipped(armor_item["name"]):
-                                has_armor = False
+                            if item_name == armor_item["name"]:
+                                is_target_equipment = True
                                 break
-                    else:
-                        has_armor = False
                     
-                    # Check if we need to change equipment
-                    needs_equipment_change = self.needs_equipment_change(target_weapon, target_armor_dict, payload)
+                    # Check if it's our target jewelry
+                    if target_jewelry_dict:
+                        for jewelry_type, jewelry_item in target_jewelry_dict.items():
+                            if item_name == jewelry_item["name"]:
+                                is_target_equipment = True
+                                break
                     
-                    if has_food and not needs_equipment_change and not inventory.has_item("Cowhide"):
-                        print(f"[{self.id}] Inventory and equipment check passed, closing bank...")
-                        bank.close_bank()
-                        self.set_phase("TRAVEL_TO_COWS")
-                        return
-                    else:
-                        print(f"[{self.id}] Inventory/equipment not ready - food: {has_food}, weapon: {has_weapon}, armor: {has_armor}")
-                        print(f"[{self.id}] Needs equipment change: {needs_equipment_change}")
-                    
-                    # Deposit all items first
-                    print(f"[{self.id}] Depositing all items...")
-                    deposit_inventory()
-                    
-                    # Only deposit equipment if we need to change it
-                    if needs_equipment_change:
-                        print(f"[{self.id}] Depositing equipment for upgrade...")
-                        bank.deposit_equipment()
-                    else:
-                        print(f"[{self.id}] Equipment is already optimal, skipping deposit...")
-                    
-                    # Withdraw food
-                    print(f"[{self.id}] Withdrawing food...")
-                    withdraw_item(self.food_item, 5)
-                    
-                    # Only withdraw and equip equipment if we need to change it
-                    if needs_equipment_change:
-                        # Withdraw and equip best available gear
-                        equipment_to_withdraw = []
-                        equipment_actions = []
+                    # If it's not target equipment and not our food, deposit it
+                    if not is_target_equipment and item_name != self.food_item:
+                        items_to_deposit.append(item_name)
+                
+                # Deposit the unwanted items
+                if items_to_deposit:
+                    print(f"[{self.id}] Depositing unwanted items: {items_to_deposit}")
+                    for item in items_to_deposit:
+                        bank.deposit_item(item)
+                    return  # Wait for deposits to complete
 
-                        # Get best available equipment
-                        best_weapon = self.get_best_weapon(payload)
-                        best_armor_dict = self.get_best_armor(payload)
-                        
-                        if best_weapon:
-                            equipment_to_withdraw.append(best_weapon["name"])
-                            equipment_actions.append("Wield")
-                        
-                        if best_armor_dict:
-                            for armor_type, armor_item in best_armor_dict.items():
-                                equipment_to_withdraw.append(armor_item["name"])
-                                equipment_actions.append("Wear")
-                        
-                        if equipment_to_withdraw:
-                            print(f"[{self.id}] Withdrawing equipment: {equipment_to_withdraw}")
-                            withdraw_items(equipment_to_withdraw)
-                            bank.interact(equipment_to_withdraw, equipment_actions)
-                        else:
-                            print(f"[{self.id}] No suitable equipment found in bank!")
-                    else:
-                        print(f"[{self.id}] Equipment is already optimal, no changes needed!")
+                # Check weapon first
+                if target_weapon and not has_correct_weapon:
+                    print(f"[{self.id}] Handling weapon change...")
                     
-                    return
-            
+                    # Check if target weapon is in inventory
+                    if inventory.has_item(target_weapon["name"]):
+                        print(f"[{self.id}] Target weapon in inventory, equipping directly...")
+                        bank.interact_inventory(target_weapon["name"], "Wield")
+                        return  # Wait for equipping
+                    else:
+                        # Need to withdraw from bank
+                        print(f"[{self.id}] Withdrawing weapon from bank...")
+                        withdraw_item(target_weapon["name"], 1)
+                        return  # Wait for withdrawal
+
+                # Check armor pieces
+                if target_armor_dict:
+                    for armor_type, armor_item in target_armor_dict.items():
+                        if not equipment.has_equipped(armor_item["name"]):
+                            print(f"[{self.id}] Handling {armor_type} change...")
+                            
+                            # Check if target armor is in inventory
+                            if inventory.has_item(armor_item["name"]):
+                                print(f"[{self.id}] Target {armor_type} in inventory, equipping directly...")
+                                bank.interact_inventory(armor_item["name"], "Wear")
+                                return  # Wait for equipping
+                            else:
+                                # Need to withdraw from bank
+                                print(f"[{self.id}] Withdrawing {armor_type} from bank...")
+                                withdraw_item(armor_item["name"], 1)
+                                return  # Wait for withdrawal
+
+                # Check jewelry pieces
+                if target_jewelry_dict:
+                    for jewelry_type, jewelry_item in target_jewelry_dict.items():
+                        if not equipment.has_equipped(jewelry_item["name"]):
+                            print(f"[{self.id}] Handling {jewelry_type} change...")
+                            
+                            # Check if target jewelry is in inventory
+                            if inventory.has_item(jewelry_item["name"]):
+                                print(f"[{self.id}] Target {jewelry_type} in inventory, equipping directly...")
+                                bank.interact_inventory(jewelry_item["name"], "Wear")
+                                return  # Wait for equipping
+                            else:
+                                # Need to withdraw from bank
+                                print(f"[{self.id}] Withdrawing {jewelry_type} from bank...")
+                                withdraw_item(jewelry_item["name"], 1)
+                                return  # Wait for withdrawal
+
+                # Handle food withdrawal
+                if not has_sufficient_food:
+                    print(f"[{self.id}] Withdrawing food ({self.food_item})...")
+                    withdraw_item(self.food_item, 5)
+                    return  # Wait for food withdrawal
+
+                # If we get here, we should be ready
+                print(f"[{self.id}] Preparation complete, checking final state...")
+                return
+
             case "TRAVEL_TO_COWS":
                 if not in_area(self.cows_area):
                     print(f"[{self.id}] Traveling to cows area...")
@@ -407,7 +720,8 @@ class FaladorCowsPlan(Plan):
             
             case "KILL_COWS":
                 # Select appropriate combat style for training
-                self.select_combat_style_for_training(payload)
+                from ilbot.ui.simple_recorder.actions.combat import select_combat_style_for_training
+                select_combat_style_for_training()
                 
                 # Check if inventory is full
                 empty_slots = inventory.get_empty_slots_count()

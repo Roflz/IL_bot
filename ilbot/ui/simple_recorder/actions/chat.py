@@ -3,8 +3,9 @@
 from __future__ import annotations
 from typing import Optional, Union
 
-from .runtime import emit
-from ..helpers.context import get_payload, get_ui
+from .timing import wait_until
+from .widgets import click_chat_continue, find_chat_continue_widget
+from ..helpers.runtime_utils import ui, dispatch
 from ..helpers.chat import (
     can_continue as _can_continue,
     can_choose_option as _can_choose_option,
@@ -12,54 +13,54 @@ from ..helpers.chat import (
     get_option as _get_option,
     dialogue_is_open as _dialogue_is_open,
     get_dialogue_text_raw as _get_dialogue_text_raw,
-    get_clean_dialogue_text as _get_clean_dialogue_text,
-    dialogue_contains_phrase as _dialogue_contains_phrase,
-    dialogue_contains_any_phrase as _dialogue_contains_any_phrase,
-    get_dialogue_info as _get_dialogue_info,
-    has_informational_text as _has_informational_text,
 )
+from ..helpers.utils import press_spacebar
 
-def dialogue_is_open(payload: Optional[dict] = None) -> bool:
-    if payload is None:
-        payload = get_payload()
-    return _dialogue_is_open(payload)
 
-def can_continue(payload: Optional[dict] = None) -> bool:
-    if payload is None:
-        payload = get_payload()
-    return _can_continue(payload)
+def dialogue_is_open() -> bool:
+    return _dialogue_is_open()
 
-def can_choose_option(payload: Optional[dict] = None) -> bool:
-    if payload is None:
-        payload = get_payload()
-    return _can_choose_option(payload)
+def can_continue() -> bool:
+    """
+    Check if we can continue dialogue by looking for "Click here to continue" widget.
+    """
+    from .widgets import find_chat_continue_widget
+    
+    # Check for the continue widget under Chatbox.CHATMODAL
+    continue_widget = find_chat_continue_widget()
+    if continue_widget:
+        return True
+    
+    # Fallback to original method
+    return _can_continue()
 
-def get_options(payload: Optional[dict] = None):
-    if payload is None:
-        payload = get_payload()
-    if  not _get_options(payload) == []:
-        return _get_options(payload)
+def can_choose_option() -> bool:
+    return _can_choose_option()
+
+def get_options():
+    options = _get_options()
+    if options and len(options) > 0:
+        return options
     else:
         return None
 
+def get_option(index: int):
+    return _get_option(index)
 
-def get_option(index: int, payload: Optional[dict] = None):
-    if payload is None:
-        payload = get_payload()
-    return _get_option(index, payload)
-
-def dialogue_contains(substr: str, payload: Optional[dict] = None) -> bool:
+def dialogue_contains(substr: str) -> bool:
     """
     True if the current dialogue (left or right) contains `substr` in its *text* block.
     Only checks the TEXT portion (not names or 'continue').
     """
     if not substr:
         return False
-    if payload is None:
-        payload = get_payload() or {}
+    
+    # Get chat data directly from IPC
+    from ..helpers.runtime_utils import ipc
+    chat_data = ipc.get_chat() or {}
 
     def _side_text(side_key: str) -> str:
-        side = (payload.get(side_key) or {}) if isinstance(payload, dict) else {}
+        side = (chat_data.get(side_key) or {}) if isinstance(chat_data, dict) else {}
         text_block = side.get("text") or {}
         # Prefer stripped if present; otherwise raw text; else empty string
         return (text_block.get("textStripped")
@@ -75,15 +76,15 @@ def dialogue_contains(substr: str, payload: Optional[dict] = None) -> bool:
 
     return (needle in left_txt) or (needle in right_txt)
 
-def option_exists(text: str, payload: dict | None = None) -> bool:
+def option_exists(text: str) -> bool:
     """
     Return True if a chat menu option containing `text` (case-insensitive) exists.
-    Uses payload['chatMenu']['options']['texts'].
     """
-    if payload is None:
-        payload = get_payload() or {}
+    # Get chat data directly from IPC
+    from ..helpers.runtime_utils import ipc
+    chat_data = ipc.get_chat() or {}
 
-    opts = (((payload.get("chatMenu") or {}).get("options") or {}).get("texts") or [])
+    opts = (((chat_data.get("chatMenu") or {}).get("options") or {}).get("texts") or [])
     want = (text or "").strip().lower()
     if not want:
         return False
@@ -93,7 +94,7 @@ def option_exists(text: str, payload: dict | None = None) -> bool:
             return True
     return False
 
-def any_chat_active(payload: Optional[dict] = None) -> bool:
+def any_chat_active() -> bool:
     """
     Return True if any kind of chat/dialogue is currently active.
     This includes:
@@ -102,24 +103,25 @@ def any_chat_active(payload: Optional[dict] = None) -> bool:
     - Any dialogue text present (left or right)
     - Any chat menu options available
     """
-    if payload is None:
-        payload = get_payload() or {}
+    # Get chat data directly from IPC
+    from ..helpers.runtime_utils import ipc
+    chat_data = ipc.get_chat() or {}
     
     # Check if dialogue is open
-    if _dialogue_is_open(payload):
+    if _dialogue_is_open():
         return True
     
     # Check if we can continue dialogue
-    if _can_continue(payload):
+    if _can_continue():
         return True
     
     # Check if we can choose options
-    if _can_choose_option(payload):
+    if _can_choose_option():
         return True
     
     # Check if there's any dialogue text present
     def _has_text(side_key: str) -> bool:
-        side = (payload.get(side_key) or {}) if isinstance(payload, dict) else {}
+        side = (chat_data.get(side_key) or {}) if isinstance(chat_data, dict) else {}
         text_block = side.get("text") or {}
         text = (text_block.get("textStripped") or text_block.get("text") or "").strip()
         return bool(text)
@@ -128,38 +130,30 @@ def any_chat_active(payload: Optional[dict] = None) -> bool:
         return True
     
     # Check if there are any chat menu options
-    opts = (((payload.get("chatMenu") or {}).get("options") or {}).get("texts") or [])
+    opts = (((chat_data.get("chatMenu") or {}).get("options") or {}).get("texts") or [])
     if opts and any(isinstance(s, str) and s.strip() for s in opts):
         return True
     
     return False
 
 
-def continue_dialogue(payload: Optional[dict] = None, ui=None) -> Optional[dict]:
+def continue_dialogue() -> Optional[dict]:
     """
-    Action: press Space to advance dialogue or click continue widget.
+    Action: Press Space to advance dialogue or click continue widget as fallback.
     """
-    if payload is None:
-        payload = get_payload()
-    if ui is None:
-        ui = get_ui()
-
-    # Try traditional space key method first
-    if _can_continue(payload):
-        step = emit({
-            "action": "chat-continue",
-            "click": {"type": "key", "key": "space"},
-            "target": {"domain": "chat", "name": "continue"},
-        })
-        return ui.dispatch(step)
+    if find_chat_continue_widget():
+        press_spacebar()
+        if wait_until(lambda: not can_continue(), max_wait_ms=2000):
+             return True
     
-    # Try clicking the "Click here to continue" widget
-    if can_click_continue_widget(payload):
-        return click_continue_widget(payload, ui)
+    # Fallback to clicking the "Click here to continue" widget
+    result = click_chat_continue()
+    if result:
+        return result
     
     return None
 
-def can_click_continue_widget(payload: Optional[dict] = None) -> bool:
+def can_click_continue_widget() -> bool:
     """
     Check if any "Click here to continue" widget is visible and clickable.
     """
@@ -183,15 +177,10 @@ def can_click_continue_widget(payload: Optional[dict] = None) -> bool:
     
     return False
 
-def click_continue_widget(payload: Optional[dict] = None, ui=None) -> Optional[dict]:
+def click_continue_widget() -> Optional[dict]:
     """
     Action: Click any "Click here to continue" widget.
     """
-    if payload is None:
-        payload = get_payload()
-    if ui is None:
-        ui = get_ui()
-
     from ..helpers.widgets import widget_exists, get_widget_info
     
     # Try Messagebox.CONTINUE widget (ID 15007748) first
@@ -205,12 +194,12 @@ def click_continue_widget(payload: Optional[dict] = None, ui=None) -> Optional[d
                     x = bounds.get("x", 0) + bounds.get("width", 0) // 2
                     y = bounds.get("y", 0) + bounds.get("height", 0) // 2
                     
-                    step = emit({
+                    step = {
                         "action": "click-continue-widget",
                         "click": {"type": "point", "x": x, "y": y},
                         "target": {"domain": "chat", "name": "continue_widget"},
-                    })
-                    return ui.dispatch(step)
+                    }
+                    return dispatch(step)
     
     # Try LevelupDisplay.CONTINUE widget (ID 15269891)
     if widget_exists(15269891):
@@ -223,32 +212,27 @@ def click_continue_widget(payload: Optional[dict] = None, ui=None) -> Optional[d
                     x = bounds.get("x", 0) + bounds.get("width", 0) // 2
                     y = bounds.get("y", 0) + bounds.get("height", 0) // 2
                     
-                    step = emit({
+                    step = {
                         "action": "click-continue-widget",
                         "click": {"type": "point", "x": x, "y": y},
                         "target": {"domain": "chat", "name": "continue_widget"},
-                    })
-                    return ui.dispatch(step)
+                    }
+                    return dispatch(step)
     
     return None
 
-def choose_option(choice: Union[int, str], payload: Optional[dict] = None, ui=None) -> Optional[dict]:
+def choose_option(choice: Union[int, str]) -> Optional[dict]:
     """
     Action: choose an option by index (1..N) or by exact text.
     Uses number input for index: '1' selects the first, etc.
     """
-    if payload is None:
-        payload = get_payload()
-    if ui is None:
-        ui = get_ui()
-
-    if not _can_choose_option(payload):
+    if not _can_choose_option():
         return None
 
     # Resolve to an index (human 1..N) if text is given
     if isinstance(choice, str):
         choice = choice.strip()
-        options = _get_options(payload)
+        options = _get_options()
         try:
             idx = next((i for i, s in enumerate(options) if choice.casefold() in (s or "").casefold()), 0)
         except ValueError:
@@ -260,25 +244,21 @@ def choose_option(choice: Union[int, str], payload: Optional[dict] = None, ui=No
         # Only 1..9 supported via single-key press
         return None
 
-    step = emit({
+    step = {
         "action": "chat-choose-option",
         "click": {"type": "key", "key": str(idx)},
         "target": {"domain": "chat", "name": f"option-{idx}"},
-    })
-    return ui.dispatch(step)
+    }
+    return dispatch(step)
 
 
-def type_tutorial_name(name: str, payload: Optional[dict] = None, ui=None) -> bool:
+def type_tutorial_name(name: str) -> bool:
     """Type a character name in the tutorial name input field."""
     from ..helpers.widgets import get_widget_text, rect_center_from_widget
-    
-    if payload is None:
-        payload = get_payload()
-    if ui is None:
-        ui = get_ui()
-    
+
     # Get the name input widget from tutorial data
-    tutorial_data = payload.get("tutorial", {})
+    from ..helpers.runtime_utils import ipc
+    tutorial_data = ipc.get_tutorial() or {}
     if not tutorial_data.get("open", False):
         print("[TUTORIAL] Tutorial interface not open")
         return False
@@ -295,54 +275,49 @@ def type_tutorial_name(name: str, payload: Optional[dict] = None, ui=None) -> bo
         return False
     
     # Click on the name input field
-    step = emit({
+    step = {
         "action": "click-name-input",
         "click": {"type": "point", "x": x, "y": y},
         "target": {"domain": "tutorial", "name": "name_input"}
-    })
+    }
     
-    ui.dispatch(step)
+    dispatch(step)
     
     # Wait a moment for the field to be focused
     import time
     time.sleep(0.5)
     
     # Type the character name
-    step = emit({
+    step = {
         "action": "type-character-name",
         "click": {"type": "type", "text": name, "per_char_ms": 50},
         "target": {"domain": "tutorial", "name": "name_input"}
-    })
+    }
     
-    ui.dispatch(step)
+    dispatch(step)
     
     # Wait a moment then press enter
     time.sleep(1.0)
     
     # Press enter to confirm
-    step = emit({
+    step = {
         "action": "press-enter",
         "click": {"type": "key", "key": "ENTER"},
         "target": {"domain": "tutorial", "name": "confirm_name"}
-    })
+    }
     
-    ui.dispatch(step)
+    dispatch(step)
     
     print(f"[TUTORIAL] Successfully entered character name: {name}")
     return True
 
 
-def click_tutorial_set_name(payload: Optional[dict] = None, ui=None) -> bool:
+def click_tutorial_set_name() -> bool:
     """Click the tutorial SET_NAME button to confirm the character name."""
     from ..helpers.widgets import get_tutorial_set_name, rect_center_from_widget
-    
-    if payload is None:
-        payload = get_payload()
-    if ui is None:
-        ui = get_ui()
-    
+
     # Get the set name widget
-    set_name_widget = get_tutorial_set_name(payload)
+    set_name_widget = get_tutorial_set_name()
     if not set_name_widget:
         print("[TUTORIAL] SET_NAME widget not found or not visible")
         return False
@@ -354,13 +329,13 @@ def click_tutorial_set_name(payload: Optional[dict] = None, ui=None) -> bool:
         return False
     
     # Click on the SET_NAME button
-    step = emit({
+    step = {
         "action": "click-set-name",
         "click": {"type": "point", "x": x, "y": y},
         "target": {"domain": "tutorial", "name": "set_name"}
-    })
+    }
     
-    result = ui.dispatch(step)
+    result = dispatch(step)
     if result is None:
         print("[TUTORIAL] Failed to click SET_NAME button")
         return False
@@ -369,17 +344,12 @@ def click_tutorial_set_name(payload: Optional[dict] = None, ui=None) -> bool:
     return True
 
 
-def click_tutorial_lookup_name(payload: Optional[dict] = None, ui=None) -> bool:
+def click_tutorial_lookup_name() -> bool:
     """Click the tutorial LOOK_UP_NAME button to check name availability."""
     from ..helpers.widgets import get_tutorial_lookup_name, rect_center_from_widget
-    
-    if payload is None:
-        payload = get_payload()
-    if ui is None:
-        ui = get_ui()
-    
+
     # Get the lookup name widget
-    lookup_widget = get_tutorial_lookup_name(payload)
+    lookup_widget = get_tutorial_lookup_name()
     if not lookup_widget:
         print("[TUTORIAL] LOOK_UP_NAME widget not found or not visible")
         return False
@@ -391,13 +361,13 @@ def click_tutorial_lookup_name(payload: Optional[dict] = None, ui=None) -> bool:
         return False
     
     # Click on the LOOK_UP_NAME button
-    step = emit({
+    step = {
         "action": "click-lookup-name",
         "click": {"type": "point", "x": x, "y": y},
         "target": {"domain": "tutorial", "name": "lookup_name"}
-    })
+    }
     
-    result = ui.dispatch(step)
+    result = dispatch(step)
     if result is None:
         print("[TUTORIAL] Failed to click LOOK_UP_NAME button")
         return False
@@ -405,38 +375,6 @@ def click_tutorial_lookup_name(payload: Optional[dict] = None, ui=None) -> bool:
     print("[TUTORIAL] Successfully clicked LOOK_UP_NAME button")
     return True
 
-def get_dialogue_text_raw(payload: Optional[dict] = None) -> Optional[str]:
+def get_dialogue_text_raw() -> Optional[str]:
     """Get raw dialogue text from any available chat widget."""
-    if payload is None:
-        payload = get_payload()
-    return _get_dialogue_text_raw(payload)
-
-def get_clean_dialogue_text(payload: Optional[dict] = None) -> Optional[str]:
-    """Get dialogue text with HTML tags and color codes stripped."""
-    if payload is None:
-        payload = get_payload()
-    return _get_clean_dialogue_text(payload)
-
-def dialogue_contains_phrase(phrase: str, payload: Optional[dict] = None, case_sensitive: bool = False) -> bool:
-    """Check if dialogue contains a specific phrase."""
-    if payload is None:
-        payload = get_payload()
-    return _dialogue_contains_phrase(phrase, payload, case_sensitive)
-
-def dialogue_contains_any_phrase(phrases: list, payload: Optional[dict] = None, case_sensitive: bool = False) -> bool:
-    """Check if dialogue contains any of the given phrases."""
-    if payload is None:
-        payload = get_payload()
-    return _dialogue_contains_any_phrase(phrases, payload, case_sensitive)
-
-def get_dialogue_info(payload: Optional[dict] = None) -> dict:
-    """Get comprehensive dialogue information."""
-    if payload is None:
-        payload = get_payload()
-    return _get_dialogue_info(payload)
-
-def has_informational_text(payload: Optional[dict] = None) -> bool:
-    """Check if there's informational text overlay (like tutorial messages) that can be read."""
-    if payload is None:
-        payload = get_payload()
-    return _has_informational_text(payload)
+    return _get_dialogue_text_raw()

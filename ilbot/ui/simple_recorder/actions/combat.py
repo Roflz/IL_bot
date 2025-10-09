@@ -2,30 +2,19 @@ from __future__ import annotations
 from typing import Optional
 import time
 
-from .runtime import emit
-from ..helpers.context import get_payload, get_ui
-from ..helpers.ipc import ipc_send
-from ..services.camera_integration import dispatch_with_camera
+from ..helpers.runtime_utils import ipc
 
-
-def attack_closest(npc_name: str | list, payload: Optional[dict] = None, ui=None) -> Optional[dict]:
+def attack_closest(npc_name: str | list) -> Optional[dict]:
     """
     Find the closest NPC with the given name(s) that is not in combat and attack it.
     
     Args:
         npc_name: Name(s) of the NPC(s) to attack (partial match allowed)
                  Can be a single string or a list of strings
-        payload: Optional payload, will get fresh if None
-        ui: Optional UI instance, will get if None
         
     Returns:
         UI dispatch result if successful, None if failed
     """
-    if payload is None:
-        payload = get_payload()
-    if ui is None:
-        ui = get_ui()
-    
     # Convert single string to list for uniform handling
     if isinstance(npc_name, str):
         npc_names = [npc_name]
@@ -39,23 +28,27 @@ def attack_closest(npc_name: str | list, payload: Optional[dict] = None, ui=None
     max_retries = 3
     
     for attempt in range(max_retries):
-        # Get fresh payload and NPC data on each retry
-        fresh_payload = get_payload()
-        
         # Try each NPC name in the list
         for npc_name_to_try in npc_names:
             # Use optimized find_npc command to get closest NPC
-            npc_resp = ipc_send({"cmd": "find_npc", "name": npc_name_to_try}, fresh_payload)
+            npc_resp = ipc.get_npcs(npc_name_to_try)
             
-            if not npc_resp or not npc_resp.get("ok") or not npc_resp.get("found"):
+            if not npc_resp or not npc_resp.get("ok"):
                 print(f"[COMBAT] No NPC found with name containing '{npc_name_to_try}'")
                 continue  # Try next name in the list
             
-            npc = npc_resp.get("npc")
+            # Get the closest NPC from the npcs array
+            npcs = npc_resp.get("npcs", [])
+            if not npcs:
+                print(f"[COMBAT] No NPCs in response for '{npc_name_to_try}'")
+                continue  # Try next name in the list
+            
+            # Find the closest NPC (they should be sorted by distance)
+            npc = npcs[0]
             print(f"[COMBAT] Found NPC: {npc.get('name')} at distance {npc.get('distance')}")
             
             # Check if NPC is already in combat
-            if _is_npc_in_combat(npc, fresh_payload):
+            if _is_npc_in_combat(npc):
                 print(f"[COMBAT] NPC {npc.get('name')} is already in combat, skipping")
                 continue  # Try next name in the list
             
@@ -66,7 +59,7 @@ def attack_closest(npc_name: str | list, payload: Optional[dict] = None, ui=None
                 continue  # Try next name in the list
             
             # Attack the NPC
-            result = _attack_npc(npc, fresh_payload, ui)
+            result = _attack_npc(npc)
             if result:
                 print(f"[COMBAT] Successfully attacked {npc.get('name')}")
                 return result
@@ -82,13 +75,12 @@ def attack_closest(npc_name: str | list, payload: Optional[dict] = None, ui=None
     return None
 
 
-def _is_npc_in_combat(npc: dict, payload: dict) -> bool:
+def _is_npc_in_combat(npc: dict) -> bool:
     """
     Check if an NPC is currently in combat using the IPC response data.
     
     Args:
         npc: NPC data dictionary from IPC response
-        payload: Game state payload (unused, kept for compatibility)
         
     Returns:
         True if NPC is in combat, False otherwise
@@ -104,56 +96,38 @@ def _is_npc_in_combat(npc: dict, payload: dict) -> bool:
     return in_combat
 
 
-def _attack_npc(npc: dict, payload: dict, ui) -> Optional[dict]:
+def _attack_npc(npc: dict) -> Optional[dict]:
     """
     Perform the actual attack action on an NPC with pathing and door handling.
     
     Args:
         npc: NPC data dictionary
-        payload: Game state payload
-        ui: UI instance
         
     Returns:
         UI dispatch result if successful, None if failed
     """
-    from ..helpers.rects import unwrap_rect, rect_center_xy
-    from ..helpers.ipc import ipc_path
+    # ipc_path is now available through the global ipc instance
     from ..helpers.navigation import _first_blocking_door_from_waypoints
     from .travel import _handle_door_opening
+    from ..services.click_with_camera import click_npc_with_camera
     
     # 1) Check for doors on the path to the NPC
     gx, gy = npc.get("world", {}).get("x"), npc.get("world", {}).get("y")
     if isinstance(gx, int) and isinstance(gy, int):
-        wps, dbg_path = ipc_path(payload, goal=(gx, gy))
+        wps, dbg_path = ipc.path(goal=(gx, gy))
         door_plan = _first_blocking_door_from_waypoints(wps)
         if door_plan:
             # Handle door opening with retry logic
-            if not _handle_door_opening(door_plan, payload, ui):
+            if not _handle_door_opening(door_plan):
                 print(f"[COMBAT] Failed to open door on path to NPC")
                 return None
     
-    # Get NPC coordinates and bounds
-    rect = unwrap_rect(npc.get("clickbox"))
+    # Get NPC world coordinates
     world_coords = {
         "x": npc.get("world", {}).get("x"), 
         "y": npc.get("world", {}).get("y"), 
         "p": npc.get("world", {}).get("p", 0)
     }
-    
-    # Determine click coordinates
-    if rect:
-        cx, cy = rect_center_xy(rect)
-        anchor = {"bounds": rect}
-        point = {"x": cx, "y": cy}
-        print(f"[COMBAT] Using rect coordinates: ({cx}, {cy})")
-    elif isinstance(npc.get("canvas", {}).get("x"), (int, float)) and isinstance(npc.get("canvas", {}).get("y"), (int, float)):
-        cx, cy = int(npc.get("canvas", {}).get("x")), int(npc.get("canvas", {}).get("y"))
-        anchor = {}
-        point = {"x": cx, "y": cy}
-        print(f"[COMBAT] Using canvas coordinates: ({cx}, {cy})")
-    else:
-        print(f"[COMBAT] No valid coordinates found for NPC")
-        return None
     
     # Find the index of the 'Attack' action
     actions = npc.get("actions", [])
@@ -167,35 +141,17 @@ def _attack_npc(npc: dict, payload: dict, ui) -> Optional[dict]:
         print(f"[COMBAT] 'Attack' action not found in NPC actions: {actions}")
         return None
     
-    # Create the attack step
-    if attack_index == 0:
-        # Attack is the default action - use left click
-        print(f"[COMBAT] Using left-click for attack (index 0)")
-        step = emit({
-            "action": "npc-attack",
-            "click": ({"type": "rect-center"} if rect else {"type": "point", **point}),
-            "target": {"domain": "npc", "name": npc.get("name"), **anchor, "world": world_coords},
-        })
-    else:
-        # Attack is not default - use context menu
-        print(f"[COMBAT] Using context menu for attack (index {attack_index})")
-        step = emit({
-            "action": "npc-attack-context",
-            "click": {
-                "type": "context-select",
-                "option": "Attack",
-                "x": cx,
-                "y": cy,
-                "row_height": 16,
-                "start_dy": 18,
-                "open_delay_ms": 120
-            },
-            "target": {"domain": "npc", "name": npc.get("name"), **anchor, "world": world_coords} if rect else {"domain": "npc", "name": npc.get("name"), "world": world_coords},
-            "anchor": point
-        })
+    # Use click_npc_with_camera for the attack
+    npc_name = npc.get("name", "Unknown")
+    action = "Attack" if attack_index != 0 else None
     
-    # Execute the attack with camera integration
-    result = dispatch_with_camera(step, ui=ui, payload=payload, aim_ms=420)
+    print(f"[COMBAT] Attacking {npc_name} using click_npc_with_camera")
+    result = click_npc_with_camera(
+        npc_name=npc_name,
+        action=action,
+        world_coords=world_coords,
+        aim_ms=420
+    )
     
     if result:
         # Wait briefly to verify the attack was successful
@@ -203,3 +159,64 @@ def _attack_npc(npc: dict, payload: dict, ui) -> Optional[dict]:
         print(f"[COMBAT] Attack command executed successfully")
     
     return result
+
+
+def select_combat_style_for_training() -> None:
+    """Select combat style based on current skill levels and training goals."""
+    from .combat_interface import select_combat_style, current_combat_style
+    from .player import get_skill_level
+    
+    # Get current skill levels
+    attack_level = get_skill_level("attack")
+    defence_level = get_skill_level("defence")
+    strength_level = get_skill_level("strength")
+    
+    # Get current combat style
+    current_style = current_combat_style()
+    
+    # Check if we should switch away from current style
+    should_switch = False
+    current_skill_level = 0
+    
+    if current_style == 0:  # Attack style
+        current_skill_level = attack_level
+        should_switch = (attack_level % 5 == 0 or attack_level >= 40)
+    elif current_style == 1:  # Strength style
+        current_skill_level = strength_level
+        should_switch = (strength_level % 5 == 0)
+    elif current_style == 3:  # Defence style
+        current_skill_level = defence_level
+        should_switch = (defence_level % 5 == 0 or defence_level >= 10)
+    
+    # Determine target style based on 5-level increments and max levels
+    target_style = 1  # Default to Strength
+    reason = f"Defaulting to Strength training (level {strength_level})"
+    
+    # Calculate which skills need training (not at 5-level increments)
+    defence_needs_training = defence_level < 10 and (defence_level % 5 != 0)
+    attack_needs_training = attack_level < 40 and (attack_level % 5 != 0)
+    strength_needs_training = strength_level % 5 != 0
+    
+    # Priority 1: Train Defence if it needs training and is below max (10)
+    if defence_needs_training and defence_level < 10:
+        target_style = 3
+        reason = f"Training Defence (level {defence_level}, needs 5-level increment)"
+    # Priority 2: Train Attack if it needs training and is below max (40)
+    elif attack_needs_training and attack_level < 40:
+        target_style = 0
+        reason = f"Training Attack (level {attack_level}, needs 5-level increment)"
+    # Priority 3: Train Strength if it needs training
+    elif strength_needs_training:
+        target_style = 1
+        reason = f"Training Strength (level {strength_level}, needs 5-level increment)"
+    # Priority 4: If all skills are at 5-level increments, default to Strength
+    else:
+        target_style = 1
+        reason = f"Training Strength (all skills at 5-level increments: Def {defence_level}, Att {attack_level}, Str {strength_level})"
+
+    # Only switch if we need to change styles or if we should switch based on current skill level
+    if should_switch or current_style != target_style:
+        print(f"[COMBAT] {reason}")
+        select_combat_style(target_style)
+    else:
+        print(f"[COMBAT] Keeping current style {current_style} (no switch needed)")

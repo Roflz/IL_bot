@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 from typing import Optional
-from .runtime import emit
-from ..helpers.context import get_payload, get_ui
-from ..helpers.tab import is_inventory_tab_open, is_tab_open, find_tab_by_name
+from ..helpers.tab import is_tab_open, find_tab_by_name
 
 def open_tab(tab_name: str) -> Optional[dict]:
     """
@@ -32,12 +30,11 @@ def open_tab(tab_name: str) -> Optional[dict]:
     
     if x is None or y is None:
         return None
-    
-    # Use direct IPC click instead of UI dispatch
+
     try:
-        from ..services.ipc_client import RuneLiteIPC
         
-        ipc = RuneLiteIPC()
+        from ..helpers.runtime_utils import ipc
+        tab_data = ipc.get_tab() or {}
         click_resp = ipc._send({
             "cmd": "click",
             "x": int(x),

@@ -1,28 +1,19 @@
 # combat_interface.py
 from __future__ import annotations
 from typing import Optional, List, Dict, Any
-import time
 
 from . import tab
-from .runtime import emit
 from .timing import wait_until
-from ..helpers.context import get_payload, get_ui
-from ..helpers.ipc import ipc_send
-from ..services.camera_integration import dispatch_with_camera
+from ..helpers.runtime_utils import ipc, ui, dispatch
 
 
-def get_combat_styles(payload: Optional[dict] = None) -> List[Dict[str, Any]]:
+def get_combat_styles() -> List[Dict[str, Any]]:
     """
     Get all available combat styles from the combat interface.
-    
-    Args:
-        payload: Optional payload, will get fresh if None
         
     Returns:
         List of combat style widgets with their data
     """
-    if payload is None:
-        payload = get_payload()
     
     # Combat style widget IDs
     combat_style_widgets = [
@@ -36,10 +27,7 @@ def get_combat_styles(payload: Optional[dict] = None) -> List[Dict[str, Any]]:
     
     for style in combat_style_widgets:
         # Get widget data
-        resp = ipc_send({
-            "cmd": "get_widget",
-            "widget_id": style["id"]
-        }, payload)
+        resp = ipc.get_widget_info(style["id"])
         
         if resp and resp.get("ok") and resp.get("widget"):
             widget_data = resp["widget"]
@@ -58,23 +46,16 @@ def get_combat_styles(payload: Optional[dict] = None) -> List[Dict[str, Any]]:
     return styles
 
 
-def select_combat_style(style_index: int, payload: Optional[dict] = None, ui=None) -> Optional[dict]:
+def select_combat_style(style_index: int) -> Optional[dict]:
     """
     Select a combat style by clicking on it.
     
     Args:
         style_index: Index of combat style to select (0-3)
-        payload: Optional payload, will get fresh if None
-        ui: Optional UI instance, will get if None
         
     Returns:
         UI dispatch result if successful, None if failed
     """
-    if payload is None:
-        payload = get_payload()
-    if ui is None:
-        ui = get_ui()
-    
     if style_index < 0 or style_index > 3:
         print(f"[COMBAT] Invalid combat style index: {style_index}")
         return None
@@ -88,10 +69,7 @@ def select_combat_style(style_index: int, payload: Optional[dict] = None, ui=Non
     widget_id = widget_ids[style_index]
     
     # Get widget data to get bounds
-    resp = ipc_send({
-        "cmd": "get_widget", 
-        "widget_id": widget_id
-    }, payload)
+    resp = ipc.get_widget_info(widget_id)
     
     if not resp or not resp.get("ok") or not resp.get("widget"):
         print(f"[COMBAT] Failed to get combat style widget {style_index}")
@@ -114,14 +92,14 @@ def select_combat_style(style_index: int, payload: Optional[dict] = None, ui=Non
     print(f"[COMBAT] Selecting combat style {style_index} at ({x}, {y})")
     
     # Create click step
-    step = emit({
+    step = {
         "action": "combat-style-select",
         "click": {"type": "point", "x": x, "y": y},
         "target": {"domain": "combat", "name": f"style_{style_index}"}
-    })
+    }
     
     # Execute the click
-    result = ui.dispatch(step)
+    result = dispatch(step)
     
     if result:
         print(f"[COMBAT] Successfully selected combat style {style_index}")
@@ -131,24 +109,16 @@ def select_combat_style(style_index: int, payload: Optional[dict] = None, ui=Non
     return result
 
 
-def current_combat_style(payload: Optional[dict] = None) -> Optional[int]:
+def current_combat_style() -> Optional[int]:
     """
     Get the currently selected combat style using RuneLite's COM_MODE VarPlayer.
-    
-    Args:
-        payload: Optional payload, will get fresh if None
         
     Returns:
         Index of currently selected combat style (0-3), or None if unknown
     """
-    if payload is None:
-        payload = get_payload()
     
     # Use RuneLite's COM_MODE VarPlayer to get current combat style
-    resp = ipc_send({
-        "cmd": "get_varp",
-        "id": 43  # VarPlayerID.COM_MODE
-    }, payload)
+    resp = ipc.get_varp(43)  # VarPlayerID.COM_MODE
     
     if not resp or not resp.get("ok"):
         print(f"[COMBAT] Failed to get current combat style from RuneLite API")
@@ -174,30 +144,18 @@ def current_combat_style(payload: Optional[dict] = None) -> Optional[int]:
     return style_index
 
 
-def select_auto_retaliate(payload: Optional[dict] = None, ui=None) -> Optional[dict]:
+def select_auto_retaliate() -> Optional[dict]:
     """
     Toggle auto retaliate by clicking on it.
-    
-    Args:
-        payload: Optional payload, will get fresh if None
-        ui: Optional UI instance, will get if None
         
     Returns:
         UI dispatch result if successful, None if failed
     """
-    if payload is None:
-        payload = get_payload()
-    if ui is None:
-        ui = get_ui()
-    
     # Auto retaliate widget ID
     widget_id = 38862882
     
     # Get widget data to get bounds
-    resp = ipc_send({
-        "cmd": "get_widget",
-        "widget_id": widget_id
-    }, payload)
+    resp = ipc.get_widget_info(widget_id)
     
     if not resp or not resp.get("ok") or not resp.get("widget"):
         print(f"[COMBAT] Failed to get auto retaliate widget")
@@ -220,14 +178,14 @@ def select_auto_retaliate(payload: Optional[dict] = None, ui=None) -> Optional[d
     print(f"[COMBAT] Toggling auto retaliate at ({x}, {y})")
     
     # Create click step
-    step = emit({
+    step = {
         "action": "auto-retaliate-toggle",
         "click": {"type": "point", "x": x, "y": y},
         "target": {"domain": "combat", "name": "auto_retaliate"}
-    })
+    }
     
     # Execute the click
-    result = ui.dispatch(step)
+    result = dispatch(step)
     
     if result:
         print(f"[COMBAT] Successfully toggled auto retaliate")
@@ -237,27 +195,19 @@ def select_auto_retaliate(payload: Optional[dict] = None, ui=None) -> Optional[d
     return result
 
 
-def auto_retaliate_on(payload: Optional[dict] = None) -> bool:
+def auto_retaliate_on() -> bool:
     """
     Check if auto retaliate is currently on.
-    
-    Args:
-        payload: Optional payload, will get fresh if None
         
     Returns:
         True if auto retaliate is on, False otherwise
     """
-    if payload is None:
-        payload = get_payload()
     
     # Auto retaliate widget ID
     widget_id = 38862882
     
     # Get widget data
-    resp = ipc_send({
-        "cmd": "get_widget",
-        "widget_id": widget_id
-    }, payload)
+    resp = ipc.get_widget_info(widget_id)
     
     if not resp or not resp.get("ok") or not resp.get("widget"):
         print(f"[COMBAT] Failed to get auto retaliate widget")

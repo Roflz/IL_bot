@@ -2,8 +2,6 @@
 import time
 from typing import Callable, Optional, Union
 
-from ilbot.ui.simple_recorder.helpers.context import get_ui, set_payload, get_payload
-
 BoolOrCallable = Union[bool, Callable[[], bool]]
 
 def wait_until(
@@ -17,7 +15,6 @@ def wait_until(
 
     - Always wait at least `min_wait_ms` before you are allowed to return True.
     - After the min wait, poll up to `max_wait_ms` total (if provided).
-    - Before every poll, refresh the payload from UI (if available) and set it globally.
     """
     if not callable(condition):
         raise TypeError("wait_until(condition): condition must be callable")
@@ -35,27 +32,9 @@ def wait_until(
     def _now_ms() -> int:
         return int((time.monotonic() - t0) * 1000)
 
-    def _refresh_payload() -> dict:
-        ui = get_ui()
-        if ui and hasattr(ui, "latest_payload"):
-            try:
-                p = ui.latest_payload() or {}
-                set_payload(p)
-                return p
-            except Exception:
-                pass
-        # fallback to whatever is currently stored
-        return get_payload() or {}
-
     def _check() -> bool:
-        # refresh before every check
-        payload = _refresh_payload()
         try:
-            # prefer calling with payload; fall back to zero-arg if incompatible
-            try:
-                return bool(condition(payload))
-            except TypeError:
-                return bool(condition())
+            return bool(condition())
         except Exception:
             return False
 

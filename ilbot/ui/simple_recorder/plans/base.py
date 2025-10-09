@@ -3,10 +3,11 @@ class Plan:
     Each plan exposes:
       - id: str
       - label: str
-      - compute_phase(payload: dict, craft_recent: bool) -> str
-      - build_action_plan(payload: dict, phase: str) -> dict
+      - set_phase(phase: str, camera_setup: bool = True) -> str
+      - loop(ui, payload) -> int
     """
     id: str
     label: str
-    def compute_phase(self, payload: dict, craft_recent: bool) -> str: ...
-    def build_action_plan(self, payload: dict, phase: str) -> dict: ...
+    
+    def set_phase(self, phase: str, camera_setup: bool = True) -> str: ...
+    def loop(self, ui) -> int: ...

@@ -1,7 +1,5 @@
 # helpers/quests.py
 
-from ilbot.ui.simple_recorder.helpers.context import get_payload
-
 def _norm(s: str) -> str:
     """Lightweight normalization so 'Romeo & Juliet' == 'romeo and juliet'."""
     return "".join(ch for ch in s.lower().replace("&", "and") if ch.isalnum())
@@ -18,27 +16,27 @@ def _find_quest_key(name: str, quests: dict) -> str | None:
             return k
     return None
 
-def quest_state(name: str, payload: dict | None = None) -> str | None:
+def quest_state(name: str) -> str | None:
     """
-    Return the quest's state string from payload['quests'] or None if unknown.
+    Return the quest's state string from IPC or None if unknown.
     States are the exact strings exported by RuneLite (e.g., NOT_STARTED, IN_PROGRESS, FINISHED).
     """
-    if payload is None:
-        payload = get_payload()
-    quests = (payload or {}).get("quests") or {}
+    from .runtime_utils import ipc
+    quests_data = ipc.get_quests() or {}
+    quests = quests_data.get("quests") or {}
     key = _find_quest_key(name, quests)
     return quests.get(key) if key else None
 
-def quest_is(name: str, state: str, payload: dict | None = None) -> bool:
+def quest_is(name: str, state: str) -> bool:
     """True if quest_state(name) equals state (case-insensitive)."""
-    s = quest_state(name, payload)
+    s = quest_state(name)
     return isinstance(s, str) and s.upper() == (state or "").upper()
 
-def quest_in_progress(name: str, payload: dict | None = None) -> bool:
-    return quest_is(name, "IN_PROGRESS", payload)
+def quest_in_progress(name: str) -> bool:
+    return quest_is(name, "IN_PROGRESS")
 
-def quest_finished(name: str, payload: dict | None = None) -> bool:
-    return quest_is(name, "FINISHED", payload)
+def quest_finished(name: str) -> bool:
+    return quest_is(name, "FINISHED")
 
-def quest_not_started(name: str, payload: dict | None = None) -> bool:
-    return quest_is(name, "NOT_STARTED", payload)
+def quest_not_started(name: str) -> bool:
+    return quest_is(name, "NOT_STARTED")

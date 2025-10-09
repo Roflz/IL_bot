@@ -8,8 +8,8 @@ import os
 import time
 from typing import Dict, List, Tuple, Optional, Set
 from pathlib import Path
-from helpers.context import get_payload
-from helpers.ipc import ipc_send
+
+from ilbot.ui.simple_recorder.helpers.ipc import ipc_send
 
 
 class CollisionMapper:
@@ -39,7 +39,7 @@ class CollisionMapper:
         """Check if we should perform a new scan."""
         return time.time() - self.last_scan_time > self.scan_interval
     
-    def scan_current_scene(self, payload: Optional[dict] = None) -> bool:
+    def scan_current_scene(self) -> bool:
         """
         Scan the current scene for collision data.
         
@@ -49,12 +49,6 @@ class CollisionMapper:
         Returns:
             True if scan was successful, False otherwise
         """
-        if payload is None:
-            payload = get_payload()
-        
-        if not payload:
-            print("[COLLISION_MAPPER] No payload available")
-            return False
         
         # Check if we should scan
         if not self.should_scan():
@@ -63,7 +57,7 @@ class CollisionMapper:
         print("[COLLISION_MAPPER] Scanning current scene...")
         
         # Get collision data from current scene
-        collision_resp = ipc_send({"cmd": "scan_scene"}, payload)
+        collision_resp = ipc_send({"cmd": "scan_scene"})
         if not collision_resp or not collision_resp.get("ok"):
             print(f"[COLLISION_MAPPER] Failed to scan scene: {collision_resp}")
             return False
@@ -105,7 +99,7 @@ class CollisionMapper:
             new_tiles += 1
         
         # Get water regions
-        water_resp = ipc_send({"cmd": "detect_water"}, payload)
+        water_resp = ipc_send({"cmd": "detect_water"})
         if water_resp and water_resp.get("ok"):
             water_regions = water_resp.get("waterRegions", [])
             for region_data in water_regions:
@@ -284,9 +278,9 @@ class CollisionMapper:
 _collision_mapper = CollisionMapper()
 
 
-def scan_current_scene(payload: Optional[dict] = None) -> bool:
+def scan_current_scene() -> bool:
     """Scan the current scene for collision data."""
-    return _collision_mapper.scan_current_scene(payload)
+    return _collision_mapper.scan_current_scene()
 
 
 def is_walkable(x: int, y: int, plane: int = 0) -> bool:

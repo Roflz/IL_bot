@@ -1,5 +1,6 @@
 # goblin_diplomacy.py
 import time
+import logging
 
 from ..actions import objects, player, tab
 from ..actions.player import get_player_plane
@@ -23,7 +24,7 @@ class GoblinDiplomacyPlan(Plan):
     label = "Quest: Goblin Diplomacy"
 
     def __init__(self):
-        self.state = {"phase": "GO_TO_CLOSEST_BANK"}  # gate: ensure items first
+        self.state = {"phase": "START_QUEST"}  # gate: ensure items first
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
         
@@ -31,26 +32,25 @@ class GoblinDiplomacyPlan(Plan):
         from ilbot.ui.simple_recorder.helpers.camera import setup_camera_optimal
         setup_camera_optimal()
 
-    def compute_phase(self, payload, craft_recent):
-        return self.state.get("phase", "GO_TO_CLOSEST_BANK")
 
-    def set_phase(self, phase: str, ui=None, camera_setup: bool = True):
+    def set_phase(self, phase: str, camera_setup: bool = True):
         from ..helpers.phase_utils import set_phase_with_camera
-        return set_phase_with_camera(self, phase, ui, camera_setup)
+        return set_phase_with_camera(self, phase, camera_setup)
 
-    def loop(self, ui, payload):
+    def loop(self, ui):
         phase = self.state.get("phase", "GO_TO_CLOSEST_BANK")
-        if quest.quest_finished("Goblin Diplomacy"):
+        if quest.quest_finished("Goblin Diplomacy") and not phase == 'DONE':
             if chat.can_continue():
                 chat.continue_dialogue()
                 return
+            press_esc()
             self.set_phase('DONE', ui)
             return
 
         match(phase):
             case "GO_TO_CLOSEST_BANK":
-                if not near_any_bank(payload):
-                    trav.go_to_closest_bank(payload)
+                if not near_any_bank():
+                    trav.go_to_closest_bank()
                 else:
                     self.set_phase("CHECK_BANK_FOR_QUEST_ITEMS", ui)
                 return
@@ -76,7 +76,7 @@ class GoblinDiplomacyPlan(Plan):
                         else:
                             # Item not in bank, need to buy from GE
                             missing_items.append(item)
-                            ui.debug(f"[GD] Item {item} not found in bank, need to buy from GE")
+                            logging.info(f"[GD] Item {item} not found in bank, need to buy from GE")
                     
                     if missing_items:
                         # Some items are missing, need to buy from GE
@@ -105,7 +105,7 @@ class GoblinDiplomacyPlan(Plan):
                         for item in required_items:
                             if item == "Goblin mail":
                                 # Need 3 goblin mail
-                                if not bank.inv_has(item, min_qty=3):
+                                if not inv.inv_has(item, min_qty=3):
                                     has_all_required = False
                                     break
                             else:
@@ -125,7 +125,7 @@ class GoblinDiplomacyPlan(Plan):
                     else:
                         # All items are in bank, but we need to withdraw them
                         # This shouldn't happen since we just checked, but handle it
-                        ui.debug("[GD] All items found in bank, withdrawing...")
+                        logging.info("[GD] All items found in bank, withdrawing...")
                         bank.ensure_note_mode_disabled()
                         
                         for item in required_items:
@@ -171,16 +171,17 @@ class GoblinDiplomacyPlan(Plan):
                     return
                 
                 # Open bank and deposit all inventory first
-                if bank.is_closed() and not bank.inv_has("coins"):
+                if bank.is_closed() and not inv.inv_has("coins"):
                     bank.open_bank()
                     return
-                if bank.inv_has("coins") and bank.is_open():
+                if inv.inv_has("coins") and bank.is_open():
                     bank.close_bank()
                     return
                 
                 # Deposit all inventory items to get accurate counts
-                bank.deposit_inventory()
-                time.sleep(0.5)  # Brief wait for deposit to complete
+                if bank.is_open():
+                    bank.deposit_inventory()
+                    time.sleep(0.5)  # Brief wait for deposit to complete
                 
                 # Check if we already calculated items_to_buy in a previous loop
                 if "items_to_buy" not in self.state:
@@ -201,19 +202,19 @@ class GoblinDiplomacyPlan(Plan):
                     current_goblin_mail = bank.get_item_count("Goblin mail")
                     needed_goblin_mail = max(0, 3 - current_goblin_mail)
                     if needed_goblin_mail > 0:
-                        items_to_buy["Goblin mail"] = (needed_goblin_mail, 10)
+                        items_to_buy["Goblin mail"] = (needed_goblin_mail, 20)
                     
                     # Save items_to_buy to state for future loops
                     self.state["items_to_buy"] = items_to_buy
-                    ui.debug(f"[GD] Calculated items to buy: {items_to_buy}")
+                    logging.info(f"[GD] Calculated items to buy: {items_to_buy}")
                 else:
                     # Use previously calculated items_to_buy
                     items_to_buy = self.state["items_to_buy"]
-                    ui.debug(f"[GD] Using cached items to buy: {items_to_buy}")
+                    logging.info(f"[GD] Using cached items to buy: {items_to_buy}")
                 
                 # If we don't need to buy anything, move to next phase
                 if not items_to_buy:
-                    ui.debug("[GD] Already have all required items")
+                    logging.info("[GD] Already have all required items")
                     if ge.is_open():
                         ge.close_ge()
                     else:
@@ -221,15 +222,15 @@ class GoblinDiplomacyPlan(Plan):
                     return
                 
                 # Use the centralized GE buying method
-                ui.debug("[GD] Buying quest items from GE...")
+                logging.info("[GD] Buying quest items from GE...")
                 result = ge.buy_item_from_ge(items_to_buy, ui)
                 if result is None:
                     # Still working on buying items, return to continue next tick
                     return
                 elif result is True:
-                    ui.debug("[GD] Successfully bought all quest items")
+                    logging.info("[GD] Successfully bought all quest items")
                 else:
-                    ui.debug("[GD] Failed to buy items, retrying...")
+                    logging.info("[GD] Failed to buy items, retrying...")
                     return
                 
                 # If we get here, all items should be bought - verify and go to bank
@@ -272,7 +273,8 @@ class GoblinDiplomacyPlan(Plan):
                         "General Bentnoze",
                         options=[
                             "Do you want me to pick an armour",
-                            "What about a different colour", 
+                            "What about a different colour",
+                            "Yes, he looks fat.",
                             "Yes."
                         ]
                     )
@@ -281,8 +283,8 @@ class GoblinDiplomacyPlan(Plan):
 
             case "TALK_TO_GENERAL_WARTFACE":
                 if quest.quest_finished("Goblin Diplomacy"):
-                    press_esc(payload, ui)
-                    self.set_phase("DONE", ui)
+                    press_esc()
+                    self.set_phase("DONE")
                     return
 
                 if not trav.in_area("GOBLIN_VILLAGE") and not npc.closest_npc_by_name("General Bentnoze"):
@@ -304,45 +306,4 @@ class GoblinDiplomacyPlan(Plan):
             case "DONE":
                 return
 
-    def ensure_have_item(self, item: str, ui, payload) -> bool | None:
-        """
-        Idempotent: returns True only when the item is in inventory.
-        Otherwise it performs the next minimal step toward getting it and returns None.
-        """
-        # 1) Already in inventory?
-        if inv.has_item(item):
-            return True
-
-        # 2) Nearby bank? Open and try to withdraw.
-        if near_any_bank(payload):
-            if bank.is_closed():
-                bank.open_bank()
-                wait_until(bank.is_open, max_wait_ms=6000)
-                return None
-
-            if bank.is_open():
-                # If we're carrying junk, clear it once so withdraw has space.
-                if not inv.is_empty():
-                    bank.deposit_inventory()
-                    wait_until(inv.is_empty, max_wait_ms=4000, min_wait_ms=150)
-                    return None
-
-                # Withdraw if present; otherwise move on.
-                if bank.has_item(item):
-                    if item == "Goblin mail":
-                        bank.withdraw_item(item, quantity=3)
-                    else:
-                        bank.withdraw_item(item)
-                    wait_until(lambda: inv.has_item(item), max_wait_ms=4000)
-                    bank.close_bank()
-                    return None  # next loop sees inv.has_item(item) and returns True
-                else:
-                    bank.close_bank()
-                    # fall through to GE
-                    # (don't return True—still need to buy)
-
-        # 3) Not in bank, buy at GE (this function is fully idempotent across ticks)
-        # Special quantity handling for Goblin mail
-        quantity = 3 if item == "Goblin mail" else 1
-        return ge.buy_item_from_ge({item: (quantity, 5)}, ui)
 

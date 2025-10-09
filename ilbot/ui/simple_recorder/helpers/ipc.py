@@ -1,148 +1,470 @@
 import json, socket, time
-from typing import Optional, Tuple, List, Dict, Any
-from heapq import heappush, heappop
-
-from ilbot.ui.simple_recorder.helpers.context import get_payload
+from typing import Optional
 
 
-def ipc_port_from_payload(payload: dict, default: int = 17000) -> int:
-    return payload["__ipc"].port
-
-def ipc_send(msg: dict, payload: dict | None = None, timeout: float = 0.35) -> Optional[dict]:
-    if payload is None:
-        payload = get_payload()
-    host = "127.0.0.1"
-    port = ipc_port_from_payload(payload)
-    t0 = time.time()
-    try:
-        line = json.dumps(msg, separators=(",", ":"))
-        # print(f"[IPC->] port={port} {line}")
-        with socket.create_connection((host, port), timeout=timeout) as s:
-            s.settimeout(timeout)
-            s.sendall((line + "\n").encode("utf-8"))
-            data = b""
-            while True:
-                ch = s.recv(1)
-                if not ch or ch == b"\n":
-                    break
-                data += ch
-        resp = json.loads(data.decode("utf-8")) if data else None
-        dt = int((time.time() - t0)*1000)
-        print(f"[<-IPC] {resp} ({dt} ms)")
-        return resp
-    except Exception as e:
-        dt = int((time.time() - t0)*1000)
-        print(f"[IPC ERR] {type(e).__name__}: {e} ({dt} ms)")
-        return None
-
-def ipc_project_many(payload, wps):
+class IPCClient:
     """
-    Project world tiles to canvas AND preserve 'door' metadata.
-    Returns:
-      out: [{onscreen, canvas, world:{x,y,p}, door?}, ...]
-      dbg: raw resp from IPC
+    Consolidated IPC client that handles all communication with RuneLite.
+    This replaces the scattered ipc_send functions and RuneLiteIPC class.
     """
-    tiles = [{"x": int(w["x"]), "y": int(w["y"])} for w in wps]
-    resp = ipc_send({"cmd": "tilexy_many", "tiles": tiles})
-    results = resp.get("results", []) or []
+    
+    def __init__(self, host="127.0.0.1", port=17000, pre_action_ms=250, timeout_s=2.0):
+        self.host = host
+        self.port = port
+        self.pre_action_ms = pre_action_ms
+        self.timeout_s = timeout_s
 
-    out = []
-    for i, (w, r) in enumerate(zip(wps, results)):
-        row = {
-            "onscreen": (r or {}).get("onscreen"),
-            "canvas":  (r or {}).get("canvas"),
-            "world":   {"x": int(w["x"]), "y": int(w["y"]), "p": int(w.get("p", 0))},
+    def _send(self, msg: dict, timeout: float = None) -> Optional[dict]:
+        """Internal method to send IPC messages."""
+        timeout = timeout or self.timeout_s
+        t0 = time.time()
+        try:
+            line = json.dumps(msg, separators=(",", ":"))
+            with socket.create_connection((self.host, self.port), timeout=timeout) as s:
+                s.settimeout(timeout)
+                s.sendall((line + "\n").encode("utf-8"))
+                data = b""
+                while True:
+                    ch = s.recv(1)
+                    if not ch or ch == b"\n":
+                        break
+                    data += ch
+                resp = json.loads(data.decode("utf-8")) if data else None
+                dt = int((time.time() - t0)*1000)
+                return resp
+        except Exception as e:
+            dt = int((time.time() - t0)*1000)
+            print(f"[IPC ERR] {type(e).__name__}: {e} ({dt} ms)")
+            return None
+
+    # ===== BASIC IPC METHODS =====
+    
+    def ping(self) -> bool:
+        """Test if RuneLite is responding."""
+        try:
+            r = self._send({"cmd": "ping"})
+            return bool(r.get("ok"))
+        except Exception:
+            return False
+
+    def focus(self):
+        """Focus the RuneLite window."""
+        try:
+            self._send({"cmd": "focus"})
+        except Exception:
+            pass
+
+    # ===== CLICKING METHODS =====
+    
+    def click(self, x: int, y: int, button: int = 1, hover_only: bool = False, pre_ms: int = None):
+        """Click at canvas coordinates."""
+        delay = self.pre_action_ms if pre_ms is None else pre_ms
+        if delay > 0:
+            time.sleep(delay / 1000.0)
+        
+        msg = {"cmd": "click", "x": int(x), "y": int(y), "button": int(button)}
+        if hover_only:
+            msg["hover_only"] = True
+        return self._send(msg)
+
+    def click_canvas(self, x: int, y: int, button: int = 1, pre_ms: int = None):
+        """Alias for click method."""
+        return self.click(x, y, button, pre_ms=pre_ms)
+
+    # ===== KEYBOARD METHODS =====
+    
+    def key(self, k: str, pre_ms: int = None):
+        """Send a key press."""
+        delay = self.pre_action_ms if pre_ms is None else pre_ms
+        if delay > 0:
+            time.sleep(delay / 1000.0)
+        return self._send({"cmd": "key", "k": str(k)})
+
+    def type(self, text: str, enter: bool = True, per_char_ms: int = 30):
+        """Type text with optional enter."""
+        payload = {
+            "cmd": "type",
+            "text": str(text),
+            "enter": bool(enter),
+            "perCharMs": int(per_char_ms),
         }
-        # ✨ keep door info from projection if present, else from the waypoint itself
-        door = None
-        if isinstance(r, dict) and isinstance(r.get("door"), dict):
-            door = r["door"]
-        elif isinstance(w, dict) and isinstance(w.get("door"), dict):
-            door = w["door"]
-        if door:
-            row["door"] = door
+        return self._send(payload)
 
-        out.append(row)
+    def key_hold(self, key: str, ms: int = 180):
+        """Hold a key for specified milliseconds."""
+        return self._send({"cmd": "keyHold", "key": str(key), "ms": int(ms)})
+    
+    def key_press(self, key: str):
+        """Press a key down."""
+        return self._send({"cmd": "keyPress", "key": str(key)})
+    
+    def key_release(self, key: str):
+        """Release a key."""
+        return self._send({"cmd": "keyRelease", "key": str(key)})
 
-    return out, resp
+    def scroll(self, amount: int) -> dict:
+        """Mouse wheel scroll (positive = zoom in, negative = zoom out)."""
+        return self._send({"cmd": "scroll", "amount": int(amount)})
 
-def ipc_mask(payload: dict, radius: int = 15) -> dict | None:
-    ipc = payload.get("__ipc")
-    if not ipc:
-        return None
-    try:
-        m = ipc._send({"cmd": "mask", "radius": int(radius)})
-        return m if isinstance(m, dict) and m.get("ok") else None
-    except Exception:
-        return None
+    # ===== GAME STATE METHODS =====
+    
+    def get_player(self) -> dict:
+        """Get player information."""
+        return self._send({"cmd": "get_player"}) or {}
 
-def astar_on_rows(rows: list[str], start_rc: tuple[int,int], goal_rc: tuple[int,int]) -> list[tuple[int,int]]:
-    # rows[0] is northmost, columns left->right; r,c are indices into rows
-    R, C = len(rows), len(rows[0]) if rows else 0
-    def walkable(r,c): return 0 <= r < R and 0 <= c < C and rows[r][c] == '.'
-    sr, sc = start_rc; gr, gc = goal_rc
-    if not (walkable(sr,sc) and 0 <= gr < R and 0 <= gc < C): return []
-    # If goal blocked, search for nearest walkable in 3×3 then 5×5; else clamp later
-    if not walkable(gr,gc):
-        found = None
-        for rad in (1,2,3):
-            for rr in range(gr-rad, gr+rad+1):
-                for cc in range(gc-rad, gc+rad+1):
-                    if walkable(rr,cc): found = (rr,cc); break
-                if found: break
-            if found: break
-        if found: gr,gc = found
+    def get_inventory(self) -> dict:
+        """Get inventory information."""
+        return self._send({"cmd": "get_inventory"}) or {}
 
-    openh = []; heappush(openh, (0, (sr,sc)))
-    came = { (sr,sc): None }
-    gscore = { (sr,sc): 0 }
-    def h(r,c): return abs(r-gr)+abs(c-gc)
-    while openh:
-        _, (r,c) = heappop(openh)
-        if (r,c) == (gr,gc): break
-        for dr,dc in ((1,0),(-1,0),(0,1),(0,-1)):
-            nr, nc = r+dr, c+dc
-            if not walkable(nr,nc): continue
-            ng = gscore[(r,c)] + 1
-            if ng < gscore.get((nr,nc), 1e9):
-                gscore[(nr,nc)] = ng
-                came[(nr,nc)] = (r,c)
-                heappush(openh, (ng + h(nr,nc), (nr,nc)))
-    if (gr,gc) not in came: return []
-    # Reconstruct
-    path = []
-    cur = (gr,gc)
-    while cur is not None:
-        path.append(cur)
-        cur = came.get(cur)
-    path.reverse()
-    return path
+    def get_equipment(self) -> dict:
+        """Get equipment information."""
+        return self._send({"cmd": "get_equipment"}) or {}
 
-def rows_to_world(mask: dict, rc_path: list[tuple[int,int]]) -> list[tuple[int,int]]:
-    """Map mask row/col indices back to world x,y."""
-    if not rc_path: return []
-    radius = int(mask["radius"])
-    origin = mask["origin"]; wx0, wy0 = int(origin["x"]), int(origin["y"])
-    # rows indexing: r=0 is wy0+radius (north), c=0 is wx0-radius (west)
-    out = []
-    for r,c in rc_path:
-        wx = (wx0 - radius) + c
-        wy = (wy0 + radius) - r
-        out.append((wx, wy))
-    return out
+    def get_bank(self) -> dict:
+        """Get bank information."""
+        return self._send({"cmd": "get_bank"}) or {}
 
-def ipc_path(payload, rect=None, goal=None, max_wps=15):
-    req = {"cmd": "path"}
-    if rect:
-        minX, maxX, minY, maxY = rect
-        req.update({"minX": minX, "maxX": maxX, "minY": minY, "maxY": maxY})
-    if goal:
-        gx, gy = goal
-        req.update({"goalX": gx, "goalY": gy})
-    if max_wps is not None:
-        req["maxWps"] = int(max_wps)
+    def get_bank_inventory(self) -> dict:
+        """Get bank inventory information."""
+        return self._send({"cmd": "get_bank_inventory"}) or {}
 
-    resp = ipc_send(req)
-    # ← keep waypoints exactly as provided, including "door"
-    wps = resp.get("waypoints", []) or []
-    return wps, resp
+    def get_npcs(self, name: str = None) -> dict:
+        """Get NPCs, optionally filtered by name."""
+        msg = {"cmd": "npcs"}
+        if name:
+            msg["name"] = name
+        return self._send(msg) or {}
+
+    def get_closest_npcs(self) -> list:
+        """Get closest NPCs (returns list of NPCs sorted by distance)."""
+        response = self._send({"cmd": "npcs"})
+        if response and response.get("ok"):
+            return response.get("npcs", [])
+        return []
+
+    def find_npc(self, name: str) -> dict:
+        """Find a specific NPC by name (returns closest match)."""
+        response = self._send({"cmd": "npcs", "name": name})
+        if response and response.get("ok"):
+            npcs = response.get("npcs", [])
+            if npcs:
+                return {"ok": True, "found": True, "npc": npcs[0]}
+            else:
+                return {"ok": True, "found": False, "npc": None}
+        return {"ok": False, "found": False, "npc": None}
+
+    def get_npcs_by_name(self, name: str) -> list:
+        """Get all NPCs matching the given name."""
+        response = self._send({"cmd": "npcs", "name": name})
+        if response and response.get("ok"):
+            return response.get("npcs", [])
+        return []
+
+    def get_npcs_in_radius(self, radius: int = 26) -> list:
+        """Get all NPCs within the specified radius."""
+        response = self._send({"cmd": "npcs"})
+        if response and response.get("ok"):
+            npcs = response.get("npcs", [])
+            # Filter by radius (the Java command already filters by radius 26 by default)
+            return [npc for npc in npcs if npc.get("distance", 999) <= radius]
+        return []
+
+    def get_npcs_in_combat(self) -> list:
+        """Get all NPCs currently in combat."""
+        response = self._send({"cmd": "npcs"})
+        if response and response.get("ok"):
+            npcs = response.get("npcs", [])
+            return [npc for npc in npcs if npc.get("inCombat", False)]
+        return []
+
+    def get_npcs_by_action(self, action: str) -> list:
+        """Get all NPCs that have the specified action available."""
+        response = self._send({"cmd": "npcs"})
+        if response and response.get("ok"):
+            npcs = response.get("npcs", [])
+            action_lower = action.lower()
+            return [npc for npc in npcs if action_lower in [a.lower() for a in (npc.get("actions") or [])]]
+        return []
+
+    def get_chat_widgets(self) -> dict:
+        """Get chat widget information (ChatLeft, ChatMenu, ChatRight)."""
+        return self._send({"cmd": "get_chat_widgets"}) or {}
+
+    def get_chat(self) -> dict:
+        """Get chat widget information (alias for get_chat_widgets)."""
+        return self.get_chat_widgets()
+
+    def get_quests(self) -> dict:
+        """Get quest state information for all quests."""
+        return self._send({"cmd": "get_quests"}) or {}
+
+    def click_continue_button(self, chat_type: str = "left") -> bool:
+        """
+        Click the continue button for chat dialogue.
+        
+        Args:
+            chat_type: "left" for NPC dialogue continue, "right" for player dialogue continue
+        
+        Returns:
+            True if click was successful, False otherwise
+        """
+        chat_widgets = self.get_chat_widgets()
+        if not chat_widgets.get("ok"):
+            return False
+        
+        # Determine which continue button to click
+        if chat_type.lower() == "left":
+            continue_info = chat_widgets.get("chatLeft", {}).get("continue", {})
+        elif chat_type.lower() == "right":
+            continue_info = chat_widgets.get("chatRight", {}).get("continue", {})
+        else:
+            return False
+        
+        # Check if continue button exists and is clickable
+        if not continue_info.get("exists") or not continue_info.get("hasListener"):
+            return False
+        
+        # Get center coordinates for clicking
+        center = continue_info.get("center")
+        if not center:
+            return False
+        
+        # Click the continue button
+        click_result = self._send({
+            "cmd": "click",
+            "x": center.get("x"),
+            "y": center.get("y"),
+            "button": 1
+        })
+        
+        return click_result and click_result.get("ok", False)
+
+    def get_objects(self, name: str = None, types: list = None) -> list:
+        """Get objects, optionally filtered by name and types."""
+        msg = {"cmd": "objects"}
+        if name:
+            msg["name"] = name
+        if types:
+            msg["types"] = types
+        return self._send(msg) or []
+
+    def get_closest_objects(self) -> list:
+        """Get closest objects."""
+        return self._send({"cmd": "objects"}) or []
+
+    def find_object(self, name: str, types: list = None) -> dict:
+        """Find a specific object by name."""
+        msg = {"cmd": "find_object", "name": name}
+        if types:
+            msg["types"] = types
+        return self._send(msg) or {}
+
+    def get_ground_items(self, name: str = None, radius: int = None) -> dict:
+        """Get ground items."""
+        req = {"cmd": "ground_items"}
+        if name:
+            req["name"] = name
+        if radius:
+            req["radius"] = radius
+        return self._send(req) or {}
+
+    def get_camera(self) -> dict:
+        """Get camera information."""
+        return self._send({"cmd": "get_camera"}) or {}
+
+    def get_tab(self) -> dict:
+        """Get current tab information."""
+        return self._send({"cmd": "tab"}) or {}
+
+    def get_ge(self) -> dict:
+        """Get Grand Exchange information using comprehensive widget data."""
+        return self.get_ge_widgets()
+
+    def get_ge_widgets(self) -> dict:
+        """Get all GE widgets with comprehensive data."""
+        return self._send({"cmd": "get_ge_widgets"}) or {}
+
+
+    def get_inventory_widgets(self) -> dict:
+        """Get inventory widget information."""
+        return self._send({"cmd": "get_inventory_widgets"}) or {}
+
+    def get_crafting_widgets(self) -> dict:
+        """Get crafting widget information."""
+        return self._send({"cmd": "get_crafting_widgets"}) or {}
+
+    def get_widget_info(self, widget_id: int) -> dict:
+        """Get widget information by ID."""
+        return self._send({"cmd": "get_widget_info", "widget_id": widget_id}) or {}
+
+    def get_widget_children(self, widget_id: int) -> list:
+        """Get widget children by parent ID."""
+        return self._send({"cmd": "get_widget_children", "widget_id": widget_id}) or []
+
+    def get_equipment_inventory(self) -> dict:
+        """Get equipment inventory information."""
+        return self._send({"cmd": "get_equipment_inventory"}) or {}
+
+    def get_tutorial(self) -> dict:
+        """Get tutorial information."""
+        return self._send({"cmd": "get_tutorial"}) or {}
+
+    def get_character_design(self) -> dict:
+        """Get character design information."""
+        return self._send({"cmd": "get_character_design"}) or {}
+
+    def get_quests(self) -> dict:
+        """Get quest information."""
+        return self._send({"cmd": "get_quests"}) or {}
+
+    def get_spellbook(self) -> dict:
+        """Get spellbook information."""
+        return self._send({"cmd": "get_spellbook"}) or {}
+
+    def get_last_interaction(self) -> dict:
+        """Get last interaction information."""
+        return self._send({"cmd": "get_last_interaction"}) or {}
+
+    def get_menu(self) -> dict:
+        """Get menu information."""
+        return self._send({"cmd": "menu"}) or {}
+
+    def get_varp(self, varp_id: int) -> dict:
+        """Get VarPlayer value by ID."""
+        return self._send({"cmd": "get_varp", "id": varp_id}) or {}
+
+    def get_var(self, var_id: int, timeout: float = None) -> dict:
+        """Get variable value by ID."""
+        return self._send({"cmd": "get-var", "id": int(var_id)}, timeout=timeout) or {}
+
+    def get_mask(self) -> dict:
+        """Get mask information."""
+        return self._send({"cmd": "get_mask"}) or {}
+
+    def where(self) -> dict:
+        """Get window dimensions and position."""
+        return self._send({"cmd": "where"}) or {}
+
+    def widget_exists(self, widget_id: int) -> dict:
+        """Check if a widget exists and is visible."""
+        return self._send({"cmd": "widget_exists", "widget_id": int(widget_id)}) or {}
+
+    def get_bank_items(self) -> dict:
+        """Get all bank item slots and their data."""
+        return self._send({"cmd": "get_bank_items"}) or {}
+
+    def get_bank_tabs(self) -> dict:
+        """Get bank organization tabs."""
+        return self._send({"cmd": "get_bank_tabs"}) or {}
+
+    def get_bank_quantity_buttons(self) -> dict:
+        """Get bank withdraw quantity buttons (1, 5, 10, X, All)."""
+        return self._send({"cmd": "get_bank_quantity_buttons"}) or {}
+
+    def get_bank_deposit_buttons(self) -> dict:
+        """Get bank deposit buttons (inventory, equipment)."""
+        return self._send({"cmd": "get_bank_deposit_buttons"}) or {}
+
+    def get_bank_note_toggle(self) -> dict:
+        """Get bank note/item toggle buttons."""
+        return self._send({"cmd": "get_bank_note_toggle"}) or {}
+
+    def get_bank_search(self) -> dict:
+        """Get bank search interface widgets."""
+        return self._send({"cmd": "get_bank_search"}) or {}
+
+    # ===== GRAND EXCHANGE METHODS =====
+    
+    def get_ge_offers(self) -> dict:
+        """Get all GE offer slots (465.2[0] through 465.2[11])."""
+        return self._send({"cmd": "get_ge_offers"}) or {}
+
+    def get_ge_setup(self) -> dict:
+        """Get GE setup widgets (465.26[0] through 465.26[58])."""
+        return self._send({"cmd": "get_ge_setup"}) or {}
+
+    def get_ge_confirm(self) -> dict:
+        """Get GE confirm widgets (465.30[0] through 465.30[8])."""
+        return self._send({"cmd": "get_ge_confirm"}) or {}
+
+    def get_ge_buttons(self) -> dict:
+        """Get main GE buttons (BACK, INDEX, COLLECTALL)."""
+        return self._send({"cmd": "get_ge_buttons"}) or {}
+
+    # ===== PATHFINDING METHODS =====
+    
+    def get_path(self, rect=None, goal=None, max_wps=15):
+        """Get pathfinding waypoints without visualization."""
+        req = {"cmd": "path", "visualize": False}  # Disable visualization
+        if rect:
+            minX, maxX, minY, maxY = rect
+            req.update({"minX": minX, "maxX": maxX, "minY": minY, "maxY": maxY})
+        if goal:
+            gx, gy = goal
+            req.update({"goalX": gx, "goalY": gy})
+        if max_wps is not None:
+            req["maxWps"] = int(max_wps)
+
+        resp = self._send(req)
+        wps = resp.get("waypoints", []) or [] if resp else []
+        return wps, resp
+
+    def path(self, rect=None, goal=None, max_wps=18, visualize=True):
+        """Get pathfinding waypoints with optional visualization."""
+        req = {"cmd": "path", "visualize": visualize}
+        if rect:
+            minX, maxX, minY, maxY = rect
+            req.update({"minX": minX, "maxX": maxX, "minY": minY, "maxY": maxY})
+        if goal:
+            gx, gy = goal
+            req.update({"goalX": gx, "goalY": gy})
+        if max_wps is not None:
+            req["maxWps"] = int(max_wps)
+
+        resp = self._send(req)
+        wps = resp.get("waypoints", []) or [] if resp else []
+        return wps, resp
+
+    def project_world_tile(self, world_x: int, world_y: int) -> dict:
+        """Project world tile to canvas coordinates."""
+        try:
+            return self._send({"cmd": "tilexy", "x": int(world_x), "y": int(world_y)}) or {}
+        except Exception as e:
+            return {"ok": False, "err": f"{type(e).__name__}: {e}"}
+
+    def project_many(self, wps):
+        """"
+        Project world tiles to canvas AND preserve 'door' metadata.
+        Returns:
+          out: [{onscreen, canvas, world:{x,y,p}, door?}, ...]
+          dbg: raw resp from IPC
+        """
+        tiles = [{"x": int(w["x"]), "y": int(w["y"])} for w in wps]
+        resp = self._send({"cmd": "tilexy_many", "tiles": tiles})
+        results = resp.get("results", []) or [] if resp else []
+
+        out = []
+        for i, (w, r) in enumerate(zip(wps, results)):
+            row = {
+                "onscreen": (r or {}).get("onscreen"),
+                "canvas":  (r or {}).get("canvas"),
+                "world":   {"x": int(w["x"]), "y": int(w["y"]), "p": int(w.get("p", 0))},
+            }
+                                # Keep door info from projection if present, else from the waypoint itself
+            door = None
+            if isinstance(r, dict) and isinstance(r.get("door"), dict):
+                door = r["door"]
+            elif isinstance(w, dict) and isinstance(w.get("door"), dict):
+                door = w["door"]
+            if door:
+                row["door"] = door
+
+            out.append(row)
+
+        return out, resp
+
+    # ===== DOOR TRAVERSAL =====
+
+    def check_door_traversal(self, door_id: int) -> dict:
+        """Check if a door can be traversed."""
+        return self._send({"cmd": "check_door_traversal", "door_id": door_id}) or {}

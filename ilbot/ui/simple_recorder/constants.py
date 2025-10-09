@@ -26,7 +26,7 @@ REGIONS = {
     "JULIET_MANSION": (3156, 3164, 3432, 3438),
     "VARROCK_CHURCH": (3252, 3259, 3471, 3488),
     "VARROCK_APOTHECARY": (3192, 3198, 3402, 3406),
-    "GOBLIN_VILLAGE": (2946, 2968, 3490, 3515),
+    "GOBLIN_VILLAGE": (2956, 2968, 3490, 3515),
     "COOKING_TUTORIAL": (3074, 3078, 3083, 3086),
     "QUEST_TUTORIAL": (3080, 3089, 3118, 3125),
     "MINING_TUTORIAL": (3077, 3086, 9502, 9508),
@@ -225,12 +225,81 @@ def generate_multiple_names(count: int = 10) -> list[str]:
 # Player animation IDs
 PLAYER_ANIMATIONS = {
     621: "NETTING",
-    879: "CHOPPING",
+    879: "CHOPPING",  # Bronze axe
+    877: "CHOPPING",  # Iron axe
+    875: "CHOPPING",  # Steel axe
+    873: "CHOPPING",  # Mithril axe
+    871: "CHOPPING",  # Adamant axe
+    869: "CHOPPING",  # Rune axe
+    867: "CHOPPING",  # Dragon axe
     733: "FIREMAKING",
     897: "COOKING_ON_FIRE",
     # Add more animations as needed
 }
 
+# Woodcutting animation IDs (all chopping variants)
+WOODCUTTING_ANIMATIONS = {879, 877, 875, 873, 871, 869, 867}
+
 # Convenient access to regions
 FALADOR_BANK = BANK_REGIONS["FALADOR_BANK"]
 FALADOR_COWS = REGIONS["FALADOR_COWS"]
+
+# Widget IDs Database
+BANK_WIDGETS = {
+    "SWAP": 786451,      # S 12.19 Bankmain.SWAP
+    "INSERT": 786453,    # S 12.21 Bankmain.INSERT
+    "ITEM": 786456,      # S 12.24 Bankmain.ITEM
+    "NOTE": 786458,      # S 12.26 Bankmain.NOTE
+    "QUANTITY1": 786462, # S 12.30 Bankmain.QUANTITY1
+    "QUANTITY5": 786464, # S 12.32 Bankmain.QUANTITY5
+    "QUANTITY10": 786466,# S 12.34 Bankmain.QUANTITY10
+    "QUANTITYX": 786468, # S 12.36 Bankmain.QUANTITYX
+    "QUANTITYALL": 786470,# S 12.38 Bankmain.QUANTITYALL
+}
+
+# GE Widget IDs
+GE_WIDGETS = {
+    "CONTENTS": 30474241,    # S 465.1 GeOffers.CONTENTS
+    "INDEX": 30474247,       # S 465.5 GeOffers.INDEX (INDEX_0)
+    "COLLECTALL": 30474248,  # S 465.6 GeOffers.COLLECTALL
+    "INDEX_0": 30474247,     # S 465.7 GeOffers.INDEX_0
+    "INDEX_1": 30474248,     # S 465.8 GeOffers.INDEX_1
+    "INDEX_2": 30474249,     # S 465.9 GeOffers.INDEX_2
+    "INDEX_3": 30474250,     # S 465.10 GeOffers.INDEX_3
+    "INDEX_4": 30474251,     # S 465.11 GeOffers.INDEX_4
+    "INDEX_5": 30474252,     # S 465.12 GeOffers.INDEX_5
+    "INDEX_6": 30474253,     # S 465.13 GeOffers.INDEX_6
+    "INDEX_7": 30474254,     # S 465.14 GeOffers.INDEX_7
+    "INVENTORY": 30474255,   # S 465.15 GeOffers.INVENTORY
+    "SETUP": 30474266,       # S 465.26 GeOffers.SETUP
+    "CONFIRM": 30474270,     # S 465.30 GeOffers.CONFIRM
+}
+
+# Chat Widget IDs
+CHAT_WIDGETS = {
+    "CHATMODAL": 10617398,   # S 162.51 Chatbox.CHATMODAL
+    "MES_LAYER_SCROLLCONTENTS": 10616883, # S 162.51 Chatbox.MES_LAYER_SCROLLCONTENTS
+}
+
+# GE Offer Screen Widget IDs (from widget children analysis)
+GE_OFFER_WIDGETS = {
+    "MAIN_CONTAINER": 30474242,    # Main offer screen container
+    "CLOSE_BUTTON": 30474242,      # X button (index 12)
+    "HISTORY_BUTTON": 30474243,    # History button
+    "ITEM_SEARCH_ICON": 30474266,  # Item search icon (index 62)
+    "QUANTITY_PLUS_1": 30474266,   # +1 quantity button (index 41)
+    "QUANTITY_PLUS_10": 30474266,  # +10 quantity button (index 42)
+    "QUANTITY_PLUS_100": 30474266, # +100 quantity button (index 43)
+    "QUANTITY_PLUS_1K": 30474266,  # +1K quantity button (index 44)
+    "QUANTITY_CUSTOM": 30474266,   # Custom quantity button (index 45)
+    "QUANTITY_LEFT_ARROW": 30474266, # Quantity left arrow (index 39)
+    "QUANTITY_RIGHT_ARROW": 30474266, # Quantity right arrow (index 40)
+    "PRICE_MINUS_5_PERCENT": 30474266, # -5% price button (index 48)
+    "PRICE_PLUS_5_PERCENT": 30474266,  # +5% price button (index 51)
+    "PRICE_MINUS_X_PERCENT": 30474266, # -X% price button (index 52)
+    "PRICE_PLUS_X_PERCENT": 30474266,  # +X% price button (index 53)
+    "PRICE_LEFT_ARROW": 30474266,  # Price left arrow (index 46)
+    "PRICE_RIGHT_ARROW": 30474266, # Price right arrow (index 47)
+    "MARKET_PRICE_BUTTON": 30474266, # Market price button (index 49)
+    "CONFIRM_BUTTON": 30474244,    # Confirm offer button
+}

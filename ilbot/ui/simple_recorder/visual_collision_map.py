@@ -19,8 +19,8 @@ def draw_wall_lines(draw, x, y, tile_size, orientation_a, orientation_b):
     # 1 = West, 2 = North, 4 = East, 8 = South
     # 16 = North-west, 32 = North-east, 64 = South-east, 128 = South-west
     
-    line_color = (255, 255, 0)  # Yellow for wall lines
-    line_width = 3  # Thicker lines for better visibility
+    line_color = (255, 255, 255)  # White for wall lines
+    line_width = 2  # Thinner lines for better visibility
     
     # Draw orientation A
     if orientation_a & 1:  # West
@@ -121,6 +121,9 @@ def generate_single_map():
     map_start_x = padding
     map_start_y = padding
     
+    # Collect wall tiles to draw orientation lines after all tiles are drawn
+    wall_tiles = []
+    
     tiles_drawn = 0
     for key, tile_data in collision_data.items():
         x, y, p = tile_data['x'], tile_data['y'], tile_data['p']
@@ -134,26 +137,29 @@ def generate_single_map():
         symbol = ""
         
         if tile_data.get('door'):
-            # Draw wall as lines based on orientation instead of filling entire tile
+            # Handle door/wall tiles
             door_info = tile_data.get('door', {})
+            door_id = door_info.get('id')
             orientation_a = door_info.get('orientationA', 0)
             orientation_b = door_info.get('orientationB', 0)
             passable = door_info.get('passable', False)
             
-            # Don't fill the entire tile - just draw wall lines on appropriate sides
-            if not passable:
-                # Draw wall lines on the sides that are blocked
-                draw_wall_lines(draw, draw_x, draw_y, tile_size, orientation_a, orientation_b)
-                # Fill the tile with a light background to show it's walkable
-                draw.rectangle([draw_x, draw_y, draw_x + tile_size, draw_y + tile_size], fill=(64, 64, 64))  # Dark gray background
+            # Special case: Bank doors and specific walkable walls are always walkable
+            if door_id in [11787, 11786, 23751, 23752, 23750]:
+                # These specific walls are always walkable (green background)
+                color = (0, 255, 0)  # Green background
+                symbol = "P"  # P for passable
+            # Check if this wall has orientation data (standable)
+            elif orientation_a > 0 or orientation_b > 0:
+                # Wall with orientation data = STANDABLE (black background like no-data tiles)
+                color = (0, 0, 0)  # Black background
                 symbol = "W"
+                # Store for later drawing of orientation lines
+                wall_tiles.append((draw_x, draw_y, tile_size, orientation_a, orientation_b))
             else:
-                # Passable walls (bridges, doors) - just show as walkable
-                draw.rectangle([draw_x, draw_y, draw_x + tile_size, draw_y + tile_size], fill=(0, 255, 0))  # Green for walkable
-                symbol = "P"
-            
-            # Don't set color since we're not using it for filling
-            color = None
+                # Wall without orientation data = NON-STANDABLE (gray background)
+                color = (128, 128, 128)  # Gray background
+                symbol = "W"
         elif tile_data.get('solid', False):
             color = (255, 0, 0)    # Red
             symbol = "#"
@@ -164,18 +170,22 @@ def generate_single_map():
             color = (0, 255, 0)    # Green
             symbol = "."
         else:
-            color = (128, 128, 128)  # Gray
+            color = (0, 0, 0)  # Black for no data
             symbol = "?"
         
-        # Draw tile (only if not a door, since doors handle their own drawing)
-        if not tile_data.get('door'):
-            draw.rectangle([draw_x, draw_y, draw_x + tile_size, draw_y + tile_size], fill=color)
+        # Draw tile background
+        draw.rectangle([draw_x, draw_y, draw_x + tile_size, draw_y + tile_size], fill=color)
         
         # Add symbol
         if symbol:
             draw.text((draw_x + 1, draw_y + 1), symbol, fill=(255, 255, 255), font=small_font)
         
         tiles_drawn += 1
+    
+    # Draw wall orientation lines AFTER all tiles are drawn (so they appear on top)
+    print(f"[DEBUG] Drawing {len(wall_tiles)} wall orientation lines...")
+    for draw_x, draw_y, tile_size, orientation_a, orientation_b in wall_tiles:
+        draw_wall_lines(draw, draw_x, draw_y, tile_size, orientation_a, orientation_b)
     
     # Draw border around map
     draw.rectangle([map_start_x - 2, map_start_y - 2, 
@@ -201,7 +211,8 @@ def generate_single_map():
     legend_y = add_legend_item("Walkable (.)", (0, 255, 0), legend_y)
     legend_y = add_legend_item("Solid (#)", (255, 0, 0), legend_y)
     legend_y = add_legend_item("Object (O)", (0, 0, 255), legend_y)
-    legend_y = add_legend_item("Door (D)", (255, 255, 0), legend_y)
+    legend_y = add_legend_item("Wall (W) - Standable", (0, 0, 0), legend_y)
+    legend_y = add_legend_item("Wall (W) - Non-standable", (128, 128, 128), legend_y)
     legend_y = add_legend_item("Unknown (?)", (128, 128, 128), legend_y)
     legend_y = add_legend_item("No Data", (0, 0, 0), legend_y)
     
@@ -214,7 +225,28 @@ def generate_single_map():
     walkable_count = sum(1 for tile in collision_data.values() if tile.get('walkable', False))
     solid_count = sum(1 for tile in collision_data.values() if tile.get('solid', False))
     object_count = sum(1 for tile in collision_data.values() if tile.get('object', False))
-    door_count = sum(1 for tile in collision_data.values() if tile.get('door'))
+    
+    # Count wall types
+    wall_count = sum(1 for tile in collision_data.values() if tile.get('door'))
+    standable_wall_count = 0
+    non_standable_wall_count = 0
+    special_walkable_wall_count = 0
+    
+    for tile in collision_data.values():
+        if tile.get('door'):
+            door_info = tile.get('door', {})
+            door_id = door_info.get('id')
+            orientation_a = door_info.get('orientationA', 0)
+            orientation_b = door_info.get('orientationB', 0)
+            has_orientation = orientation_a > 0 or orientation_b > 0
+            
+            # Check for special walkable walls first
+            if door_id in [11787, 11786, 23751, 23752, 23750]:
+                special_walkable_wall_count += 1
+            elif has_orientation:
+                standable_wall_count += 1
+            else:
+                non_standable_wall_count += 1
     
     draw.text((legend_x, legend_y), f"Tiles: {len(collision_data):,}", fill=(255, 255, 255), font=legend_font)
     legend_y += 15
@@ -224,7 +256,13 @@ def generate_single_map():
     legend_y += 15
     draw.text((legend_x, legend_y), f"Objects: {object_count:,}", fill=(255, 255, 255), font=legend_font)
     legend_y += 15
-    draw.text((legend_x, legend_y), f"Doors: {door_count:,}", fill=(255, 255, 255), font=legend_font)
+    draw.text((legend_x, legend_y), f"Walls: {wall_count:,}", fill=(255, 255, 255), font=legend_font)
+    legend_y += 15
+    draw.text((legend_x, legend_y), f"  - Special walkable: {special_walkable_wall_count:,}", fill=(255, 255, 255), font=legend_font)
+    legend_y += 15
+    draw.text((legend_x, legend_y), f"  - Standable: {standable_wall_count:,}", fill=(255, 255, 255), font=legend_font)
+    legend_y += 15
+    draw.text((legend_x, legend_y), f"  - Non-standable: {non_standable_wall_count:,}", fill=(255, 255, 255), font=legend_font)
     legend_y += 15
     draw.text((legend_x, legend_y), f"Size: {width_tiles}x{height_tiles}", fill=(255, 255, 255), font=legend_font)
     

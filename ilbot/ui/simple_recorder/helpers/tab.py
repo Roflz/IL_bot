@@ -2,19 +2,13 @@
 
 from __future__ import annotations
 from typing import Optional, Dict, Any
-from .ipc import ipc_send
-from .context import get_payload
+from .runtime_utils import ipc
 
 def _get_tab_data() -> Optional[Dict[str, Any]]:
     """Internal function to get tab data from IPC."""
     try:
-        from ..services.ipc_client import RuneLiteIPC
-        
-        # Create IPC client directly
-        ipc = RuneLiteIPC()
-        
-        # Send tab command
-        resp = ipc._send({"cmd": "tab"})
+        # Get tab data using the IPC client
+        resp = ipc.get_tab()
         if resp and resp.get("ok"):
             return resp
         return None

@@ -13,19 +13,20 @@ def _clean_item_name(name: str) -> str:
     cleaned = cleaned.replace('</col>', '')
     return cleaned.strip()
 
-def verify_interaction(expected_action: str, expected_target: str, payload: dict) -> bool:
+def verify_interaction(expected_action: str, expected_target: str) -> bool:
     """
     Verify that the last interaction matches the expected action and target.
     
     Args:
         expected_action: Expected action type (e.g., "Use", "Talk-to", etc.)
         expected_target: Expected target name (cleaned of color codes)
-        payload: Current payload containing lastInteraction
     
     Returns:
         True if the interaction matches expectations
     """
-    last_interaction = payload.get("lastInteraction", {})
+    from .runtime_utils import ipc
+    interaction_data = ipc.get_last_interaction() or {}
+    last_interaction = interaction_data.get("interaction", {})
     if not last_interaction:
         return False
     
@@ -45,7 +46,6 @@ def retry_interaction(
     interaction_func: Callable[[], Any],
     expected_action: str,
     expected_target: str,
-    payload: dict,
     max_retries: int = 3,
     retry_delay: float = 0.2,
     verification_delay: float = 0.1
@@ -57,7 +57,6 @@ def retry_interaction(
         interaction_func: Function that performs the interaction (should return UI dispatch result)
         expected_action: Expected action type for verification
         expected_target: Expected target name for verification
-        payload: Current payload containing lastInteraction
         max_retries: Maximum number of retry attempts
         retry_delay: Delay between retry attempts
         verification_delay: Delay after interaction before verification
@@ -76,7 +75,7 @@ def retry_interaction(
         time.sleep(verification_delay)
         
         # Verify the interaction was successful
-        if verify_interaction(expected_action, expected_target, payload):
+        if verify_interaction(expected_action, expected_target):
             return result
         
         # If verification failed, wait before retrying
@@ -89,7 +88,6 @@ def retry_click_interaction(
     click_func: Callable[[], Any],
     expected_action: str,
     expected_target: str,
-    payload: dict,
     max_retries: int = 3,
     retry_delay: float = 0.2,
     verification_delay: float = 0.1
@@ -101,7 +99,6 @@ def retry_click_interaction(
         click_func,
         expected_action,
         expected_target,
-        payload,
         max_retries,
         retry_delay,
         verification_delay

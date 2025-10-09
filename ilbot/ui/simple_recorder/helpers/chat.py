@@ -3,7 +3,7 @@
 from __future__ import annotations
 from typing import Optional, List, Dict, Any
 
-from ..helpers.context import get_payload
+from ..helpers.runtime_utils import ipc
 
 # Expected payload structure (only visible widgets exported):
 # payload["chat_dialogue"] = {
@@ -22,29 +22,25 @@ from ..helpers.context import get_payload
 #   ]
 # }
 
-def _dlg_left(payload: Optional[dict] = None) -> dict:
-    if payload is None:
-        payload = get_payload() or {}
-    return (payload.get("chatLeft") or {}) if isinstance(payload, dict) else {}
+def _dlg_left() -> dict:
+    chat_data = ipc.get_chat()
+    return chat_data.get("chatLeft") or {}
 
-def _dlg_right(payload: Optional[dict] = None) -> dict:
-    if payload is None:
-        payload = get_payload() or {}
-    return (payload.get("chatRight") or {}) if isinstance(payload, dict) else {}
+def _dlg_right() -> dict:
+    chat_data = ipc.get_chat()
+    return chat_data.get("chatRight") or {}
 
-def _dlg_objectbox(payload: Optional[dict] = None) -> dict:
-    if payload is None:
-        payload = get_payload() or {}
-    return (payload.get("objectbox") or {}) if isinstance(payload, dict) else {}
+def _dlg_objectbox() -> dict:
+    chat_data = ipc.get_chat()
+    return chat_data.get("objectbox") or {}
 
-def _menu(payload: Optional[dict] = None) -> dict:
-    if payload is None:
-        payload = get_payload() or {}
-    return (payload.get("chatMenu") or {}) if isinstance(payload, dict) else {}
+def _menu() -> dict:
+    chat_data = ipc.get_chat()
+    return chat_data.get("chatMenu") or {}
 
-def dialogue_is_open(payload: Optional[dict] = None) -> bool:
-    L = _dlg_left(payload)
-    R = _dlg_right(payload)
+def dialogue_is_open() -> bool:
+    L = _dlg_left()
+    R = _dlg_right()
 
     # Check for Messagebox.CONTINUE widget (ID 15007748) - this indicates actual dialogue
     from ..helpers.widgets import widget_exists
@@ -63,7 +59,7 @@ def dialogue_is_open(payload: Optional[dict] = None) -> bool:
 
     return any_visible(L) or any_visible(R)
 
-def can_continue(payload: Optional[dict] = None) -> bool:
+def can_continue() -> bool:
     # Check for Messagebox.CONTINUE widget (ID 15007748) first - must be visible and text contains "continue"
     from ..helpers.widgets import widget_exists, get_widget_info
     if widget_exists(15007748):
@@ -110,9 +106,9 @@ def can_continue(payload: Optional[dict] = None) -> bool:
             if "continue" in text:
                 return True
 
-    L = _dlg_left(payload)
-    R = _dlg_right(payload)
-    OB = _dlg_objectbox(payload)
+    L = _dlg_left()
+    R = _dlg_right()
+    OB = _dlg_objectbox()
 
     l = (L.get("continue") or {}).get("exists")
     r = (R.get("continue") or {}).get("exists")
@@ -126,15 +122,15 @@ def can_continue(payload: Optional[dict] = None) -> bool:
 
     return bool(l or r or o)
 
-def can_choose_option(payload: Optional[dict] = None) -> bool:
-    m = _menu(payload)
+def can_choose_option() -> bool:
+    m = _menu()
     if bool(m.get("open")):
         return True
     opts = m.get("options") or []
-    return opts['exists']
+    return opts['exists'] or []
 
-def get_options(payload: Optional[dict] = None) -> List[str]:
-    m = _menu(payload)
+def get_options() -> List[str]:
+    m = _menu()
     opts = ((m.get("options") or {}).get("texts") or [])
     out: List[str] = []
     for o in opts:
@@ -143,11 +139,11 @@ def get_options(payload: Optional[dict] = None) -> List[str]:
             out.append(t)
     return out
 
-def get_option(index: int, payload: Optional[dict] = None) -> Optional[str]:
+def get_option(index: int) -> Optional[str]:
     """
     index may be 0-based or 1-based. If 1..N, we treat as human index.
     """
-    opts = get_options(payload)
+    opts = get_options()
     if index >= 1:
         idx = index - 1
     else:
@@ -156,13 +152,13 @@ def get_option(index: int, payload: Optional[dict] = None) -> Optional[str]:
         return opts[idx]
     return None
 
-def get_dialogue_text(payload: Optional[dict] = None) -> Dict[str, str]:
+def get_dialogue_text() -> Dict[str, str]:
     """
     Returns { <speaker_name>: <dialogue_text>, ... }.
     If both left and right are visible, both are included.
     """
     out: Dict[str, str] = {}
-    for d in (_dlg_left(payload), _dlg_right(payload)):
+    for d in (_dlg_left(), _dlg_right()):
         if not d:
             continue
         name = ((d.get("name") or {}).get("text") or "").strip()
@@ -171,7 +167,7 @@ def get_dialogue_text(payload: Optional[dict] = None) -> Dict[str, str]:
             out[name] = text
     return out
 
-def has_informational_text(payload: Optional[dict] = None) -> bool:
+def has_informational_text() -> bool:
     """
     Check if there's informational text overlay (like tutorial messages) that can be read.
     This is different from dialogue_is_open() which checks for interactive dialogue.
@@ -179,8 +175,6 @@ def has_informational_text(payload: Optional[dict] = None) -> bool:
     Returns:
         True if informational text is present, False otherwise
     """
-    if payload is None:
-        payload = get_payload() or {}
     
     # Check for informational text widgets
     informational_widgets = [
@@ -195,7 +189,7 @@ def has_informational_text(payload: Optional[dict] = None) -> bool:
     
     return False
 
-def get_dialogue_text_raw(payload: Optional[dict] = None) -> str:
+def get_dialogue_text_raw() -> str:
     """
     Extract raw dialogue text from any available chat widget.
     Checks multiple widget types in order of preference.
@@ -203,8 +197,6 @@ def get_dialogue_text_raw(payload: Optional[dict] = None) -> str:
     Returns:
         Raw dialogue text or empty string if no dialogue found
     """
-    if payload is None:
-        payload = get_payload() or {}
     
     # List of dialogue widgets to check (in order of preference)
     dialogue_widgets = [
@@ -220,7 +212,7 @@ def get_dialogue_text_raw(payload: Optional[dict] = None) -> str:
     for widget_id in dialogue_widgets:
         try:
             from ..helpers.widgets import get_widget_info
-            widget_info = get_widget_info(widget_id, payload)
+            widget_info = get_widget_info(widget_id)
             
             if widget_info and widget_info.get("data"):
                 widget_data = widget_info.get("data", {})
@@ -231,25 +223,24 @@ def get_dialogue_text_raw(payload: Optional[dict] = None) -> str:
         except Exception as e:
             print(f"[DIALOGUE] Error checking widget {widget_id}: {e}")
             continue
-    
-    # Fallback: check payload-based dialogue
+
     try:
         # Check left dialogue
-        left_dlg = _dlg_left(payload)
+        left_dlg = _dlg_left()
         if left_dlg.get("text", {}).get("exists"):
             text = left_dlg["text"].get("text", "")
             if text and text.strip():
                 return text.strip()
         
         # Check right dialogue
-        right_dlg = _dlg_right(payload)
+        right_dlg = _dlg_right()
         if right_dlg.get("text", {}).get("exists"):
             text = right_dlg["text"].get("text", "")
             if text and text.strip():
                 return text.strip()
         
         # Check objectbox dialogue
-        obj_dlg = _dlg_objectbox(payload)
+        obj_dlg = _dlg_objectbox()
         if obj_dlg.get("universe", {}).get("exists"):
             text = obj_dlg["universe"].get("text", "")
             if text and text.strip():
@@ -257,16 +248,16 @@ def get_dialogue_text_raw(payload: Optional[dict] = None) -> str:
     except Exception as e:
         print(f"[DIALOGUE] Error checking payload dialogue: {e}")
     
-    return ""  # Return empty string instead of None for graceful handling
+        return ""  # Return empty string instead of None for graceful handling
 
-def get_clean_dialogue_text(payload: Optional[dict] = None) -> str:
+def get_clean_dialogue_text() -> str:
     """
     Get dialogue text with HTML tags and color codes stripped.
     
     Returns:
         Clean dialogue text or empty string if no dialogue found
     """
-    raw_text = get_dialogue_text_raw(payload)
+    raw_text = get_dialogue_text_raw()
     if not raw_text:
         return ""
     
@@ -287,19 +278,18 @@ def get_clean_dialogue_text(payload: Optional[dict] = None) -> str:
     
     return clean_text.strip()
 
-def dialogue_contains_phrase(phrase: str, payload: Optional[dict] = None, case_sensitive: bool = False) -> bool:
+def dialogue_contains_phrase(phrase: str, case_sensitive: bool = False) -> bool:
     """
     Check if dialogue contains a specific phrase.
     
     Args:
         phrase: Phrase to search for
-        payload: Optional payload, will get fresh if None
         case_sensitive: Whether to do case-sensitive matching
     
     Returns:
         True if phrase found in dialogue, False otherwise
     """
-    dialogue_text = get_clean_dialogue_text(payload)
+    dialogue_text = get_clean_dialogue_text()
     if not dialogue_text:
         return False
     
@@ -308,19 +298,18 @@ def dialogue_contains_phrase(phrase: str, payload: Optional[dict] = None, case_s
     else:
         return phrase in dialogue_text
 
-def dialogue_contains_any_phrase(phrases: List[str], payload: Optional[dict] = None, case_sensitive: bool = False) -> bool:
+def dialogue_contains_any_phrase(phrases: List[str], case_sensitive: bool = False) -> bool:
     """
     Check if dialogue contains any of the given phrases.
     
     Args:
         phrases: List of phrases to search for
-        payload: Optional payload, will get fresh if None
         case_sensitive: Whether to do case-sensitive matching
     
     Returns:
         True if any phrase found in dialogue, False otherwise
     """
-    dialogue_text = get_clean_dialogue_text(payload)
+    dialogue_text = get_clean_dialogue_text()
     if not dialogue_text:
         return False
     
@@ -334,7 +323,7 @@ def dialogue_contains_any_phrase(phrases: List[str], payload: Optional[dict] = N
     
     return False
 
-def get_dialogue_info(payload: Optional[dict] = None) -> Dict[str, Any]:
+def get_dialogue_info() -> Dict[str, Any]:
     """
     Get comprehensive dialogue information.
     
@@ -350,17 +339,17 @@ def get_dialogue_info(payload: Optional[dict] = None) -> Dict[str, Any]:
     }
     
     # Check if there's any text to read (either dialogue or informational text)
-    if not dialogue_is_open(payload) and not has_informational_text(payload):
+    if not dialogue_is_open() and not has_informational_text():
         return info
     
     info["has_dialogue"] = True
-    info["can_continue"] = can_continue(payload)
+    info["can_continue"] = can_continue()
     
     # Get raw text
-    raw_text = get_dialogue_text_raw(payload)
+    raw_text = get_dialogue_text_raw()
     if raw_text:
         info["raw_text"] = raw_text
-        info["clean_text"] = get_clean_dialogue_text(payload)
+        info["clean_text"] = get_clean_dialogue_text()
         
         # Try to identify which widget provided the text
         dialogue_widgets = [
@@ -374,7 +363,7 @@ def get_dialogue_info(payload: Optional[dict] = None) -> Dict[str, Any]:
         for widget_id, widget_name in dialogue_widgets:
             try:
                 from ..helpers.widgets import get_widget_info
-                widget_info = get_widget_info(widget_id, payload)
+                widget_info = get_widget_info(widget_id)
                 
                 if widget_info and widget_info.get("data"):
                     widget_data = widget_info.get("data", {})

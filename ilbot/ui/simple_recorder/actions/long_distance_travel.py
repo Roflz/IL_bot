@@ -4,15 +4,11 @@ Long-distance travel module that uses cached collision data for pathfinding.
 Integrates with the pathfinder.py script to find routes across large distances.
 """
 import json
-import time
 import math
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Union
 
-from .runtime import emit
-from ..helpers.context import get_payload, get_ui
-from ..helpers.navigation import get_nav_rect, player_in_rect
-from ..services.click_with_camera import click_ground_with_camera
+from ..helpers.navigation import get_nav_rect
 
 
 def load_collision_data() -> Optional[Dict]:
@@ -229,7 +225,7 @@ def sample_waypoints(path: List[Tuple[int, int]], sample_interval: int = 35) -> 
     return sampled
 
 
-def convert_path_to_waypoints(path: List[Tuple[int, int]], payload: Dict) -> List[Dict]:
+def convert_path_to_waypoints(path: List[Tuple[int, int]]) -> List[Dict]:
     """Convert pathfinder path to intermediate waypoints for local pathfinding."""
     # Sample waypoints from the full path
     sampled_path = sample_waypoints(path, sample_interval=35)
@@ -253,97 +249,3 @@ def convert_path_to_waypoints(path: List[Tuple[int, int]], payload: Dict) -> Lis
     
     return waypoints
 
-
-def travel_to_long_distance(rect_or_key: Union[str, tuple, list], payload: Dict, ui) -> bool:
-    """
-    Use long-distance pathfinding to travel to a destination.
-    
-    Args:
-        rect_or_key: Region key or (minX, maxX, minY, maxY) tuple
-        payload: Game state payload
-        ui: UI instance
-        
-    Returns:
-        True if pathfinding was successful, False otherwise
-    """
-    print(f"[LONG_DISTANCE] Starting long-distance travel to {rect_or_key}")
-    
-    # Get current player position
-    player = payload.get("player", {})
-    current_x = player.get("worldX")
-    current_y = player.get("worldY")
-    
-    if not isinstance(current_x, int) or not isinstance(current_y, int):
-        print(f"[LONG_DISTANCE] Could not get player position")
-        return False
-    
-    # Get target coordinates
-    target_coords = get_target_coordinates(rect_or_key)
-    if not target_coords:
-        print(f"[LONG_DISTANCE] Could not get target coordinates for {rect_or_key}")
-        return False
-    
-    target_x, target_y = target_coords
-    print(f"[LONG_DISTANCE] Current: ({current_x}, {current_y}), Target: ({target_x}, {target_y})")
-    
-    # Load collision data
-    collision_data = load_collision_data()
-    if not collision_data:
-        print(f"[LONG_DISTANCE] No collision data available")
-        return False
-    
-    # Get walkable tiles
-    walkable_tiles, blocked_tiles = get_walkable_tiles(collision_data)
-    print(f"[LONG_DISTANCE] Walkable tiles: {len(walkable_tiles)}, Blocked tiles: {len(blocked_tiles)}")
-    
-    # Find closest walkable tiles to start and goal
-    start_pos = find_closest_walkable((current_x, current_y), walkable_tiles)
-    goal_pos = find_closest_walkable((target_x, target_y), walkable_tiles)
-    
-    if not start_pos:
-        print(f"[LONG_DISTANCE] No walkable tile found near start position ({current_x}, {current_y})")
-        return False
-    
-    if not goal_pos:
-        print(f"[LONG_DISTANCE] No walkable tile found near goal position ({target_x}, {target_y})")
-        return False
-    
-    print(f"[LONG_DISTANCE] Using start: {start_pos}, goal: {goal_pos}")
-    
-    # Find path using A*
-    path = astar_pathfinding(start_pos, goal_pos, walkable_tiles)
-    if not path:
-        print(f"[LONG_DISTANCE] No path found from {start_pos} to {goal_pos}")
-        return False
-    
-    print(f"[LONG_DISTANCE] Found path with {len(path)} waypoints")
-    
-    # Convert path to waypoints
-    waypoints = convert_path_to_waypoints(path, payload)
-    
-    # Store waypoints for use by go_to method
-    # We'll store them in a global variable that go_to can access
-    global _long_distance_waypoints
-    _long_distance_waypoints = waypoints
-    
-    print(f"[LONG_DISTANCE] Generated {len(waypoints)} intermediate waypoints:")
-    for i, wp in enumerate(waypoints):
-        print(f"  {i}: ({wp['x']}, {wp['y']}) - completed: {wp.get('completed', False)}")
-    
-    print(f"[LONG_DISTANCE] Long-distance pathfinding completed successfully")
-    return True
-
-
-# Global variable to store long-distance waypoints
-_long_distance_waypoints = None
-
-
-def get_long_distance_waypoints() -> Optional[List[Dict]]:
-    """Get the current long-distance waypoints."""
-    return _long_distance_waypoints
-
-
-def clear_long_distance_waypoints():
-    """Clear the long-distance waypoints."""
-    global _long_distance_waypoints
-    _long_distance_waypoints = None

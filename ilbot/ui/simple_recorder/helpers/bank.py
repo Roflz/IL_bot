@@ -1,81 +1,574 @@
+import logging
 from .utils import norm_name
-from ..constants import BANK_REGIONS
+from .widgets import click_listener_on, get_widget_info
+from ..constants import BANK_REGIONS, BANK_WIDGETS
+from .runtime_utils import ipc, dispatch
 
 
-def bank_slots_matching(payload: dict, names: list[str]) -> list[dict]:
+def bank_slots_matching(names: list[str]) -> list[dict]:
     """Return bank slots whose itemName matches (case-insensitive) any of names."""
-    want = { (n or "").strip().lower() for n in names if n }
-    out = []
-    for s in (payload.get("bank", {}).get("slots") or []):
-        nm = (s.get("itemName") or "").strip().lower()
-        qty = int(s.get("quantity") or 0)
-        if nm in want and qty > 0:
-            out.append(s)
-    return out
+    try:
+        bank_data = ipc.get_bank()
+        if not bank_data or not bank_data.get("ok"):
+            logging.error("[bank_slots_matching] helpers/bank.py: Failed to get bank data from IPC")
+            return []
+        
+        want = { (n or "").strip().lower() for n in names if n }
+        out = []
+        for s in bank_data.get("slots", []):
+            nm = (s.get("itemName") or "").strip().lower()
+            qty = int(s.get("quantity") or 0)
+            if nm in want and qty > 0:
+                out.append(s)
+        return out
+    except Exception as e:
+        logging.error(f"[bank_slots_matching] helpers/bank.py: {e}")
+        return []
 
-def first_bank_slot(payload: dict, name: str) -> dict | None:
-    n = norm_name(name)
-    best = None
-    for s in bank_slots(payload):
-        if norm_name(s.get("itemName")) == n:
-            if best is None:
-                best = s
-            else:
-                q1 = int(s.get("quantity") or 0)
-                q2 = int(best.get("quantity") or 0)
-                if q1 > q2 or (q1 == q2 and int(s.get("slotId") or 9_999) < int(best.get("slotId") or 9_999)):
+def first_bank_slot(name: str) -> dict | None:
+    try:
+        n = norm_name(name)
+        best = None
+        for s in bank_slots():
+            if norm_name(s.get("name")) == n:
+                if best is None:
                     best = s
-    return best
+                else:
+                    q1 = int(s.get("quantity") or 0)
+                    q2 = int(best.get("quantity") or 0)
+                    if q1 > q2 or (q1 == q2 and int(s.get("slotId") or 9_999) < int(best.get("slotId") or 9_999)):
+                        best = s
+        return best
+    except Exception as e:
+        logging.error(f"[first_bank_slot] helpers/bank.py: {e}")
+        return None
 
-def bank_slots(payload: dict) -> list[dict]:
-    return (payload.get("bank", {}) or {}).get("slots", []) or []
+def bank_slots() -> list[dict]:
+    try:
+        bank_data = ipc.get_bank()
+        if not bank_data or not bank_data.get("ok"):
+            logging.error("[bank_slots] helpers/bank.py: Failed to get bank data from IPC")
+            return []
+        return bank_data.get("items", [])
+    except Exception as e:
+        logging.error(f"[bank_slots] helpers/bank.py: {e}")
+        return []
 
-def bank_note_selected(payload: dict) -> bool:
-    bw = payload.get("bank_widgets") or {}
-    node = bw.get("withdraw_note_toggle") or {}
-    # exporter now provides: {"bounds": {...}, "selected": bool}
-    sel = node.get("selected")
-    if isinstance(sel, bool):
-        return sel
-    # fallback (older payloads): treat missing as not-selected
-    return False
+def bank_note_selected() -> bool:
+    """Check if bank note mode is selected (withdraw as notes)."""
+    try:
+        # When it has a click listener, note mode is enabled
+        # When it has no click listener, note mode is disabled
+        return click_listener_on(BANK_WIDGETS["NOTE"])
+    except Exception as e:
+        logging.error(f"[bank_note_selected] helpers/bank.py: {e}")
+        return False
 
-def bank_qty_all_selected(payload: dict) -> bool:
-    bw = (payload.get("bank_widgets") or {})
-    qall = (bw.get("withdraw_quantity_all") or {})
-    return bool(qall.get("selected"))
+def bank_qty_all_selected() -> bool:
+    """Check if 'All' quantity button is selected for withdrawals."""
+    try:
+        quantity_buttons_data = ipc.get_bank_quantity_buttons()
+        if not quantity_buttons_data or not quantity_buttons_data.get("ok"):
+            logging.error("[bank_qty_all_selected] helpers/bank.py: Failed to get bank quantity buttons from IPC")
+            return False
+        
+        quantity_buttons = quantity_buttons_data.get("quantity_buttons", [])
+        for button_group in quantity_buttons:
+            if button_group.get("name") == "quantityAll":
+                buttons = button_group.get("buttons", [])
+                for button in buttons:
+                    if button.get("selected", False):
+                        return True
+        return False
+    except Exception as e:
+        logging.error(f"[bank_qty_all_selected] helpers/bank.py: {e}")
+        return False
 
-def deposit_all_button_bounds(payload: dict) -> dict | None:
-    bw = payload.get("bank_widgets") or {}
-    node = bw.get("deposit_inventory") or {}
-    b = node.get("bounds") or node  # support old shape that stored bounds directly
-    return b if int(b.get("width") or 0) > 0 and int(b.get("height") or 0) > 0 else None
+def deposit_all_button_bounds() -> dict | None:
+    """Get bounds for the deposit inventory button."""
+    try:
+        deposit_buttons_data = ipc.get_bank_deposit_buttons()
+        if not deposit_buttons_data or not deposit_buttons_data.get("ok"):
+            logging.error("[deposit_all_button_bounds] helpers/bank.py: Failed to get bank deposit buttons from IPC")
+            return None
+        
+        deposit_buttons = deposit_buttons_data.get("deposit_buttons", [])
+        for button in deposit_buttons:
+            if button.get("name") == "deposit_inventory":
+                bounds = button.get("bounds")
+                if bounds and int(bounds.get("width", 0)) > 0 and int(bounds.get("height", 0)) > 0:
+                    return bounds
+        return None
+    except Exception as e:
+        logging.error(f"[deposit_all_button_bounds] helpers/bank.py: {e}")
+        return None
 
-def nearest_banker(payload: dict) -> dict | None:
-    me = payload.get("player") or {}
-    mx, my, mp = int(me.get("worldX") or 0), int(me.get("worldY") or 0), int(me.get("plane") or 0)
-    best, best_d2 = None, 1e18
-    for npc in (payload.get("closestNPCs") or []) + (payload.get("npcs") or []):
-        nm = (npc.get("name") or "").lower()
-        if "banker" not in nm:
-            continue
-        if int(npc.get("plane") or 0) != mp:
-            continue
-        nx, ny = int(npc.get("worldX") or 0), int(npc.get("worldY") or 0)
-        dx, dy = nx - mx, ny - my
-        d2 = dx * dx + dy * dy
-        if d2 < best_d2:
-            best, best_d2 = npc, d2
-    return best
+def nearest_banker() -> dict | None:
+    try:
+        player_data = ipc.get_player()
+        if not player_data or not player_data.get("ok"):
+            logging.error("[nearest_banker] helpers/bank.py: Failed to get player data from IPC")
+            return None
+        
+        me = player_data.get("player") or {}
+        mx, my, mp = int(me.get("worldX") or 0), int(me.get("worldY") or 0), int(me.get("plane") or 0)
+        
+        # Get all NPCs and filter for bankers
+        all_npcs_resp = ipc.get_npcs("banker")
+        if not all_npcs_resp or not all_npcs_resp.get("ok"):
+            logging.error("[nearest_banker] helpers/bank.py: Failed to get NPCs from IPC")
+            return None
+        
+        all_npcs = all_npcs_resp.get("npcs", [])
+        
+        best, best_d2 = None, 1e18
+        for npc in all_npcs:
+            nm = (npc.get("name") or "").lower()
+            if "banker" not in nm:
+                continue
+            if int(npc.get("plane") or 0) != mp:
+                continue
+            nx, ny = int(npc.get("worldX") or 0), int(npc.get("worldY") or 0)
+            dx, dy = nx - mx, ny - my
+            d2 = dx * dx + dy * dy
+            if d2 < best_d2:
+                best, best_d2 = npc, d2
+        return best
+    except Exception as e:
+        logging.error(f"[nearest_banker] helpers/bank.py: {e}")
+        return None
 
-def near_any_bank(payload) -> bool:
+def near_any_bank() -> bool:
     """
     True if the player is within any known bank region.
     Expects BANK_REGIONS = {name: (minX, maxX, minY, maxY), ...}
-    and a helper in_area(rect, payload).
+    and a helper in_area(rect).
     """
     try:
-        from ilbot.ui.simple_recorder.actions.travel import in_area
-        return any(in_area(rect, payload) for rect in BANK_REGIONS.values())
-    except Exception:
+        from ..actions.travel import in_area
+        return any(in_area(rect) for rect in BANK_REGIONS.values())
+    except Exception as e:
+        logging.error(f"[near_any_bank] helpers/bank.py: {e}")
         return False
+
+def get_bank_tabs() -> list[dict]:
+    """Get all bank organization tabs."""
+    try:
+        tabs_data = ipc.get_bank_tabs()
+        if not tabs_data or not tabs_data.get("ok"):
+            logging.error("[get_bank_tabs] helpers/bank.py: Failed to get bank tabs from IPC")
+            return []
+        return tabs_data.get("tabs", [])
+    except Exception as e:
+        logging.error(f"[get_bank_tabs] helpers/bank.py: {e}")
+        return []
+
+def get_bank_quantity_buttons() -> list[dict]:
+    """Get all bank quantity buttons (1, 5, 10, X, All)."""
+    try:
+        quantity_data = ipc.get_bank_quantity_buttons()
+        if not quantity_data or not quantity_data.get("ok"):
+            logging.error("[get_bank_quantity_buttons] helpers/bank.py: Failed to get bank quantity buttons from IPC")
+            return []
+        return quantity_data.get("quantity_buttons", [])
+    except Exception as e:
+        logging.error(f"[get_bank_quantity_buttons] helpers/bank.py: {e}")
+        return []
+
+def get_bank_deposit_buttons() -> list[dict]:
+    """Get bank deposit buttons (inventory, equipment)."""
+    try:
+        deposit_data = ipc.get_bank_deposit_buttons()
+        if not deposit_data or not deposit_data.get("ok"):
+            logging.error("[get_bank_deposit_buttons] helpers/bank.py: Failed to get bank deposit buttons from IPC")
+            return []
+        return deposit_data.get("deposit_buttons", [])
+    except Exception as e:
+        logging.error(f"[get_bank_deposit_buttons] helpers/bank.py: {e}")
+        return []
+
+def get_bank_search_widgets() -> list[dict]:
+    """Get bank search interface widgets."""
+    try:
+        search_data = ipc.get_bank_search()
+        if not search_data or not search_data.get("ok"):
+            logging.error("[get_bank_search_widgets] helpers/bank.py: Failed to get bank search widgets from IPC")
+            return []
+        return search_data.get("search_widgets", [])
+    except Exception as e:
+        logging.error(f"[get_bank_search_widgets] helpers/bank.py: {e}")
+        return []
+
+def get_bank_items_widgets() -> list[dict]:
+    """Get all bank item slot widgets."""
+    try:
+        items_data = ipc.get_bank_items()
+        if not items_data or not items_data.get("ok"):
+            logging.error("[get_bank_items_widgets] helpers/bank.py: Failed to get bank items widgets from IPC")
+            return []
+        return items_data.get("items", [])
+    except Exception as e:
+        logging.error(f"[get_bank_items_widgets] helpers/bank.py: {e}")
+        return []
+
+def find_bank_item_widget(item_name: str) -> dict | None:
+    """Find a specific bank item widget by name."""
+    try:
+        items = get_bank_items_widgets()
+        search_name = norm_name(item_name)
+        
+        for item in items:
+            item_text = item.get("text", "")
+            if norm_name(item_text) == search_name:
+                return item
+        return None
+    except Exception as e:
+        logging.error(f"[find_bank_item_widget] helpers/bank.py: {e}")
+        return None
+
+def get_deposit_equipment_button() -> dict | None:
+    """Get the deposit equipment button widget."""
+    try:
+        deposit_buttons = get_bank_deposit_buttons()
+        for button in deposit_buttons:
+            if button.get("name") == "deposit_equipment":
+                return button
+        return None
+    except Exception as e:
+        logging.error(f"[get_deposit_equipment_button] helpers/bank.py: {e}")
+        return None
+
+# Bank button selection methods using widget IDs
+def is_swap_selected() -> bool:
+    """Check if SWAP mode is selected."""
+    try:
+        from .widgets import click_listener_on
+        from ..constants import BANK_WIDGETS
+        return click_listener_on(BANK_WIDGETS["SWAP"])
+    except Exception as e:
+        logging.error(f"[is_swap_selected] helpers/bank.py: {e}")
+        return False
+
+def is_insert_selected() -> bool:
+    """Check if INSERT mode is selected."""
+    try:
+        from .widgets import click_listener_on
+        from ..constants import BANK_WIDGETS
+        return click_listener_on(BANK_WIDGETS["INSERT"])
+    except Exception as e:
+        logging.error(f"[is_insert_selected] helpers/bank.py: {e}")
+        return False
+
+def is_item_selected() -> bool:
+    """Check if ITEM mode is selected."""
+    try:
+        from .widgets import click_listener_on
+        from ..constants import BANK_WIDGETS
+        return click_listener_on(BANK_WIDGETS["ITEM"])
+    except Exception as e:
+        logging.error(f"[is_item_selected] helpers/bank.py: {e}")
+        return False
+
+def is_note_selected() -> bool:
+    """Check if NOTE mode is selected."""
+    try:
+        from .widgets import click_listener_on
+        from ..constants import BANK_WIDGETS
+        return click_listener_on(BANK_WIDGETS["NOTE"])
+    except Exception as e:
+        logging.error(f"[is_note_selected] helpers/bank.py: {e}")
+        return False
+
+def is_quantity1_selected() -> bool:
+    """Check if QUANTITY 1 is selected."""
+    try:
+        from .widgets import click_listener_on
+        from ..constants import BANK_WIDGETS
+        return click_listener_on(BANK_WIDGETS["QUANTITY1"])
+    except Exception as e:
+        logging.error(f"[is_quantity1_selected] helpers/bank.py: {e}")
+        return False
+
+def is_quantity5_selected() -> bool:
+    """Check if QUANTITY 5 is selected."""
+    try:
+        from .widgets import click_listener_on
+        from ..constants import BANK_WIDGETS
+        return click_listener_on(BANK_WIDGETS["QUANTITY5"])
+    except Exception as e:
+        logging.error(f"[is_quantity5_selected] helpers/bank.py: {e}")
+        return False
+
+def is_quantity10_selected() -> bool:
+    """Check if QUANTITY 10 is selected."""
+    try:
+        from .widgets import click_listener_on
+        from ..constants import BANK_WIDGETS
+        return click_listener_on(BANK_WIDGETS["QUANTITY10"])
+    except Exception as e:
+        logging.error(f"[is_quantity10_selected] helpers/bank.py: {e}")
+        return False
+
+def is_quantityx_selected() -> bool:
+    """Check if QUANTITY X is selected."""
+    try:
+        from .widgets import click_listener_on
+        from ..constants import BANK_WIDGETS
+        return click_listener_on(BANK_WIDGETS["QUANTITYX"])
+    except Exception as e:
+        logging.error(f"[is_quantityx_selected] helpers/bank.py: {e}")
+        return False
+
+def is_quantityall_selected() -> bool:
+    """Check if QUANTITY ALL is selected."""
+    try:
+        from .widgets import click_listener_on
+        from ..constants import BANK_WIDGETS
+        return click_listener_on(BANK_WIDGETS["QUANTITYALL"])
+    except Exception as e:
+        logging.error(f"[is_quantityall_selected] helpers/bank.py: {e}")
+        return False
+
+# Bank button selection methods
+def select_swap() -> dict | None:
+    """Select SWAP mode."""
+    try:
+        
+        widget_info = get_widget_info(BANK_WIDGETS["SWAP"])
+        if not widget_info:
+            logging.error("[select_swap] helpers/bank.py: Failed to get widget info for SWAP button")
+            return None
+        
+        widget_data = widget_info.get("data", {})
+        bounds = widget_data.get("bounds")
+        
+        if not bounds or int(bounds.get("width", 0)) <= 0 or int(bounds.get("height", 0)) <= 0:
+            logging.error("[select_swap] helpers/bank.py: SWAP button has invalid bounds")
+            return None
+        
+        step = {
+            "action": "bank-select-swap",
+            "click": {"type": "rect-center"},
+            "target": {"domain": "bank-widget", "name": "Swap", "bounds": bounds},
+            "postconditions": [],
+        }
+        return dispatch(step)
+    except Exception as e:
+        logging.error(f"[select_swap] helpers/bank.py: {e}")
+        return None
+
+def select_insert() -> dict | None:
+    """Select INSERT mode."""
+    try:
+        
+        widget_info = get_widget_info(BANK_WIDGETS["INSERT"])
+        if not widget_info:
+            logging.error("[select_insert] helpers/bank.py: Failed to get widget info for INSERT button")
+            return None
+        
+        widget_data = widget_info.get("data", {})
+        bounds = widget_data.get("bounds")
+        
+        if not bounds or int(bounds.get("width", 0)) <= 0 or int(bounds.get("height", 0)) <= 0:
+            logging.error("[select_insert] helpers/bank.py: INSERT button has invalid bounds")
+            return None
+        
+        step = {
+            "action": "bank-select-insert",
+            "click": {"type": "rect-center"},
+            "target": {"domain": "bank-widget", "name": "Insert", "bounds": bounds},
+            "postconditions": [],
+        }
+        return dispatch(step)
+    except Exception as e:
+        logging.error(f"[select_insert] helpers/bank.py: {e}")
+        return None
+
+def select_item() -> dict | None:
+    """Select ITEM mode."""
+    try:
+        
+        widget_info = get_widget_info(BANK_WIDGETS["ITEM"])
+        if not widget_info:
+            logging.error("[select_item] helpers/bank.py: Failed to get widget info for ITEM button")
+            return None
+        
+        widget_data = widget_info.get("data", {})
+        bounds = widget_data.get("bounds")
+        
+        if not bounds or int(bounds.get("width", 0)) <= 0 or int(bounds.get("height", 0)) <= 0:
+            logging.error("[select_item] helpers/bank.py: ITEM button has invalid bounds")
+            return None
+        
+        step = {
+            "action": "bank-select-item",
+            "click": {"type": "rect-center"},
+            "target": {"domain": "bank-widget", "name": "Item", "bounds": bounds},
+            "postconditions": [],
+        }
+        return dispatch(step)
+    except Exception as e:
+        logging.error(f"[select_item] helpers/bank.py: {e}")
+        return None
+
+def select_note() -> dict | None:
+    """Select NOTE mode."""
+    try:
+        
+        widget_info = get_widget_info(BANK_WIDGETS["NOTE"])
+        if not widget_info:
+            logging.error("[select_note] helpers/bank.py: Failed to get widget info for NOTE button")
+            return None
+        
+        widget_data = widget_info.get("data", {})
+        bounds = widget_data.get("bounds")
+        
+        if not bounds or int(bounds.get("width", 0)) <= 0 or int(bounds.get("height", 0)) <= 0:
+            logging.error("[select_note] helpers/bank.py: NOTE button has invalid bounds")
+            return None
+        
+        step = {
+            "action": "bank-select-note",
+            "click": {"type": "rect-center"},
+            "target": {"domain": "bank-widget", "name": "Note", "bounds": bounds},
+            "postconditions": [],
+        }
+        return dispatch(step)
+    except Exception as e:
+        logging.error(f"[select_note] helpers/bank.py: {e}")
+        return None
+
+def select_quantity1() -> dict | None:
+    """Select QUANTITY 1."""
+    try:
+        
+        widget_info = get_widget_info(BANK_WIDGETS["QUANTITY1"])
+        if not widget_info:
+            logging.error("[select_quantity1] helpers/bank.py: Failed to get widget info for QUANTITY1 button")
+            return None
+        
+        widget_data = widget_info.get("data", {})
+        bounds = widget_data.get("bounds")
+        
+        if not bounds or int(bounds.get("width", 0)) <= 0 or int(bounds.get("height", 0)) <= 0:
+            logging.error("[select_quantity1] helpers/bank.py: QUANTITY1 button has invalid bounds")
+            return None
+        
+        step = {
+            "action": "bank-select-quantity1",
+            "click": {"type": "rect-center"},
+            "target": {"domain": "bank-widget", "name": "Quantity 1", "bounds": bounds},
+            "postconditions": [],
+        }
+        return dispatch(step)
+    except Exception as e:
+        logging.error(f"[select_quantity1] helpers/bank.py: {e}")
+        return None
+
+def select_quantity5() -> dict | None:
+    """Select QUANTITY 5."""
+    try:
+        
+        widget_info = get_widget_info(BANK_WIDGETS["QUANTITY5"])
+        if not widget_info:
+            logging.error("[select_quantity5] helpers/bank.py: Failed to get widget info for QUANTITY5 button")
+            return None
+        
+        widget_data = widget_info.get("data", {})
+        bounds = widget_data.get("bounds")
+        
+        if not bounds or int(bounds.get("width", 0)) <= 0 or int(bounds.get("height", 0)) <= 0:
+            logging.error("[select_quantity5] helpers/bank.py: QUANTITY5 button has invalid bounds")
+            return None
+        
+        step = {
+            "action": "bank-select-quantity5",
+            "click": {"type": "rect-center"},
+            "target": {"domain": "bank-widget", "name": "Quantity 5", "bounds": bounds},
+            "postconditions": [],
+        }
+        return dispatch(step)
+    except Exception as e:
+        logging.error(f"[select_quantity5] helpers/bank.py: {e}")
+        return None
+
+def select_quantity10() -> dict | None:
+    """Select QUANTITY 10."""
+    try:
+        
+        widget_info = get_widget_info(BANK_WIDGETS["QUANTITY10"])
+        if not widget_info:
+            logging.error("[select_quantity10] helpers/bank.py: Failed to get widget info for QUANTITY10 button")
+            return None
+        
+        widget_data = widget_info.get("data", {})
+        bounds = widget_data.get("bounds")
+        
+        if not bounds or int(bounds.get("width", 0)) <= 0 or int(bounds.get("height", 0)) <= 0:
+            logging.error("[select_quantity10] helpers/bank.py: QUANTITY10 button has invalid bounds")
+            return None
+        
+        step = {
+            "action": "bank-select-quantity10",
+            "click": {"type": "rect-center"},
+            "target": {"domain": "bank-widget", "name": "Quantity 10", "bounds": bounds},
+            "postconditions": [],
+        }
+        return dispatch(step)
+    except Exception as e:
+        logging.error(f"[select_quantity10] helpers/bank.py: {e}")
+        return None
+
+def select_quantityx() -> dict | None:
+    """Select QUANTITY X."""
+    try:
+        
+        widget_info = get_widget_info(BANK_WIDGETS["QUANTITYX"])
+        if not widget_info:
+            logging.error("[select_quantityx] helpers/bank.py: Failed to get widget info for QUANTITYX button")
+            return None
+        
+        widget_data = widget_info.get("data", {})
+        bounds = widget_data.get("bounds")
+        
+        if not bounds or int(bounds.get("width", 0)) <= 0 or int(bounds.get("height", 0)) <= 0:
+            logging.error("[select_quantityx] helpers/bank.py: QUANTITYX button has invalid bounds")
+            return None
+        
+        step = {
+            "action": "bank-select-quantityx",
+            "click": {"type": "rect-center"},
+            "target": {"domain": "bank-widget", "name": "Quantity X", "bounds": bounds},
+            "postconditions": [],
+        }
+        return dispatch(step)
+    except Exception as e:
+        logging.error(f"[select_quantityx] helpers/bank.py: {e}")
+        return None
+
+def select_quantityall() -> dict | None:
+    """Select QUANTITY ALL."""
+    try:
+        
+        widget_info = get_widget_info(BANK_WIDGETS["QUANTITYALL"])
+        if not widget_info:
+            logging.error("[select_quantityall] helpers/bank.py: Failed to get widget info for QUANTITYALL button")
+            return None
+        
+        widget_data = widget_info.get("data", {})
+        bounds = widget_data.get("bounds")
+        
+        if not bounds or int(bounds.get("width", 0)) <= 0 or int(bounds.get("height", 0)) <= 0:
+            logging.error("[select_quantityall] helpers/bank.py: QUANTITYALL button has invalid bounds")
+            return None
+        
+        step = {
+            "action": "bank-select-quantityall",
+            "click": {"type": "rect-center"},
+            "target": {"domain": "bank-widget", "name": "Quantity All", "bounds": bounds},
+            "postconditions": [],
+        }
+        return dispatch(step)
+    except Exception as e:
+        logging.error(f"[select_quantityall] helpers/bank.py: {e}")
+        return None

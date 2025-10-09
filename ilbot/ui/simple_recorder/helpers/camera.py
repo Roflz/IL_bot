@@ -1,20 +1,14 @@
-from ilbot.ui.simple_recorder.helpers.ipc import ipc_send
-from ilbot.ui.simple_recorder.helpers.utils import now_ms
 from typing import Optional, Dict, Any
 
-def get_camera_stats(payload: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
+from ilbot.ui.simple_recorder.helpers.runtime_utils import ipc
+
+
+def get_camera_stats() -> Optional[Dict[str, Any]]:
     """
     Get real-time camera statistics directly from the client.
     """
-    if payload is None:
-        from ilbot.ui.simple_recorder.helpers.context import get_payload
-        payload = get_payload()
-    
-    if not payload:
-        return None
-    
     try:
-        resp = ipc_send({"cmd": "get_camera"})
+        resp = ipc.get_camera()
         if resp and resp.get("ok"):
             return resp
         else:
@@ -25,40 +19,30 @@ def get_camera_stats(payload: Optional[Dict] = None) -> Optional[Dict[str, Any]]
         return None
 
 
-def read_camera_scale(payload: Optional[Dict] = None) -> Optional[int]:
+def read_camera_scale() -> Optional[int]:
     """
     Get the current camera scale (zoom level) in real-time.
     """
-    stats = get_camera_stats(payload)
+    stats = get_camera_stats()
     if stats and stats.get("ok"):
         return stats.get("scale")
     return None
 
 
-def setup_camera_optimal(payload: Optional[Dict] = None, target_scale: int = 551, target_pitch: int = 383) -> bool:
+def setup_camera_optimal(target_scale: int = 551, target_pitch: int = 383) -> bool:
     """
     Set up camera for optimal bot operation using continuous key holds with real-time checking.
     
     Args:
-        payload: Optional payload, will get fresh if None
         target_scale: Target camera scale (lower = more zoomed out, default 551)
         target_pitch: Target camera pitch (higher = more upward angle, default 383)
         
     Returns:
         True if setup completed successfully, False otherwise
     """
-    if payload is None:
-        from ilbot.ui.simple_recorder.helpers.context import get_payload
-        payload = get_payload()
-    
-    if not payload:
-        print("[CAMERA] No payload available for camera setup")
-        return False
-    
     print(f"[CAMERA] Setting up camera for optimal view (Scale: {target_scale}, Pitch: {target_pitch})...")
     
     import time
-    import threading
     
     def hold_until_condition(condition_func, key, max_duration=5.0):
         """Hold a key until condition is met or max duration reached"""
@@ -66,7 +50,7 @@ def setup_camera_optimal(payload: Optional[Dict] = None, target_scale: int = 551
         check_interval = 0.05  # Check every 50ms
         
         # Press the key down
-        ipc_send({"cmd": "keyPress", "key": key})
+        ipc.key_press(key)
         
         try:
             # Monitor the condition while key is held down
@@ -76,7 +60,7 @@ def setup_camera_optimal(payload: Optional[Dict] = None, target_scale: int = 551
                 time.sleep(check_interval)
         finally:
             # Always release the key when done
-            ipc_send({"cmd": "keyRelease", "key": key})
+            ipc.key_release(key)
         
         return False
     
@@ -90,13 +74,13 @@ def setup_camera_optimal(payload: Optional[Dict] = None, target_scale: int = 551
                 return True
             
             # Send scroll command
-            ipc_send({"cmd": "scroll", "amount": -1})
+            ipc.scroll(-1)
             time.sleep(check_interval)
         
         return False
     
     # Get initial camera state
-    camera_stats = get_camera_stats(payload)
+    camera_stats = get_camera_stats()
     if not camera_stats or not camera_stats.get("ok"):
         print("[CAMERA] Could not get initial camera stats")
         return False
@@ -111,7 +95,7 @@ def setup_camera_optimal(payload: Optional[Dict] = None, target_scale: int = 551
         print(f"[CAMERA] Zooming out from {current_scale} to ~{target_scale}")
         
         def scale_good():
-            stats = get_camera_stats(payload)
+            stats = get_camera_stats()
             if not stats or not stats.get("ok"):
                 return False
             return abs(stats.get("scale", 512) - target_scale) <= 30
@@ -125,7 +109,7 @@ def setup_camera_optimal(payload: Optional[Dict] = None, target_scale: int = 551
         print(f"[CAMERA] Pitching up from {current_pitch} to ~{target_pitch}")
         
         def pitch_good():
-            stats = get_camera_stats(payload)
+            stats = get_camera_stats()
             if not stats or not stats.get("ok"):
                 return False
             return abs(stats.get("pitch", 0) - target_pitch) <= 30
@@ -135,7 +119,7 @@ def setup_camera_optimal(payload: Optional[Dict] = None, target_scale: int = 551
             return False
     
     # Final check
-    final_stats = get_camera_stats(payload)
+    final_stats = get_camera_stats()
     if final_stats and final_stats.get("ok"):
         final_scale = final_stats.get("scale", 512)
         final_pitch = final_stats.get("pitch", 0)
