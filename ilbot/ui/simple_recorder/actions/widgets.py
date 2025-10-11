@@ -2,8 +2,34 @@
 
 from __future__ import annotations
 from typing import Optional, List, Dict, Any
+import time
+import json
+from datetime import datetime
 from ..helpers.runtime_utils import ui, dispatch, ipc
 from ..helpers.widgets import widget_exists, get_widget_info
+
+# Timing instrumentation
+_TIMING_ENABLED = True
+_TIMING_FILE = "widgets.timing.jsonl"
+
+def _mark_timing(label: str) -> int:
+    """Mark a timing point and return nanoseconds timestamp."""
+    return time.perf_counter_ns()
+
+def _emit_timing(data: dict):
+    """Emit timing data as JSONL."""
+    if not _TIMING_ENABLED:
+        return
+    
+    data["ts"] = datetime.now().isoformat()
+    print(f"[WIDGET_TIMING] {json.dumps(data)}")
+    
+    # Also write to file
+    try:
+        with open(_TIMING_FILE, "a") as f:
+            f.write(json.dumps(data) + "\n")
+    except Exception:
+        pass  # Don't fail if we can't write to file
 
 def click_widget(widget_id: int) -> Optional[dict]:
     """
@@ -15,32 +41,80 @@ def click_widget(widget_id: int) -> Optional[dict]:
     Returns:
         UI dispatch result or None if failed
     """
-    # Check if widget exists and is visible
-    if not widget_exists(widget_id):
-        return None
-    
-    # Get widget info to get coordinates
-    widget_info = get_widget_info(widget_id)
-    if not widget_info:
-        return None
-    
-    widget_data = widget_info.get("data", {})
-    bounds = widget_data.get("bounds")
-    
-    if not bounds:
-        return None
-    
-    # Calculate center coordinates
-    x = bounds.get("x", 0) + bounds.get("width", 0) // 2
-    y = bounds.get("y", 0) + bounds.get("height", 0) // 2
-    
-    # Click on the widget
-    step = {
-        "action": "widget-click",
-        "click": {"type": "point", "x": int(x), "y": int(y)},
-        "target": {"domain": "widget", "name": f"widget_{widget_id}"},
+    # Timing instrumentation
+    t0_start = _mark_timing("start")
+    timing_data = {
+        "phase": "widget_click_timing",
+        "widget_id": widget_id,
+        "ok": True,
+        "error": None,
+        "dur_ms": {},
+        "counts": {"checks": 0}
     }
-    return dispatch(step)
+    
+    try:
+        # Check if widget exists and is visible
+        t1_check_exists = _mark_timing("check_exists")
+        timing_data["dur_ms"]["check_exists"] = (t1_check_exists - t0_start) / 1_000_000
+        timing_data["counts"]["checks"] += 1
+        
+        if not widget_exists(widget_id):
+            timing_data["ok"] = False
+            timing_data["error"] = "Widget does not exist"
+            _emit_timing(timing_data)
+            return None
+        
+        # Get widget info to get coordinates
+        t2_get_info = _mark_timing("get_info")
+        timing_data["dur_ms"]["get_info"] = (t2_get_info - t1_check_exists) / 1_000_000
+        
+        widget_info = get_widget_info(widget_id)
+        if not widget_info:
+            timing_data["ok"] = False
+            timing_data["error"] = "Could not get widget info"
+            _emit_timing(timing_data)
+            return None
+        
+        widget_data = widget_info.get("data", {})
+        bounds = widget_data.get("bounds")
+        
+        if not bounds:
+            timing_data["ok"] = False
+            timing_data["error"] = "No bounds found"
+            _emit_timing(timing_data)
+            return None
+        
+        # Calculate center coordinates
+        t3_calculate = _mark_timing("calculate")
+        timing_data["dur_ms"]["calculate"] = (t3_calculate - t2_get_info) / 1_000_000
+        
+        x = bounds.get("x", 0) + bounds.get("width", 0) // 2
+        y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+        
+        # Click on the widget
+        t4_dispatch = _mark_timing("dispatch")
+        timing_data["dur_ms"]["dispatch"] = (t4_dispatch - t3_calculate) / 1_000_000
+        
+        step = {
+            "action": "widget-click",
+            "click": {"type": "point", "x": int(x), "y": int(y)},
+            "target": {"domain": "widget", "name": f"widget_{widget_id}"},
+        }
+        result = dispatch(step)
+        
+        t5_complete = _mark_timing("complete")
+        timing_data["dur_ms"]["total"] = (t5_complete - t0_start) / 1_000_000
+        _emit_timing(timing_data)
+        
+        return result
+    
+    except Exception as e:
+        t6_error = _mark_timing("error")
+        timing_data["ok"] = False
+        timing_data["error"] = str(e)
+        timing_data["dur_ms"]["total"] = (t6_error - t0_start) / 1_000_000
+        _emit_timing(timing_data)
+        return None
 
 def click_widget_by_text(widget_id: int, text: str) -> Optional[dict]:
     """

@@ -180,9 +180,9 @@ class ActionExecutor:
 
             # Check if the target option is at index 0 (first/default option)
             target_entry = cand[0]
-            target_index = target_entry.get('visualIndex')
-            
-            if target_index == 0:
+            target_visual_index = target_entry.get('visualIndex')
+
+            if target_visual_index == 0:
                 # First option - use simple left-click instead of context menu
                 return self._click_canvas(ax, ay, button="left")
             else:
@@ -191,8 +191,19 @@ class ActionExecutor:
                 time.sleep(int(click.get("open_delay_ms", 120)) / 1000.0)
                 # Re-read menu after opening
                 info = self.ipc._send({"cmd": "menu"}) or {}
-                # Not first option - use context menu selection
-                r = target_entry.get("rect") or {}
+                entries = info.get("entries") or []
+                want_opt = (step.get("option") or "").strip().lower()
+                want_tgt = (target.get("name") or "").strip().lower()
+                if not want_opt and not want_tgt:
+                    return
+                cand = [e for e in entries if _match(e)]
+                if not cand:
+                    return
+
+                # Check if the target option is at index 0 (first/default option)
+                target_entry = cand[0]
+                # # Not first option - use context menu selection
+                r = target_entry.get('rect')or {}
                 # rect.x / rect.y are ABSOLUTE canvas coords from the plugin logs:
                 # e.g. rect=(751,409 110x15)
                 cx = int(r["x"]) + int(r["w"]) // 2

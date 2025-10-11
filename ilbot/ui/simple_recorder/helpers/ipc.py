@@ -8,7 +8,7 @@ class IPCClient:
     This replaces the scattered ipc_send functions and RuneLiteIPC class.
     """
     
-    def __init__(self, host="127.0.0.1", port=17000, pre_action_ms=250, timeout_s=2.0):
+    def __init__(self, host="127.0.0.1", port=17000, pre_action_ms=0, timeout_s=2.0):
         self.host = host
         self.port = port
         self.pre_action_ms = pre_action_ms

@@ -26,6 +26,7 @@ from ..actions.equipment import get_best_weapon_for_level, get_best_armor_for_le
     get_best_armor_for_level_in_bank
 from ..actions.ge import check_and_buy_required_items, close_ge
 from ..actions.ground_items import loot
+from ..actions.player import get_skill_level
 from ..actions.timing import wait_until
 from ..helpers.bank import near_any_bank
 
@@ -44,7 +45,7 @@ class FaladorCowsPlan(Plan):
     label = "Falador Cows - Kill cows and collect hides"
     
     def __init__(self):
-        self.state = {"phase": "GO_TO_CLOSEST_BANK"}
+        self.state = {"phase": "PREPARE_AT_BANK"}
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
         
@@ -446,8 +447,14 @@ class FaladorCowsPlan(Plan):
                 required_items = []
                 item_requirements = {}
                 
-                # Add food requirement using individual item config
-                if self.food_item:
+                # Helper function to check if we have an item anywhere (bank, inventory, or equipped)
+                def has_item_anywhere(item_name):
+                    return (bank.has_item(item_name) or 
+                            inventory.has_item(item_name) or 
+                            equipment.has_equipped(item_name))
+                
+                # Add food requirement using individual item config (only if we don't have it)
+                if self.food_item and not has_item_anywhere(self.food_item):
                     required_items.append(self.food_item)
                     if self.food_item in self.ge_config:
                         food_config = self.ge_config[self.food_item]
@@ -460,9 +467,9 @@ class FaladorCowsPlan(Plan):
                         # Fallback if item not in config
                         item_requirements[self.food_item] = (50, 5, 0)
                 
-                # Add weapon requirement using individual item config
+                # Add weapon requirement using individual item config (only if we don't have it)
                 target_weapon = get_best_weapon_for_level(self.weapon_tiers, self.id)
-                if target_weapon:
+                if target_weapon and not has_item_anywhere(target_weapon["name"]):
                     required_items.append(target_weapon["name"])
                     if target_weapon["name"] in self.ge_config:
                         weapon_config = self.ge_config[target_weapon["name"]]
@@ -475,37 +482,39 @@ class FaladorCowsPlan(Plan):
                         # Fallback if item not in config
                         item_requirements[target_weapon["name"]] = (1, 0, 1000)
                 
-                # Add armor requirements using individual item config
+                # Add armor requirements using individual item config (only if we don't have them)
                 target_armor_dict = get_best_armor_for_level(self.armor_tiers, self.id)
                 if target_armor_dict:
                     for armor_type, armor_item in target_armor_dict.items():
-                        required_items.append(armor_item["name"])
-                        if armor_item["name"] in self.ge_config:
-                            armor_config = self.ge_config[armor_item["name"]]
-                            item_requirements[armor_item["name"]] = (
-                                armor_config["quantity"], 
-                                armor_config["bumps"], 
-                                armor_config["set_price"]
-                            )
-                        else:
-                            # Fallback if item not in config
-                            item_requirements[armor_item["name"]] = (1, 0, 500)
+                        if not has_item_anywhere(armor_item["name"]):
+                            required_items.append(armor_item["name"])
+                            if armor_item["name"] in self.ge_config:
+                                armor_config = self.ge_config[armor_item["name"]]
+                                item_requirements[armor_item["name"]] = (
+                                    armor_config["quantity"], 
+                                    armor_config["bumps"], 
+                                    armor_config["set_price"]
+                                )
+                            else:
+                                # Fallback if item not in config
+                                item_requirements[armor_item["name"]] = (1, 0, 500)
                 
-                # Add jewelry requirements using individual item config
+                # Add jewelry requirements using individual item config (only if we don't have them)
                 target_jewelry_dict = get_best_armor_for_level(self.jewelry_tiers, self.id)
                 if target_jewelry_dict:
                     for jewelry_type, jewelry_item in target_jewelry_dict.items():
-                        required_items.append(jewelry_item["name"])
-                        if jewelry_item["name"] in self.ge_config:
-                            jewelry_config = self.ge_config[jewelry_item["name"]]
-                            item_requirements[jewelry_item["name"]] = (
-                                jewelry_config["quantity"], 
-                                jewelry_config["bumps"], 
-                                jewelry_config["set_price"]
-                            )
-                        else:
-                            # Fallback if item not in config
-                            item_requirements[jewelry_item["name"]] = (1, 5, 0)
+                        if not has_item_anywhere(jewelry_item["name"]):
+                            required_items.append(jewelry_item["name"])
+                            if jewelry_item["name"] in self.ge_config:
+                                jewelry_config = self.ge_config[jewelry_item["name"]]
+                                item_requirements[jewelry_item["name"]] = (
+                                    jewelry_config["quantity"], 
+                                    jewelry_config["bumps"], 
+                                    jewelry_config["set_price"]
+                                )
+                            else:
+                                # Fallback if item not in config
+                                item_requirements[jewelry_item["name"]] = (1, 5, 0)
                 
                 # Use the reusable method
                 result = check_and_buy_required_items(required_items, item_requirements, self.id)
@@ -552,16 +561,63 @@ class FaladorCowsPlan(Plan):
                 target_armor_dict = get_best_armor_for_level(self.armor_tiers, self.id)
                 target_jewelry_dict = get_best_armor_for_level(self.jewelry_tiers, self.id)
 
+                # Helper function to check if we have an item anywhere (bank, inventory, or equipped)
+                def has_item_anywhere(item_name):
+                    return (bank.has_item(item_name) or 
+                            inventory.has_item(item_name) or 
+                            equipment.has_equipped(item_name))
+
+                # Helper function to find the best available weapon (fallback to lower tiers)
+                def get_best_available_weapon():
+                    attack_level = get_skill_level("attack")
+                    
+                    # Check weapons from best to worst
+                    for weapon in reversed(self.weapon_tiers):
+                        if weapon["attack_req"] <= attack_level and has_item_anywhere(weapon["name"]):
+                            return weapon
+                    return None
+
+                # Helper function to find the best available armor (fallback to lower tiers)
+                def get_best_available_armor():
+                    defence_level = get_skill_level("defence")
+                    
+                    best_armor = {}
+                    for armour_type, armor_list in self.armor_tiers.items():
+                        # Check armor from best to worst for this type
+                        for armor in reversed(armor_list):
+                            if armor["defence_req"] <= defence_level and has_item_anywhere(armor["name"]):
+                                best_armor[armour_type] = armor
+                                break
+                    return best_armor if best_armor else None
+
+                # Helper function to find the best available jewelry (fallback to lower tiers)
+                def get_best_available_jewelry():
+                    defence_level = get_skill_level("defence")
+                    
+                    best_jewelry = {}
+                    for jewelry_type, jewelry_list in self.jewelry_tiers.items():
+                        # Check jewelry from best to worst for this type
+                        for jewelry in reversed(jewelry_list):
+                            if jewelry["defence_req"] <= defence_level and has_item_anywhere(jewelry["name"]):
+                                best_jewelry[jewelry_type] = jewelry
+                                break
+                    return best_jewelry if best_jewelry else None
+
+                # Get the best available equipment (with fallbacks)
+                available_weapon = get_best_available_weapon()
+                available_armor_dict = get_best_available_armor()
+                available_jewelry_dict = get_best_available_jewelry()
+
                 # Check current inventory state
                 has_sufficient_food = inventory.has_unnoted_item(self.food_item, 5)
                 has_cowhides = inventory.has_item("Cowhide")
 
-                # Check current equipment state
-                has_correct_weapon = target_weapon and equipment.has_equipped(target_weapon["name"])
+                # Check current equipment state using available equipment
+                has_correct_weapon = available_weapon and equipment.has_equipped(available_weapon["name"])
 
                 has_correct_armor = True
-                if target_armor_dict:
-                    for armor_type, armor_item in target_armor_dict.items():
+                if available_armor_dict:
+                    for armor_type, armor_item in available_armor_dict.items():
                         if not equipment.has_equipped(armor_item["name"]):
                             has_correct_armor = False
                             break
@@ -569,8 +625,8 @@ class FaladorCowsPlan(Plan):
                     has_correct_armor = False
 
                 has_correct_jewelry = True
-                if target_jewelry_dict:
-                    for jewelry_type, jewelry_item in target_jewelry_dict.items():
+                if available_jewelry_dict:
+                    for jewelry_type, jewelry_item in available_jewelry_dict.items():
                         if not equipment.has_equipped(jewelry_item["name"]):
                             has_correct_jewelry = False
                             break
@@ -618,29 +674,29 @@ class FaladorCowsPlan(Plan):
                     if not item_name or item_name in items_to_deposit:
                         continue
                         
-                    # Check if this item is target equipment we might need
-                    is_target_equipment = False
+                    # Check if this item is available equipment we might need
+                    is_available_equipment = False
                     
-                    # Check if it's our target weapon
-                    if target_weapon and item_name == target_weapon["name"]:
-                        is_target_equipment = True
+                    # Check if it's our available weapon
+                    if available_weapon and item_name == available_weapon["name"]:
+                        is_available_equipment = True
                     
-                    # Check if it's our target armor
-                    if target_armor_dict:
-                        for armor_type, armor_item in target_armor_dict.items():
+                    # Check if it's our available armor
+                    if available_armor_dict:
+                        for armor_type, armor_item in available_armor_dict.items():
                             if item_name == armor_item["name"]:
-                                is_target_equipment = True
+                                is_available_equipment = True
                                 break
                     
-                    # Check if it's our target jewelry
-                    if target_jewelry_dict:
-                        for jewelry_type, jewelry_item in target_jewelry_dict.items():
+                    # Check if it's our available jewelry
+                    if available_jewelry_dict:
+                        for jewelry_type, jewelry_item in available_jewelry_dict.items():
                             if item_name == jewelry_item["name"]:
-                                is_target_equipment = True
+                                is_available_equipment = True
                                 break
                     
-                    # If it's not target equipment and not our food, deposit it
-                    if not is_target_equipment and item_name != self.food_item:
+                    # If it's not available equipment and not our food, deposit it
+                    if not is_available_equipment and item_name != self.food_item:
                         items_to_deposit.append(item_name)
                 
                 # Deposit the unwanted items
@@ -651,29 +707,29 @@ class FaladorCowsPlan(Plan):
                     return  # Wait for deposits to complete
 
                 # Check weapon first
-                if target_weapon and not has_correct_weapon:
+                if available_weapon and not has_correct_weapon:
                     print(f"[{self.id}] Handling weapon change...")
                     
-                    # Check if target weapon is in inventory
-                    if inventory.has_item(target_weapon["name"]):
-                        print(f"[{self.id}] Target weapon in inventory, equipping directly...")
-                        bank.interact_inventory(target_weapon["name"], "Wield")
+                    # Check if available weapon is in inventory
+                    if inventory.has_item(available_weapon["name"]):
+                        print(f"[{self.id}] Available weapon in inventory, equipping directly...")
+                        bank.interact_inventory(available_weapon["name"], "Wield")
                         return  # Wait for equipping
                     else:
                         # Need to withdraw from bank
                         print(f"[{self.id}] Withdrawing weapon from bank...")
-                        withdraw_item(target_weapon["name"], 1)
+                        withdraw_item(available_weapon["name"], 1)
                         return  # Wait for withdrawal
 
                 # Check armor pieces
-                if target_armor_dict:
-                    for armor_type, armor_item in target_armor_dict.items():
+                if available_armor_dict:
+                    for armor_type, armor_item in available_armor_dict.items():
                         if not equipment.has_equipped(armor_item["name"]):
                             print(f"[{self.id}] Handling {armor_type} change...")
                             
-                            # Check if target armor is in inventory
+                            # Check if available armor is in inventory
                             if inventory.has_item(armor_item["name"]):
-                                print(f"[{self.id}] Target {armor_type} in inventory, equipping directly...")
+                                print(f"[{self.id}] Available {armor_type} in inventory, equipping directly...")
                                 bank.interact_inventory(armor_item["name"], "Wear")
                                 return  # Wait for equipping
                             else:
@@ -683,14 +739,14 @@ class FaladorCowsPlan(Plan):
                                 return  # Wait for withdrawal
 
                 # Check jewelry pieces
-                if target_jewelry_dict:
-                    for jewelry_type, jewelry_item in target_jewelry_dict.items():
+                if available_jewelry_dict:
+                    for jewelry_type, jewelry_item in available_jewelry_dict.items():
                         if not equipment.has_equipped(jewelry_item["name"]):
                             print(f"[{self.id}] Handling {jewelry_type} change...")
                             
-                            # Check if target jewelry is in inventory
+                            # Check if available jewelry is in inventory
                             if inventory.has_item(jewelry_item["name"]):
-                                print(f"[{self.id}] Target {jewelry_type} in inventory, equipping directly...")
+                                print(f"[{self.id}] Available {jewelry_type} in inventory, equipping directly...")
                                 bank.interact_inventory(jewelry_item["name"], "Wear")
                                 return  # Wait for equipping
                             else:

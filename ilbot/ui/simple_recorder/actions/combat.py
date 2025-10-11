@@ -215,7 +215,7 @@ def select_combat_style_for_training() -> None:
         reason = f"Training Strength (all skills at 5-level increments: Def {defence_level}, Att {attack_level}, Str {strength_level})"
 
     # Only switch if we need to change styles or if we should switch based on current skill level
-    if should_switch or current_style != target_style:
+    if should_switch and current_style != target_style:
         print(f"[COMBAT] {reason}")
         select_combat_style(target_style)
     else:

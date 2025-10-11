@@ -1,12 +1,17 @@
 # ilbot/ui/simple_recorder/actions/travel.py
 import random
 import time
+import json
+from datetime import datetime
 
 from . import player
 from .player import get_player_position
 from ..helpers.runtime_utils import ipc
 from ..helpers.navigation import get_nav_rect, closest_bank_key, _merge_door_into_projection
 from ..services.click_with_camera import click_ground_with_camera, click_object_with_camera
+
+# Timing instrumentation constants
+_GO_TO_TIMING_ENABLED = True
 
 # Global variable to track the most recently traversed door
 _most_recently_traversed_door = None
@@ -175,7 +180,7 @@ def _is_door_blocking_path(door_plan: dict, path_waypoints: list) -> bool:
     
     Args:
         door_plan: Door plan containing door information including orientation
-        path_waypoints: List of waypoints in the path
+        path_waypoints: List of waypoints in the path (FULL path from go_to)
         
     Returns:
         True if door is blocking the path, False if door can be passed through
@@ -191,50 +196,150 @@ def _is_door_blocking_path(door_plan: dict, path_waypoints: list) -> bool:
     if not isinstance(door_x, int) or not isinstance(door_y, int):
         return True  # Default to blocking if no valid coordinates
     
-    # Find the path segment that goes through this door tile
+    print(f"[DOOR_CHECK] Checking door at ({door_x}, {door_y}) with orientation A={door_orientation_a}, B={door_orientation_b}")
+    print(f"[DOOR_CHECK] Path has {len(path_waypoints)} waypoints")
+    
+    # Find waypoints that cross the door tile
     for i in range(len(path_waypoints) - 1):
         current_wp = path_waypoints[i]
         next_wp = path_waypoints[i + 1]
         
-        # Check if this path segment goes through the door tile
-        if (current_wp.get('x') == door_x and current_wp.get('y') == door_y) or \
-           (next_wp.get('x') == door_x and next_wp.get('y') == door_y):
+        # Check if this path segment crosses the door tile
+        if _path_segment_crosses_door_tile(current_wp, next_wp, door_x, door_y):
+            # Determine which side(s) of the door tile the path crosses
+            door_sides = _get_door_side_crossed(current_wp, next_wp, door_x, door_y)
             
-            # Calculate the direction of movement through the door
-            dx = next_wp.get('x') - current_wp.get('x')
-            dy = next_wp.get('y') - current_wp.get('y')
+            if door_sides is None:
+                continue  # Path doesn't cross a door side
+                
+            print(f"[DOOR_CHECK] Path crosses door at ({door_x}, {door_y}) on {door_sides} side(s)")
+            print(f"[DOOR_CHECK] Path from ({current_wp.get('x')}, {current_wp.get('y')}) to ({next_wp.get('x')}, {next_wp.get('y')})")
             
-            # Determine which side of the door tile the path is crossing
-            blocking_orientation = 0
-            
-            if dx > 0:  # Moving East (right)
-                blocking_orientation |= 4  # East wall blocks eastward movement
-            elif dx < 0:  # Moving West (left)
-                blocking_orientation |= 1  # West wall blocks westward movement
-            
-            if dy < 0:  # Moving South (down)
-                blocking_orientation |= 8  # South wall blocks southward movement
-            elif dy > 0:  # Moving North (up)
-                blocking_orientation |= 2  # North wall blocks northward movement
-            
-            # Check if the door has walls on the sides that would block this movement
-            if (door_orientation_a & blocking_orientation) or (door_orientation_b & blocking_orientation):
-                print(f"[DOOR_CHECK] Door at ({door_x}, {door_y}) is blocking path (orientation: {door_orientation_a}/{door_orientation_b}, blocking: {blocking_orientation})")
+            # Check if the door has a wall on any of the sides being crossed
+            if _door_has_wall_on_side(door_orientation_a, door_orientation_b, door_sides):
+                print(f"[DOOR_CHECK] Door is blocking path - has wall on {door_sides} side(s)")
                 return True
-            else:
-                print(f"[DOOR_CHECK] Door at ({door_x}, {door_y}) is NOT blocking path (orientation: {door_orientation_a}/{door_orientation_b}, blocking: {blocking_orientation})")
-                return False
     
-    # If door is not on the path, it's not blocking
+    # If no path segment crosses the door, it's not blocking
+    print(f"[DOOR_CHECK] No path segment crosses door at ({door_x}, {door_y}) - not blocking")
     return False
 
+def _path_segment_crosses_door_tile(wp1: dict, wp2: dict, door_x: int, door_y: int) -> bool:
+    """Check if a path segment crosses the door tile."""
+    # Extract coordinates from waypoints (handle both regular waypoints and door objects)
+    x1, y1 = _extract_waypoint_coords(wp1)
+    x2, y2 = _extract_waypoint_coords(wp2)
+    
+    if x1 is None or y1 is None or x2 is None or y2 is None:
+        return False
+    
+    # Check if the line segment from (x1,y1) to (x2,y2) passes through tile (door_x, door_y)
+    # This happens if:
+    # 1. One waypoint is on the door tile and the other is adjacent
+    # 2. The line segment passes through the door tile
+    
+    # Case 1: One waypoint is on the door tile
+    if (x1 == door_x and y1 == door_y) or (x2 == door_x and y2 == door_y):
+        return True
+    
+    # Case 2: Line segment passes through the door tile
+    # Check if the door tile is between the two waypoints
+    if min(x1, x2) < door_x < max(x1, x2) and min(y1, y2) < door_y < max(y1, y2):
+        return True
+    
+    return False
 
-def _handle_door_opening(door_plan: dict) -> bool:
+def _extract_waypoint_coords(wp: dict) -> tuple:
+    """Extract x,y coordinates from a waypoint (handles both regular waypoints and door objects)."""
+    return wp.get('x'), wp.get('y')
+
+def _get_door_side_crossed(wp1: dict, wp2: dict, door_x: int, door_y: int) -> str:
+    """Determine which side of the door tile the path crosses."""
+    # Extract coordinates from waypoints (handle both regular waypoints and door objects)
+    x1, y1 = _extract_waypoint_coords(wp1)
+    x2, y2 = _extract_waypoint_coords(wp2)
+    
+    if x1 is None or y1 is None or x2 is None or y2 is None:
+        return None
+    
+    # Check which waypoint is on the door tile
+    wp1_on_door = (x1 == door_x and y1 == door_y)
+    wp2_on_door = (x2 == door_x and y2 == door_y)
+    
+    if not wp1_on_door and not wp2_on_door:
+        return None  # Neither waypoint is on the door tile
+    
+    # Calculate movement direction
+    dx = x2 - x1
+    dy = y2 - y1
+    
+    # Determine which side(s) of the door tile is being crossed
+    # The side being crossed depends on whether we're entering or leaving the door tile
+    sides = []
+    
+    if wp1_on_door and not wp2_on_door:
+        # Leaving the door tile - the side we're crossing is the direction we're moving
+        if dx < 0:  # Moving West from door tile
+            sides.append("west")
+        elif dx > 0:  # Moving East from door tile
+            sides.append("east")
+        
+        if dy < 0:  # Moving South from door tile
+            sides.append("south")
+        elif dy > 0:  # Moving North from door tile
+            sides.append("north")
+    
+    elif wp2_on_door and not wp1_on_door:
+        # Entering the door tile - the side we're crossing is opposite to the direction we're moving
+        if dx < 0:  # Moving West to door tile
+            sides.append("east")  # Crossing the East side of the door tile
+        elif dx > 0:  # Moving East to door tile
+            sides.append("west")  # Crossing the West side of the door tile
+        
+        if dy < 0:  # Moving South to door tile
+            sides.append("north")  # Crossing the North side of the door tile
+        elif dy > 0:  # Moving North to door tile
+            sides.append("south")  # Crossing the South side of the door tile
+    
+    elif wp1_on_door and wp2_on_door:
+        # Both waypoints are on the door tile - this shouldn't happen in normal pathfinding
+        # but if it does, we can't determine which side is being crossed
+        return None
+    
+    # Return the sides being crossed (could be 1 for cardinal, 2 for diagonal)
+    return sides if sides else None
+
+def _door_has_wall_on_side(orient_a: int, orient_b: int, sides) -> bool:
+    """Check if the door has a wall on any of the specified sides."""
+    side_flags = {
+        "north": 2,
+        "east": 4,
+        "south": 8,
+        "west": 1
+    }
+    
+    # Handle both single side and list of sides
+    if isinstance(sides, str):
+        sides = [sides]
+    
+    for side in sides:
+        if side not in side_flags:
+            continue
+        
+        flag = side_flags[side]
+        if (orient_a & flag) != 0 or (orient_b & flag) != 0:
+            return True  # Door has a wall on at least one of the sides being crossed
+    
+    return False  # Door has no walls on any of the sides being crossed
+
+
+def _handle_door_opening(door_plan: dict, full_path_waypoints: list = None) -> bool:
     """
     Handle door opening logic with retry mechanism and recently traversed door tracking.
     
     Args:
         door_plan: Door plan containing door information
+        full_path_waypoints: Full path waypoints to check if door is actually blocking
         
     Returns:
         True if door was opened successfully or skipped, False if door opening failed
@@ -260,14 +365,10 @@ def _handle_door_opening(door_plan: dict) -> bool:
         return True  # Invalid door coordinates
     
     # Check if the door is actually blocking the path before trying to open it
-    # Get the current path to check if door is blocking
-    player_x, player_y = player.get_x(), player.get_y()
-    if isinstance(player_x, int) and isinstance(player_y, int):
-        wps, dbg_path = ipc.path(goal=(door_x, door_y), visualize=False)
-        if wps and not _is_door_blocking_path(door_plan, wps):
-            _most_recently_traversed_door = door_plan
-            print(f"[DOOR_CHECK] Door at ({door_x}, {door_y}) is not blocking path, skipping door opening")
-            return True  # Door is not blocking, continue with normal movement
+    if full_path_waypoints and not _is_door_blocking_path(door_plan, full_path_waypoints):
+        _most_recently_traversed_door = door_plan
+        print(f"[DOOR_CHECK] Door at ({door_x}, {door_y}) is not blocking path, skipping door opening")
+        return True  # Door is not blocking, continue with normal movement
     
     # Door is closed, try to open it with retry logic
     door_opened = not door_plan["door"].get("closed")
@@ -276,7 +377,7 @@ def _handle_door_opening(door_plan: dict) -> bool:
 
     while not door_opened and door_retry_count < max_door_retries:
         # Get fresh door data for each retry attempt
-        wps, dbg_path = ipc.path(goal=(door_x, door_y))
+        wps, dbg_path = ipc.path(goal=(door_x, door_y), visualize=False)
         fresh_door_plan = _first_blocking_door_from_waypoints(wps)
         
         if not fresh_door_plan:
@@ -375,145 +476,238 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False) -> dict | None:
         rect_or_key: Region key or (minX, maxX, minY, maxY) tuple
         center: If True, go to center of region instead of stopping at boundary
     """
-    import time
-    start_time = time.time()
-    print(f"[GO_TO_TIMING] Starting go_to for {rect_or_key}")
+    # Timing instrumentation helpers
+    def _mark(label):
+        return time.perf_counter_ns()
     
-    # accept key or explicit (minX, maxX, minY, maxY)
-    step_start = time.time()
-    if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
-        rect = tuple(rect_or_key)
-        rect_key = "custom"
-    else:
-        rect_key = str(rect_or_key)
-        rect = get_nav_rect(rect_key)
-        if not (isinstance(rect, (tuple, list)) and len(rect) == 4):
-            return None
-    print(f"[GO_TO_TIMING] Rect setup took {time.time() - step_start:.3f}s")
+    def _emit(obj):
+        if _GO_TO_TIMING_ENABLED:
+            json_str = json.dumps(obj, separators=(',',':'))
+            print(f"GO_TO_TIMING_JSON:{json_str}")
+            # Also write to file
+            try:
+                with open("travel.go_to.timing.jsonl", "a") as f:
+                    f.write(f"GO_TO_TIMING_JSON:{json_str}\n")
+            except Exception:
+                pass  # Don't fail if we can't write to file
+    
+    # Initialize timing data
+    t0_start = _mark("start")
+    timing_data = {
+        "phase": "go_to_timing",
+        "branch": None,
+        "ok": True,
+        "error": None,
+        "dur_ms": {},
+        "context": {
+            "waypoints_remaining": 0,
+            "target_waypoint": None,
+            "wps_count": None,
+            "door_attempted": False,
+            "door_success": None
+        },
+        "ts": datetime.now().isoformat() + "Z"
+    }
+    
+    try:
+        start_time = time.time()
+        print(f"[GO_TO_TIMING] Starting go_to for {rect_or_key}")
         
-    # Get player position
-    step_start = time.time()
-    player_x, player_y = player.get_x(), player.get_y()
-    print(f"[GO_TO_TIMING] Player position lookup took {time.time() - step_start:.3f}s")
-    
-    if not isinstance(player_x, int) or not isinstance(player_y, int):
-        print(f"[GO_TO] Could not get player position")
-        return None
-    
-    # Check how many waypoints are left in the long-distance path
-    step_start = time.time()
-    waypoint_batch = _get_next_long_distance_waypoints(rect_key)
-    waypoints_remaining = len(_long_distance_path_cache) - _long_distance_waypoint_index if _long_distance_path_cache else 0
-    print(f"[GO_TO_TIMING] Long distance waypoint check took {time.time() - step_start:.3f}s")
-    
-    if waypoints_remaining > 0:
-        print(f"[GO_TO_TIMING] Using LONG DISTANCE path (waypoints remaining: {waypoints_remaining})")
-        # LONG DISTANCE: Get cached path and click ~25 tiles away
-        if not waypoint_batch:
-            # Fallback to short-distance pathfinding by treating as short distance
-            distance = 25  # Force short-distance pathfinding
-            print(f"[GO_TO_TIMING] No waypoint batch, falling back to short distance")
+        # accept key or explicit (minX, maxX, minY, maxY)
+        t1_rect_lookup = _mark("rect_lookup")
+        if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
+            rect = tuple(rect_or_key)
+            rect_key = "custom"
         else:
-            # Use the single waypoint from the path
-            target_waypoint = waypoint_batch[0]
-            print(f"[GO_TO_TIMING] Using target waypoint: {target_waypoint}")
-            
-            # Project waypoint to screen coordinates
-            step_start = time.time()
-            waypoint_wps, _ = ipc.path(rect=(target_waypoint[0]-1, target_waypoint[0]+1, target_waypoint[1]-1, target_waypoint[1]+1))
-            print(f"[GO_TO_TIMING] Waypoint path generation took {time.time() - step_start:.3f}s")
-            
-            if waypoint_wps:
-                step_start = time.time()
-                waypoint_proj, _ = ipc.project_many(waypoint_wps)
-                waypoint_proj = _merge_door_into_projection(waypoint_wps, waypoint_proj)
-                waypoint_usable = [p for p in waypoint_proj if isinstance(p, dict) and p.get("canvas")]
-                print(f"[GO_TO_TIMING] Waypoint projection and filtering took {time.time() - step_start:.3f}s")
+            rect_key = str(rect_or_key)
+            rect = get_nav_rect(rect_key)
+            if not (isinstance(rect, (tuple, list)) and len(rect) == 4):
+                timing_data["ok"] = False
+                timing_data["error"] = "Invalid rect"
+                _emit(timing_data)
+                return None
+        timing_data["dur_ms"]["rect_lookup"] = (t1_rect_lookup - t0_start) / 1_000_000
+        print(f"[GO_TO_TIMING] Rect setup took {timing_data['dur_ms']['rect_lookup']:.3f}s")
+        
+        # Get player position
+        t2_player_pos = _mark("player_pos")
+        player_x, player_y = player.get_x(), player.get_y()
+        timing_data["dur_ms"]["player_pos"] = (t2_player_pos - t1_rect_lookup) / 1_000_000
+        print(f"[GO_TO_TIMING] Player position lookup took {timing_data['dur_ms']['player_pos']:.3f}s")
+    
+        if not isinstance(player_x, int) or not isinstance(player_y, int):
+            print(f"[GO_TO] Could not get player position")
+            timing_data["ok"] = False
+            timing_data["error"] = "Could not get player position"
+            _emit(timing_data)
+            return None
+        
+        # Check how many waypoints are left in the long-distance path
+        t3_ldp_select = _mark("ldp_select")
+        waypoint_batch = _get_next_long_distance_waypoints(rect_key)
+        waypoints_remaining = len(_long_distance_path_cache) - _long_distance_waypoint_index if _long_distance_path_cache else 0
+        timing_data["dur_ms"]["ldp_select"] = (t3_ldp_select - t2_player_pos) / 1_000_000
+        timing_data["context"]["waypoints_remaining"] = waypoints_remaining
+        print(f"[GO_TO_TIMING] Long distance waypoint check took {timing_data['dur_ms']['ldp_select']:.3f}s")
+    
+        if waypoints_remaining > 0:
+            timing_data["branch"] = "LONG_DISTANCE"
+            print(f"[GO_TO_TIMING] Using LONG DISTANCE path (waypoints remaining: {waypoints_remaining})")
+            # LONG DISTANCE: Get cached path and click ~25 tiles away
+            if not waypoint_batch:
+                # Fallback to short-distance pathfinding by treating as short distance
+                distance = 25  # Force short-distance pathfinding
+                print(f"[GO_TO_TIMING] No waypoint batch, falling back to short distance")
+            else:
+                # Use the single waypoint from the path
+                target_waypoint = waypoint_batch[0]
+                timing_data["context"]["target_waypoint"] = {"x": target_waypoint[0], "y": target_waypoint[1]}
+                print(f"[GO_TO_TIMING] Using target waypoint: {target_waypoint}")
                 
-                if waypoint_usable:
-                    chosen = waypoint_usable[-1]
-                    world_coords = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
-                    
-                    # Check for doors on the long-distance path and handle them
-                    gx = chosen["world"].get("x")
-                    gy = chosen["world"].get("y")
-                    
-                    if isinstance(gx, int) and isinstance(gy, int):
-                        step_start = time.time()
-                        wps, dbg_path = ipc.path(goal=(gx, gy), visualize=False)
-                        door_plan = _first_blocking_door_from_waypoints(wps)
-                        print(f"[GO_TO_TIMING] Door check path generation took {time.time() - step_start:.3f}s")
+                # Project waypoint to screen coordinates
+                t4_ldp_wp_path_gen = _mark("ldp_wp_path_gen")
+                waypoint_wps, _ = ipc.path(rect=(target_waypoint[0]-1, target_waypoint[0]+1, target_waypoint[1]-1, target_waypoint[1]+1))
+                timing_data["dur_ms"]["ldp_wp_path_gen"] = (t4_ldp_wp_path_gen - t3_ldp_select) / 1_000_000
+                timing_data["context"]["wps_count"] = len(waypoint_wps) if waypoint_wps else 0
+                print(f"[GO_TO_TIMING] Waypoint path generation took {timing_data['dur_ms']['ldp_wp_path_gen']:.3f}s")
+            
+                if waypoint_wps:
+                    t5_ldp_wp_project_merge = _mark("ldp_wp_project_merge")
+                    waypoint_proj, _ = ipc.project_many(waypoint_wps)
+                    waypoint_proj = _merge_door_into_projection(waypoint_wps, waypoint_proj)
+                    waypoint_usable = [p for p in waypoint_proj if isinstance(p, dict) and p.get("canvas")]
+                    timing_data["dur_ms"]["ldp_wp_project_merge"] = (t5_ldp_wp_project_merge - t4_ldp_wp_path_gen) / 1_000_000
+                    print(f"[GO_TO_TIMING] Waypoint projection and filtering took {timing_data['dur_ms']['ldp_wp_project_merge']:.3f}s")
+                
+                    if waypoint_usable:
+                        chosen = waypoint_usable[-1]
+                        world_coords = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
                         
-                        if door_plan:
-                            step_start = time.time()
-                            door_result = _handle_door_opening(door_plan)
-                            print(f"[GO_TO_TIMING] Door opening took {time.time() - step_start:.3f}s")
-                            if not door_result:
-                                return None  # Door opening failed
+                        # Check for doors on the long-distance path and handle them
+                        gx = chosen["world"].get("x")
+                        gy = chosen["world"].get("y")
+                        
+                        if isinstance(gx, int) and isinstance(gy, int):
+                            t6_ldp_door_path_gen = _mark("ldp_door_path_gen")
+                            wps, dbg_path = ipc.path(goal=(gx, gy), visualize=False)
+                            door_plan = _first_blocking_door_from_waypoints(wps)
+                            timing_data["dur_ms"]["ldp_door_path_gen"] = (t6_ldp_door_path_gen - t5_ldp_wp_project_merge) / 1_000_000
+                            print(f"[GO_TO_TIMING] Door check path generation took {timing_data['dur_ms']['ldp_door_path_gen']:.3f}s")
+                            
+                            if door_plan:
+                                timing_data["context"]["door_attempted"] = True
+                                t7_ldp_door_open = _mark("ldp_door_open")
+                                try:
+                                    door_result = _handle_door_opening(door_plan, wps)
+                                    timing_data["context"]["door_success"] = door_result
+                                finally:
+                                    t8_ldp_door_open_end = _mark("ldp_door_open_end")
+                                    timing_data["dur_ms"]["ldp_door_open"] = (t8_ldp_door_open_end - t7_ldp_door_open) / 1_000_000
+                                print(f"[GO_TO_TIMING] Door opening took {timing_data['dur_ms']['ldp_door_open']:.3f}s")
+                                if not door_result:
+                                    timing_data["ok"] = False
+                                    timing_data["error"] = "Door opening failed"
+                                    _emit(timing_data)
+                                    return None  # Door opening failed
+                    else:
+                        world_coords = {"x": target_waypoint[0], "y": target_waypoint[1], "p": 0}
                 else:
                     world_coords = {"x": target_waypoint[0], "y": target_waypoint[1], "p": 0}
-            else:
-                world_coords = {"x": target_waypoint[0], "y": target_waypoint[1], "p": 0}
     
-    else:
-        print(f"[GO_TO_TIMING] Using SHORT DISTANCE path")
-        # SHORT DISTANCE: Use standard local pathing
-        step_start = time.time()
-        wps, dbg_path = ipc.path(rect=tuple(rect))
-        print(f"[GO_TO_TIMING] Short distance path generation took {time.time() - step_start:.3f}s")
-        
-        if not wps:
-            return None
-        
-        step_start = time.time()
-        proj, dbg_proj = ipc.project_many(wps)
-        proj = _merge_door_into_projection(wps, proj)
-        print(f"[GO_TO_TIMING] Short distance projection and door merge took {time.time() - step_start:.3f}s")
-        
-        usable = [p for p in proj if isinstance(p, dict) and p.get("canvas")]
-        if not usable:
-            return None
-        
-        # Check for doors on the path and handle them
-        if usable:
-            last_waypoint = usable[-1]
-            gx = last_waypoint["world"].get("x")
-            gy = last_waypoint["world"].get("y")
-            
-            if isinstance(gx, int) and isinstance(gy, int):
-                step_start = time.time()
-                wps, dbg_path = ipc.path(goal=(gx, gy), visualize=False)
-                door_plan = _first_blocking_door_from_waypoints(wps)
-                print(f"[GO_TO_TIMING] Short distance door check path generation took {time.time() - step_start:.3f}s")
-                
-                if door_plan:
-                    step_start = time.time()
-                    door_result = _handle_door_opening(door_plan)
-                    print(f"[GO_TO_TIMING] Short distance door opening took {time.time() - step_start:.3f}s")
-                    if not door_result:
-                        return None  # Door opening failed
-        
-        # Pick from the last 3 waypoints (or all if less than 3)
-        if len(usable) <= 3:
-            chosen = random.choice(usable)
         else:
-            chosen = random.choice(usable[-3:])
+            timing_data["branch"] = "SHORT_DISTANCE"
+            print(f"[GO_TO_TIMING] Using SHORT DISTANCE path")
+            # SHORT DISTANCE: Use standard local pathing
+            t4_short_path_gen = _mark("short_path_gen")
+            wps, dbg_path = ipc.path(rect=tuple(rect))
+            timing_data["dur_ms"]["short_path_gen"] = (t4_short_path_gen - t3_ldp_select) / 1_000_000
+            timing_data["context"]["wps_count"] = len(wps) if wps else 0
+            print(f"[GO_TO_TIMING] Short distance path generation took {timing_data['dur_ms']['short_path_gen']:.3f}s")
         
-        world_coords = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
+            if not wps:
+                timing_data["ok"] = False
+                timing_data["error"] = "No waypoints generated"
+                _emit(timing_data)
+                return None
+            
+            t5_short_project_merge = _mark("short_project_merge")
+            proj, dbg_proj = ipc.project_many(wps)
+            proj = _merge_door_into_projection(wps, proj)
+            timing_data["dur_ms"]["short_project_merge"] = (t5_short_project_merge - t4_short_path_gen) / 1_000_000
+            print(f"[GO_TO_TIMING] Short distance projection and door merge took {timing_data['dur_ms']['short_project_merge']:.3f}s")
+        
+            usable = [p for p in proj if isinstance(p, dict) and p.get("canvas")]
+            if not usable:
+                timing_data["ok"] = False
+                timing_data["error"] = "No usable projections"
+                _emit(timing_data)
+                return None
+            
+            # Check for doors on the path and handle them
+            if usable:
+                last_waypoint = usable[-1]
+                gx = last_waypoint["world"].get("x")
+                gy = last_waypoint["world"].get("y")
+                
+                if isinstance(gx, int) and isinstance(gy, int):
+                    t6_short_door_path_gen = _mark("short_door_path_gen")
+                    wps, dbg_path = ipc.path(goal=(gx, gy), visualize=False)
+                    door_plan = _first_blocking_door_from_waypoints(wps)
+                    timing_data["dur_ms"]["short_door_path_gen"] = (t6_short_door_path_gen - t5_short_project_merge) / 1_000_000
+                    print(f"[GO_TO_TIMING] Short distance door check path generation took {timing_data['dur_ms']['short_door_path_gen']:.3f}s")
+                    
+                    if door_plan:
+                        timing_data["context"]["door_attempted"] = True
+                        t7_short_door_open = _mark("short_door_open")
+                        try:
+                            door_result = _handle_door_opening(door_plan, wps)
+                            timing_data["context"]["door_success"] = door_result
+                        finally:
+                            t8_short_door_open_end = _mark("short_door_open_end")
+                            timing_data["dur_ms"]["short_door_open"] = (t8_short_door_open_end - t7_short_door_open) / 1_000_000
+                        print(f"[GO_TO_TIMING] Short distance door opening took {timing_data['dur_ms']['short_door_open']:.3f}s")
+                        if not door_result:
+                            timing_data["ok"] = False
+                            timing_data["error"] = "Door opening failed"
+                            _emit(timing_data)
+                            return None  # Door opening failed
+        
+            # Pick from the last 3 waypoints (or all if less than 3)
+            if len(usable) <= 3:
+                chosen = random.choice(usable)
+            else:
+                chosen = random.choice(usable[-3:])
+            
+            world_coords = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
+        
+        from ..services.click_with_camera import click_ground_with_camera
+        
+        t9_click_ground = _mark("click_ground")
+        result = click_ground_with_camera(
+            world_coords=world_coords,
+            description=f"Move toward {rect_key}",
+            aim_ms=700,
+            waypoint_path=wps
+        )
+        t10_click_ground_end = _mark("click_ground_end")
+        timing_data["dur_ms"]["click_ground"] = (t10_click_ground_end - t9_click_ground) / 1_000_000
+        print(f"[GO_TO_TIMING] click_ground_with_camera took {timing_data['dur_ms']['click_ground']:.3f}s")
+        
+        # Calculate total time
+        t11_total_end = _mark("total_end")
+        timing_data["dur_ms"]["total"] = (t11_total_end - t0_start) / 1_000_000
+        print(f"[GO_TO_TIMING] Total go_to execution took {timing_data['dur_ms']['total']:.3f}s")
+        
+        _emit(timing_data)
+        return result
     
-    from ..services.click_with_camera import click_ground_with_camera
-    
-    step_start = time.time()
-    result = click_ground_with_camera(
-        world_coords=world_coords,
-        description=f"Move toward {rect_key}",
-        aim_ms=700,
-        waypoint_path=wps
-    )
-    print(f"[GO_TO_TIMING] click_ground_with_camera took {time.time() - step_start:.3f}s")
-    print(f"[GO_TO_TIMING] Total go_to execution took {time.time() - start_time:.3f}s")
-    
-    return result
+    except Exception as e:
+        timing_data["ok"] = False
+        timing_data["error"] = str(e)
+        t_error_end = _mark("error_end")
+        timing_data["dur_ms"]["total"] = (t_error_end - t0_start) / 1_000_000
+        _emit(timing_data)
+        raise
 
 
 def _calculate_distance(x1: int, y1: int, x2: int, y2: int) -> float:
