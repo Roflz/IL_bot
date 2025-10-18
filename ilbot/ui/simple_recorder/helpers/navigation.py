@@ -121,27 +121,3 @@ def _merge_door_into_projection(wps: list[dict], proj: list[dict]) -> list[dict]
                 row["door"] = d
         out.append(row)
     return out
-
-def _first_blocking_door_from_waypoints(wps: list) -> Optional[dict]:
-    """
-    Given IPC 'waypoints' (each possibly containing a 'door' dict),
-    return the earliest waypoint that has a blocking (closed/unknown) door.
-    """
-    if not isinstance(wps, list):
-        return None
-
-    for wp in wps:
-        if not isinstance(wp, dict):
-            continue
-        d = wp.get("door")
-        if not isinstance(d, dict):
-            continue
-        present = bool(d.get("present"))
-        if not present:
-            continue
-        # treat 'closed: True' as blocking; if 'closed' missing, err on the side of blocking
-        closed = d.get("closed")
-        blocking = (closed is True) or ("closed" not in d)
-        if blocking:
-            return wp
-    return None

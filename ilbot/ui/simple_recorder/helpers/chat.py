@@ -3,6 +3,7 @@
 from __future__ import annotations
 from typing import Optional, List, Dict, Any
 
+from ..actions.widgets import get_widget_children
 from ..helpers.runtime_utils import ipc
 
 # Expected payload structure (only visible widgets exported):
@@ -189,66 +190,36 @@ def has_informational_text() -> bool:
     
     return False
 
-def get_dialogue_text_raw() -> str:
+def get_dialogue_text_raw() -> list[str]:
     """
-    Extract raw dialogue text from any available chat widget.
-    Checks multiple widget types in order of preference.
+    Extract raw dialogue text from chat widget children.
+    Gets all children from widget 10616866 and returns a list of all text content.
     
     Returns:
-        Raw dialogue text or empty string if no dialogue found
+        List of dialogue text strings (empty list if no dialogue found)
     """
-    
-    # List of dialogue widgets to check (in order of preference)
-    dialogue_widgets = [
-        17235969,  # Mesoverlay.TEXT (tutorial dialogue)
-        15007747,  # Messagebox.TEXT (general dialogue)
-        15007748,  # Messagebox.CONTINUE (continue dialogue)
-        12648450,  # Objectbox.TEXT (poll booth dialogue)
-        10616875,  # Chatbox.MES_TEXT2 (another "Click here to continue" widget)
-        720898,    # ObjectboxDouble.TEXT (combat tutorial dialogue)
-    ]
-    
-    # Check each widget for text
-    for widget_id in dialogue_widgets:
-        try:
-            from ..helpers.widgets import get_widget_info
-            widget_info = get_widget_info(widget_id)
-            
-            if widget_info and widget_info.get("data"):
-                widget_data = widget_info.get("data", {})
-                text = widget_data.get("text", "")
-                
-                if text and text.strip():
-                    return text.strip()
-        except Exception as e:
-            print(f"[DIALOGUE] Error checking widget {widget_id}: {e}")
-            continue
-
     try:
-        # Check left dialogue
-        left_dlg = _dlg_left()
-        if left_dlg.get("text", {}).get("exists"):
-            text = left_dlg["text"].get("text", "")
-            if text and text.strip():
-                return text.strip()
+        # Get all children from the main chat widget
+        widgets = get_widget_children(10616866)
         
-        # Check right dialogue
-        right_dlg = _dlg_right()
-        if right_dlg.get("text", {}).get("exists"):
-            text = right_dlg["text"].get("text", "")
-            if text and text.strip():
-                return text.strip()
+        if not widgets or not widgets.get("ok"):
+            return []
         
-        # Check objectbox dialogue
-        obj_dlg = _dlg_objectbox()
-        if obj_dlg.get("universe", {}).get("exists"):
-            text = obj_dlg["universe"].get("text", "")
+        children = widgets.get("children", [])
+        dialogue_texts = []
+        
+        # Loop through all children and extract text
+        for child in children:
+            text = child.get("text", "")
             if text and text.strip():
-                return text.strip()
+                dialogue_texts.append(text.strip())
+        
+        return dialogue_texts
+        
     except Exception as e:
-        print(f"[DIALOGUE] Error checking payload dialogue: {e}")
-    
-        return ""  # Return empty string instead of None for graceful handling
+        print(f"[DIALOGUE] Error getting dialogue text: {e}")
+        return []
+
 
 def get_clean_dialogue_text() -> str:
     """

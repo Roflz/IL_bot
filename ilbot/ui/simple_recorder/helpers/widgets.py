@@ -25,11 +25,11 @@ def rect_center_from_widget(w: dict | None) -> tuple[int | None, int | None]:
 def get_widget_text(widget_id: int) -> str | None:
     """Get text content from a widget by its ID."""
     from .runtime_utils import ipc
-    widget_data = ipc.send({"cmd": "get_widget_info", "widget_id": widget_id}) or {}
+    widget_data = ipc.get_widget_info(widget_id) or {}
     
     # Get widget text from the widget data
     if widget_data and widget_data.get("ok"):
-        data = widget_data.get("data", {})
+        data = widget_data.get("widget", {})
         return data.get("text")
     
     return None
@@ -37,7 +37,7 @@ def get_widget_text(widget_id: int) -> str | None:
 def get_tutorial_set_name() -> dict | None:
     """Get the tutorial SET_NAME widget."""
     from .runtime_utils import ipc
-    tutorial_data = ipc.send({"cmd": "get_tutorial"}) or {}
+    tutorial_data = ipc.get_tutorial() or {}
     
     if tutorial_data and tutorial_data.get("ok"):
         return tutorial_data.get("setName")
@@ -47,7 +47,7 @@ def get_tutorial_set_name() -> dict | None:
 def get_tutorial_lookup_name() -> dict | None:
     """Get the tutorial LOOK_UP_NAME widget."""
     from .runtime_utils import ipc
-    tutorial_data = ipc.send({"cmd": "get_tutorial"}) or {}
+    tutorial_data = ipc.get_tutorial() or {}
     
     if tutorial_data and tutorial_data.get("ok"):
         return tutorial_data.get("lookupName")
@@ -57,7 +57,7 @@ def get_tutorial_lookup_name() -> dict | None:
 def get_character_design_widget(widget_id: int) -> dict | None:
     """Get a character design widget by its ID."""
     from .runtime_utils import ipc
-    widget_data = ipc.send({"cmd": "get_widget_info", "widget_id": widget_id}) or {}
+    widget_data = ipc.get_widget_info(widget_id) or {}
     
     # Get widget data from IPC response
     if widget_data and widget_data.get("ok"):
@@ -72,7 +72,7 @@ def get_character_design_main() -> dict | None:
 def get_character_design_widgets() -> dict:
     """Get all character design widgets from the payload."""
     from .runtime_utils import ipc
-    character_design_data = ipc.send({"cmd": "get_character_design"}) or {}
+    character_design_data = ipc.get_character_design() or {}
     
     widgets = {}
     
@@ -121,16 +121,10 @@ def get_character_design_widget_realtime(widget_name: str) -> dict | None:
     widget_id = PLAYER_DESIGN_WIDGETS[widget_name]
     
     try:
-        from ..services.ipc_client import RuneLiteIPC
-        
-        # Create IPC client
-        ipc = RuneLiteIPC()
+        from .runtime_utils import ipc
         
         # Send widget data request
-        response = ipc._send({
-            "cmd": "get_widget",
-            "widget_id": int(widget_id)
-        })
+        response = ipc.get_widget_info(int(widget_id))
         
         if response.get("ok"):
             return response.get("widget")
@@ -189,18 +183,12 @@ def get_button_name_by_id(widget_id: int) -> str:
 def get_all_character_design_buttons() -> dict:
     """Get all character design LEFT/RIGHT buttons via real-time IPC calls."""
     try:
-        from ..services.ipc_client import RuneLiteIPC
-        
-        # Create IPC client
-        ipc = RuneLiteIPC()
+        from .runtime_utils import ipc
         
         print(f"[DEBUG] Getting character design widgets from parent 44498948...")
         
         # Get all child widgets of the main PlayerDesign widget
-        response = ipc._send({
-            "cmd": "get_widget_children",
-            "widget_id": 44498948  # PlayerDesign.MAIN
-        })
+        response = ipc.get_widget_children(44498948)  # PlayerDesign.MAIN
         
         print(f"[DEBUG] IPC response: {response}")
         

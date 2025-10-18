@@ -29,6 +29,7 @@ from ..actions.ground_items import loot
 from ..actions.player import get_skill_level
 from ..actions.timing import wait_until
 from ..helpers.bank import near_any_bank
+from ..helpers.inventory import inv_slots
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -45,7 +46,7 @@ class FaladorCowsPlan(Plan):
     label = "Falador Cows - Kill cows and collect hides"
     
     def __init__(self):
-        self.state = {"phase": "PREPARE_AT_BANK"}
+        self.state = {"phase": "GO_TO_CLOSEST_BANK"}
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
         
@@ -665,11 +666,14 @@ class FaladorCowsPlan(Plan):
                 # Deposit wrong food if we have too much or wrong type
                 if inventory.has_unnoted_item(self.food_item, 6):  # More than we need
                     items_to_deposit.append(self.food_item)
+
+                if inventory.has_noted_item(self.food_item):
+                    items_to_deposit.append(self.food_item)
                 
                 # Deposit any other items that aren't our target equipment
-                from ..helpers.inventory import inv_slots
-                inventory_slots = inv_slots()
-                for slot in inventory_slots:
+                # if inventory.count_unnoted_item('trout') < 6:
+                #     bank.withdraw_item('trout', withdraw_x=6)
+                for slot in inv_slots():
                     item_name = slot.get("itemName", "").strip()
                     if not item_name or item_name in items_to_deposit:
                         continue

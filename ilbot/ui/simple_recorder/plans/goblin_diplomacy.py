@@ -2,7 +2,8 @@
 import time
 import logging
 
-from ..actions import objects, player, tab
+from ..actions import objects, player, tab, inventory
+from ..actions.bank import close_bank
 from ..actions.player import get_player_plane
 from ..actions.timing import wait_until
 from ..constants import BANK_REGIONS, REGIONS
@@ -24,7 +25,7 @@ class GoblinDiplomacyPlan(Plan):
     label = "Quest: Goblin Diplomacy"
 
     def __init__(self):
-        self.state = {"phase": "START_QUEST"}  # gate: ensure items first
+        self.state = {"phase": "GO_TO_CLOSEST_BANK"}  # gate: ensure items first
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
         
@@ -65,59 +66,38 @@ class GoblinDiplomacyPlan(Plan):
                 elif bank.is_open():
                     
                     # Now check what we have in the bank and what we need
-                    required_items = ["Blue dye", "Orange dye", "Goblin mail"]
-                    needed_items = []
+                    required_items = {"Blue dye": 1, "Orange dye": 1, "Goblin mail": 3}
+                    needed_items = {}
                     
-                    missing_items = []
-                    for item in required_items:
+                    missing_items = {}
+                    for item, qty in required_items.items():
                         # Check if bank has the item
-                        if bank.has_item(item):
-                            needed_items.append(item)
+                        if inventory.count_unnoted_item(item) >= qty:
+                            continue
+                        elif bank.get_item_count(item) >= qty:
+                            needed_items[item] = qty
                         else:
                             # Item not in bank, need to buy from GE
-                            missing_items.append(item)
+                            missing_items[item] = qty
                             logging.info(f"[GD] Item {item} not found in bank, need to buy from GE")
                     
                     if missing_items:
                         # Some items are missing, need to buy from GE
-                        bank.close_bank()
-                        if not wait_until(bank.is_closed, min_wait_ms=600, max_wait_ms=3000):
-                            return
                         self.set_phase("BUY_QUEST_ITEMS_FROM_GE", ui)
                         return
                     elif needed_items:
                         # Ensure bank note mode is disabled (withdraw as items, not notes)
                         bank.ensure_note_mode_disabled()
-                        
-                        # Withdraw needed items (as unnoted items)
-                        for item in needed_items:
-                            if item == "Goblin mail":
-                                # Need 3 goblin mail
-                                bank.withdraw_item(item, withdraw_x=3)
-                            else:
-                                bank.withdraw_item(item)
-
-                        # Verify we have all items in inventory before proceeding
-                        time.sleep(0.5)  # Brief wait for items to appear in inventory
+                        bank.withdraw_items(needed_items)
                         
                         # Check if we have all required items in inventory (unnoted)
-                        has_all_required = True
-                        for item in required_items:
-                            if item == "Goblin mail":
-                                # Need 3 goblin mail
-                                if not inv.inv_has(item, min_qty=3):
-                                    has_all_required = False
-                                    break
-                            else:
-                                if not inv.has_unnoted_item(item):
-                                    has_all_required = False
-                                    break
+                        if inv.has_items(needed_items):
+                            has_all_required = True
+                        else:
+                            has_all_required = False
                         
                         if has_all_required:
-                            bank.close_bank()
-                            if wait_until(lambda: bank.is_closed(), min_wait_ms=600, max_wait_ms=3000):
-                                self.set_phase("MAKE_ARMOURS", ui)
-                                return
+                            self.set_phase("MAKE_ARMOURS", ui)
                             return
                         else:
                             # Items not properly withdrawn, try again next tick
@@ -191,18 +171,18 @@ class GoblinDiplomacyPlan(Plan):
                     # Check Blue dye (need 1 unnoted)
                     blue_dye_count = bank.get_item_count("Blue dye")
                     if blue_dye_count == 0:
-                        items_to_buy["Blue dye"] = (1, 5)
+                        items_to_buy["Blue dye"] = (1, 5, 1000)
                     
                     # Check Orange dye (need 1 unnoted)
                     orange_dye_count = bank.get_item_count("Orange dye")
                     if orange_dye_count == 0:
-                        items_to_buy["Orange dye"] = (1, 5)
+                        items_to_buy["Orange dye"] = (1, 5, 1000)
                     
                     # Check Goblin mail (need 3 total)
                     current_goblin_mail = bank.get_item_count("Goblin mail")
                     needed_goblin_mail = max(0, 3 - current_goblin_mail)
                     if needed_goblin_mail > 0:
-                        items_to_buy["Goblin mail"] = (needed_goblin_mail, 20)
+                        items_to_buy["Goblin mail"] = (needed_goblin_mail, 20, 1000)
                     
                     # Save items_to_buy to state for future loops
                     self.state["items_to_buy"] = items_to_buy
@@ -239,6 +219,9 @@ class GoblinDiplomacyPlan(Plan):
                 return
 
             case "MAKE_ARMOURS":
+                if bank.is_open():
+                    close_bank()
+                    return
                 if not tab.is_tab_open("INVENTORY"):
                     tab.open_tab("INVENTORY")
                     return

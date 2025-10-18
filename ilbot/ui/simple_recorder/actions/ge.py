@@ -769,7 +769,7 @@ def buy_item_from_ge(item, retry_items: dict = None) -> bool | None:
     
     # Normalize input to dict
     if isinstance(item, str):
-        items_to_buy = {item: (1, 5, 100)}  # (quantity, price_bumps, set_price)
+        items_to_buy = {item: (1, 5, 0)}  # (quantity, price_bumps, set_price)
     else:
         items_to_buy = item
     
@@ -878,7 +878,7 @@ def buy_item_from_ge(item, retry_items: dict = None) -> bool | None:
                             plus = child
 
                         if not plus:
-                            break
+                            continue
                         cx, cy = rect_center_from_widget(plus)
                         dispatch({
                             "id": "ge-plus5",
@@ -887,7 +887,7 @@ def buy_item_from_ge(item, retry_items: dict = None) -> bool | None:
                             "target": {"name": "+5%", "bounds": plus.get("bounds")},
                             "click": {"type": "point", "x": cx, "y": cy},
                         })
-                        time.sleep(0.25)
+                        break
 
             # Confirm buy
             confirm_buy()

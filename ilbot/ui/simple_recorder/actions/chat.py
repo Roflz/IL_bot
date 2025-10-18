@@ -143,8 +143,11 @@ def continue_dialogue() -> Optional[dict]:
     """
     if find_chat_continue_widget():
         press_spacebar()
-        if wait_until(lambda: not can_continue(), max_wait_ms=2000):
-             return True
+        return True
+
+    elif can_continue():
+        press_spacebar()
+        return True
     
     # Fallback to clicking the "Click here to continue" widget
     result = click_chat_continue()
@@ -252,129 +255,42 @@ def choose_option(choice: Union[int, str]) -> Optional[dict]:
     return dispatch(step)
 
 
-def type_tutorial_name(name: str) -> bool:
-    """Type a character name in the tutorial name input field."""
-    from ..helpers.widgets import get_widget_text, rect_center_from_widget
-
-    # Get the name input widget from tutorial data
-    from ..helpers.runtime_utils import ipc
-    tutorial_data = ipc.get_tutorial() or {}
-    if not tutorial_data.get("open", False):
-        print("[TUTORIAL] Tutorial interface not open")
-        return False
-    
-    name_input = tutorial_data.get("nameInput")
-    if not name_input or not name_input.get("visible", False):
-        print("[TUTORIAL] Name input widget not found or not visible")
-        return False
-    
-    # Get click coordinates
-    x, y = rect_center_from_widget(name_input)
-    if x is None or y is None:
-        print("[TUTORIAL] Could not get name input coordinates")
-        return False
-    
-    # Click on the name input field
-    step = {
-        "action": "click-name-input",
-        "click": {"type": "point", "x": x, "y": y},
-        "target": {"domain": "tutorial", "name": "name_input"}
-    }
-    
-    dispatch(step)
-    
-    # Wait a moment for the field to be focused
-    import time
-    time.sleep(0.5)
-    
-    # Type the character name
-    step = {
-        "action": "type-character-name",
-        "click": {"type": "type", "text": name, "per_char_ms": 50},
-        "target": {"domain": "tutorial", "name": "name_input"}
-    }
-    
-    dispatch(step)
-    
-    # Wait a moment then press enter
-    time.sleep(1.0)
-    
-    # Press enter to confirm
-    step = {
-        "action": "press-enter",
-        "click": {"type": "key", "key": "ENTER"},
-        "target": {"domain": "tutorial", "name": "confirm_name"}
-    }
-    
-    dispatch(step)
-    
-    print(f"[TUTORIAL] Successfully entered character name: {name}")
-    return True
-
-
-def click_tutorial_set_name() -> bool:
-    """Click the tutorial SET_NAME button to confirm the character name."""
-    from ..helpers.widgets import get_tutorial_set_name, rect_center_from_widget
-
-    # Get the set name widget
-    set_name_widget = get_tutorial_set_name()
-    if not set_name_widget:
-        print("[TUTORIAL] SET_NAME widget not found or not visible")
-        return False
-    
-    # Get click coordinates
-    x, y = rect_center_from_widget(set_name_widget)
-    if x is None or y is None:
-        print("[TUTORIAL] Could not get SET_NAME coordinates")
-        return False
-    
-    # Click on the SET_NAME button
-    step = {
-        "action": "click-set-name",
-        "click": {"type": "point", "x": x, "y": y},
-        "target": {"domain": "tutorial", "name": "set_name"}
-    }
-    
-    result = dispatch(step)
-    if result is None:
-        print("[TUTORIAL] Failed to click SET_NAME button")
-        return False
-    
-    print("[TUTORIAL] Successfully clicked SET_NAME button")
-    return True
-
-
-def click_tutorial_lookup_name() -> bool:
-    """Click the tutorial LOOK_UP_NAME button to check name availability."""
-    from ..helpers.widgets import get_tutorial_lookup_name, rect_center_from_widget
-
-    # Get the lookup name widget
-    lookup_widget = get_tutorial_lookup_name()
-    if not lookup_widget:
-        print("[TUTORIAL] LOOK_UP_NAME widget not found or not visible")
-        return False
-    
-    # Get click coordinates
-    x, y = rect_center_from_widget(lookup_widget)
-    if x is None or y is None:
-        print("[TUTORIAL] Could not get LOOK_UP_NAME coordinates")
-        return False
-    
-    # Click on the LOOK_UP_NAME button
-    step = {
-        "action": "click-lookup-name",
-        "click": {"type": "point", "x": x, "y": y},
-        "target": {"domain": "tutorial", "name": "lookup_name"}
-    }
-    
-    result = dispatch(step)
-    if result is None:
-        print("[TUTORIAL] Failed to click LOOK_UP_NAME button")
-        return False
-    
-    print("[TUTORIAL] Successfully clicked LOOK_UP_NAME button")
-    return True
 
 def get_dialogue_text_raw() -> Optional[str]:
     """Get raw dialogue text from any available chat widget."""
     return _get_dialogue_text_raw()
+
+def dialogue_contains_text(phrase: str, case_sensitive: bool = False) -> bool:
+    """
+    Check if any dialogue text contains a specific phrase.
+    
+    Args:
+        phrase: The text phrase to search for
+        case_sensitive: Whether the search should be case sensitive (default: False)
+    
+    Returns:
+        True if the phrase is found in any dialogue text, False otherwise
+    """
+    try:
+        dialogue_texts = _get_dialogue_text_raw()
+        
+        if not dialogue_texts:
+            return False
+        
+        # Prepare search phrase based on case sensitivity
+        if not case_sensitive:
+            phrase = phrase.lower()
+        
+        # Check each dialogue text for the phrase
+        for text in dialogue_texts:
+            # Prepare text based on case sensitivity
+            search_text = text if case_sensitive else text.lower()
+            
+            if phrase in search_text:
+                return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"[DIALOGUE] Error checking dialogue for phrase '{phrase}': {e}")
+        return False

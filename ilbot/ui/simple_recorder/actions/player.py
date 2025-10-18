@@ -305,7 +305,7 @@ def make_fire() -> bool:
         return True  # Fire already exists, no need to make another
     
     # Check if player has required items
-    if not inventory.has_items(["logs", "tinderbox"]):
+    if not inventory.has_items({"logs": 1, "tinderbox": 1}):
         return False
     
     # Check if player is already firemaking

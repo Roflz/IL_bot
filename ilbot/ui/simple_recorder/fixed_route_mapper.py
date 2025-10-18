@@ -8,11 +8,24 @@ import os
 import time
 import json
 import socket
+import argparse
 from pathlib import Path
 
 # Add the current directory to the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+
+def find_ipc_port(start_port: int = 17000, end_port: int = 17020) -> int:
+    """Find the IPC port by testing connectivity."""
+    for port in range(start_port, end_port + 1):
+        try:
+            resp = ipc_send_direct({"cmd": "ping"}, port=port, timeout=0.5)
+            if resp and resp.get("ok"):
+                print(f"[PORT_DETECT] Found IPC plugin on port {port}")
+                return port
+        except Exception:
+            continue
+    return None
 
 def ipc_send_direct(msg: dict, port: int = 17000, timeout: float = 0.35):
     """Send a message directly to the IPC plugin."""
@@ -36,18 +49,18 @@ def ipc_send_direct(msg: dict, port: int = 17000, timeout: float = 0.35):
         return None
 
 
-def get_player_position():
+def get_player_position(port: int = 17000):
     """Get current player position."""
-    resp = ipc_send_direct({"cmd": "get_player"})
+    resp = ipc_send_direct({"cmd": "get_player"}, port=port)
     if resp and resp.get("ok"):
         player = resp.get("player", {})
         return player.get("worldX"), player.get("worldY"), player.get("worldP")
     return None, None, None
 
 
-def scan_current_scene():
+def scan_current_scene(port: int = 17000):
     """Scan the current scene for collision data."""
-    resp = ipc_send_direct({"cmd": "scan_scene"})
+    resp = ipc_send_direct({"cmd": "scan_scene"}, port=port)
     if resp and resp.get("ok"):
         return resp
     return None
@@ -182,12 +195,12 @@ def save_collision_data(data, cache_dir=""):
         print(f"  [SKIPPED] No new tiles to save")
 
     print(f"Current working directory: {os.getcwd()}")
-    os.system("python ilbot/ui/simple_recorder/visual_collision_map.py")
+    os.system("python visual_collision_map.py")
     
     return len(collision_data), new_tiles
 
 
-def fixed_route_mapper():
+def fixed_route_mapper(port: int = None):
     """
     Fixed route mapping - properly handles scene boundaries.
     """
@@ -198,9 +211,23 @@ def fixed_route_mapper():
     print("Press Ctrl+C to stop when you reach your destination.")
     print()
     
+    # Auto-detect port if not provided
+    if port is None:
+        print("Auto-detecting IPC port...")
+        port = find_ipc_port()
+        if port is None:
+            print("ERROR: Could not find IPC plugin on any port (17000-17020). Make sure:")
+            print("  1. RuneLite is running")
+            print("  2. IPC plugin is enabled")
+            print("  3. State Exporter plugin is enabled")
+            print("  4. Try specifying a port manually: python fixed_route_mapper.py --port 17001")
+            return False
+    else:
+        print(f"Using specified port: {port}")
+    
     # Test connection
     print("Testing connection to IPC plugin...")
-    ping_resp = ipc_send_direct({"cmd": "ping"})
+    ping_resp = ipc_send_direct({"cmd": "ping"}, port=port)
     
     if not ping_resp or not ping_resp.get("ok"):
         print("ERROR: Cannot connect to IPC plugin. Make sure:")
@@ -234,10 +261,10 @@ def fixed_route_mapper():
     try:
         while True:
             # Get player position
-            player_x, player_y, player_p = get_player_position()
+            player_x, player_y, player_p = get_player_position(port)
             
             # Scan current scene
-            scene_data = scan_current_scene()
+            scene_data = scan_current_scene(port)
             if scene_data and scene_data.get("ok"):
                 base_x = scene_data.get("baseX")
                 base_y = scene_data.get("baseY")
@@ -299,11 +326,18 @@ def fixed_route_mapper():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Fixed Route Mapper - Collect collision data while walking")
+    parser.add_argument("--port", type=int, help="IPC port number (auto-detected if not specified)")
+    parser.add_argument("--start-port", type=int, default=17000, help="Start port for auto-detection (default: 17000)")
+    parser.add_argument("--end-port", type=int, default=17020, help="End port for auto-detection (default: 17020)")
+    
+    args = parser.parse_args()
+    
     print("FIXED ROUTE MAPPER")
     print("=" * 50)
     
     try:
-        success = fixed_route_mapper()
+        success = fixed_route_mapper(port=args.port)
         if success:
             print("\n[SUCCESS] Route mapping completed successfully!")
         else:

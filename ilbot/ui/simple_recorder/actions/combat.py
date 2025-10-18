@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Optional
 import time
 
+from .travel import _first_blocking_door_from_waypoints
 from ..helpers.runtime_utils import ipc
 
 def attack_closest(npc_name: str | list) -> Optional[dict]:
@@ -107,7 +108,6 @@ def _attack_npc(npc: dict) -> Optional[dict]:
         UI dispatch result if successful, None if failed
     """
     # ipc_path is now available through the global ipc instance
-    from ..helpers.navigation import _first_blocking_door_from_waypoints
     from .travel import _handle_door_opening
     from ..services.click_with_camera import click_npc_with_camera
     
@@ -118,7 +118,7 @@ def _attack_npc(npc: dict) -> Optional[dict]:
         door_plan = _first_blocking_door_from_waypoints(wps)
         if door_plan:
             # Handle door opening with retry logic
-            if not _handle_door_opening(door_plan):
+            if not _handle_door_opening(door_plan, wps):
                 print(f"[COMBAT] Failed to open door on path to NPC")
                 return None
     

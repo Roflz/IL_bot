@@ -3,9 +3,9 @@ import time
 import logging
 from typing import List
 
-from . import ge, widgets
+from . import ge, widgets, inventory
 from .timing import wait_until
-from .travel import in_area
+from .travel import in_area, _first_blocking_door_from_waypoints
 from ..helpers.bank import first_bank_slot, deposit_all_button_bounds
 from ..helpers.inventory import inv_has_any, norm_name
 from ..helpers.runtime_utils import ipc, ui, dispatch
@@ -116,7 +116,7 @@ def open_bank(prefer: str | None = None) -> dict | None:
             if not actions:
                 return None
             for i, action in enumerate(actions):
-                if action and "bank" in action.lower():
+                if action and ("bank" in action.lower() or "use" in action.lower()):
                     return i
             return None
         
@@ -171,13 +171,12 @@ def open_bank(prefer: str | None = None) -> dict | None:
             # Get path and check for doors
             wps, path_resp = ipc.path(goal=(gx, gy))
             if wps:
-                from ..helpers.navigation import _first_blocking_door_from_waypoints
                 from .travel import _handle_door_opening
                 
                 door_plan = _first_blocking_door_from_waypoints(wps)
                 if door_plan:
                     logging.info(f"[OPEN_BANK] Found blocking door, attempting to open")
-                    if not _handle_door_opening(door_plan):
+                    if not _handle_door_opening(door_plan, wps):
                         logging.warning(f"[OPEN_BANK] Failed to open door, trying next attempt")
                         continue
         
@@ -351,59 +350,74 @@ def withdraw_item(
     return dispatch_with_camera(step, aim_ms=420)
 
 
+import time
+
+import time
+
 def withdraw_items(
-    items: list,
-    withdraw_x: int | None = None,
+    items: dict,
     withdraw_all: bool = False,
+    timeout: float = 15.0,
 ) -> dict | None:
     """
-    Withdraw multiple items from the bank.
-    
+    Withdraw multiple items from the bank until the inventory contains the expected quantities
+    or the timeout expires.
+
     Args:
-        items: List of item names to withdraw
-        withdraw_x: Amount to withdraw for each item (if None, uses default behavior)
-        withdraw_all: If True, withdraw all of each item
-        ui: UI instance
-        
+        items (dict): Mapping of item name -> quantity desired.
+        withdraw_all (bool): If True, withdraw all of each item regardless of quantity.
+        timeout (float): Max seconds to wait before giving up (default 15s).
+
     Returns:
-        Result of the last successful withdrawal, or None if all failed
+        Result of the last successful withdrawal, or None if all failed or timed out.
     """
-    if not isinstance(items, list) or not items:
-        print("[BANK] withdraw_items: Invalid items list provided")
+    if not isinstance(items, dict) or not items:
+        print("[BANK] withdraw_items: Invalid items dict provided")
         return None
-    
-    print(f"[BANK] Withdrawing {len(items)} items: {items}")
-    
+
+    print(f"[BANK] Withdrawing {len(items)} items: {list(items.keys())}")
+
     last_result = None
     successful_withdrawals = 0
-    
-    for item in items:
-        if not isinstance(item, str):
-            print(f"[BANK] Skipping invalid item: {item}")
-            continue
-            
-        print(f"[BANK] Withdrawing item: {item}")
-        
-        # Try to withdraw this item
-        result = withdraw_item(
-            name=item,
-            withdraw_x=withdraw_x,
-            withdraw_all=withdraw_all,
-        )
-        
-        if result:
-            last_result = result
-            successful_withdrawals += 1
-            print(f"[BANK] Successfully withdrew: {item}")
-        else:
-            print(f"[BANK] Failed to withdraw: {item}")
-        
-        # Small delay between withdrawals to avoid overwhelming the interface
-        import time
-        time.sleep(0.3)
-    
-    print(f"[BANK] Withdrawal complete: {successful_withdrawals}/{len(items)} items successful")
-    return last_result
+    start_time = time.time()
+
+    while True:
+        all_items_obtained = True
+
+        for item, qty in items.items():
+            if not isinstance(item, str) or not isinstance(qty, int) or qty <= 0:
+                print(f"[BANK] Skipping invalid entry: {item} -> {qty}")
+                continue
+
+            current_qty = inventory.count_unnoted_item(item)
+            if current_qty < qty:
+                all_items_obtained = False
+                print(f"[BANK] Withdrawing item: {item} (need {qty}, have {current_qty})")
+
+                result = withdraw_item(
+                    name=item,
+                    withdraw_x=qty if not withdraw_all else None,
+                    withdraw_all=withdraw_all,
+                )
+
+                if result:
+                    last_result = result
+                    successful_withdrawals += 1
+                    print(f"[BANK] Successfully withdrew: {item}")
+                else:
+                    print(f"[BANK] Failed to withdraw: {item}")
+
+                time.sleep(0.3)
+
+        if all_items_obtained:
+            print(f"[BANK] All requested items obtained.")
+            return last_result
+
+        if time.time() - start_time > timeout:
+            print("[BANK] Timed out waiting for items.")
+            return None
+
+        time.sleep(0.5)
 
 
 def close_bank() -> dict | None:

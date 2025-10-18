@@ -3,6 +3,8 @@ import logging
 import time
 import json
 from datetime import datetime
+
+from ilbot.ui.simple_recorder.actions import player
 from ilbot.ui.simple_recorder.helpers.runtime_utils import ipc, dispatch
 
 # Timing instrumentation
@@ -47,6 +49,18 @@ def aim_midtop_at_world(wx: int, wy: int, *, max_ms: int = 600):
     }
     
     try:
+        # Check if target is at the same tile as player's current position
+        player_x, player_y = player.get_player_position()
+        if player_x == wx and player_y == wy:
+            # Target is at same tile as player, no need to move camera
+            t1_same_tile = _mark_timing("same_tile")
+            timing_data["dur_ms"]["aim_total"] = (t1_same_tile - t0_start) / 1_000_000
+            timing_data["camera"]["yaw"] = None
+            timing_data["camera"]["pitch"] = None
+            timing_data["camera"]["scale"] = None
+            _emit_timing(timing_data)
+            return
+
         # Get window size
         where = ipc.where() or {}
         W, H = int(where.get("w", 0)), int(where.get("h", 0))

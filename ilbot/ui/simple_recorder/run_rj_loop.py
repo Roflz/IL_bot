@@ -21,6 +21,7 @@ from ilbot.ui.simple_recorder.plans.tutorial_island import TutorialIslandPlan
 from ilbot.ui.simple_recorder.plans.ge_trade import GeTradePlan
 from ilbot.ui.simple_recorder.plans.falador_cows import FaladorCowsPlan
 from ilbot.ui.simple_recorder.plans.woodcutting import WoodcuttingPlan
+from ilbot.ui.simple_recorder.plans.bank_plan import BankPlan
 
 # Plan registry - add new plans here
 AVAILABLE_PLANS = {
@@ -30,6 +31,7 @@ AVAILABLE_PLANS = {
     "ge_trade": GeTradePlan,
     "falador_cows": FaladorCowsPlan,
     "woodcutting": WoodcuttingPlan,
+    "bank_plan": BankPlan,
 }
 
 

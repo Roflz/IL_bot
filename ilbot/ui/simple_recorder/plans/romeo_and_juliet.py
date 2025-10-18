@@ -24,7 +24,7 @@ class RomeoAndJulietPlan(Plan):
     label = "Quest: Romeo & Juliet"
 
     def __init__(self):
-        self.state = {"phase": "GO_TO_CLOSEST_BANK"}  # gate: ensure items first
+        self.state = {"phase": "GIVE_POTION_TO_JULIET"}  # gate: ensure items first
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
         
@@ -80,9 +80,9 @@ class RomeoAndJulietPlan(Plan):
                     return
                 
                 # Use the centralized GE buying method
-                result = ge.buy_item_from_ge("Cadava berries", ui)
+                result = ge.buy_item_from_ge({"Cadava berries": (1, 5, 0)}, ui)
                 if result is True:
-                    self.set_phase("START_QUEST", ui)
+                    self.set_phase("CHECK_BANK_FOR_QUEST_ITEMS", ui)
                     return
 
             case 'START_QUEST':
@@ -117,7 +117,7 @@ class RomeoAndJulietPlan(Plan):
                     trav.go_to("JULIET_MANSION")
                     return
                 elif get_player_plane() == 0:
-                    objects.click_object_action("Staircase", "Climb-up")
+                    objects.click_object_simple("Staircase", "Climb-up")
                     wait_until(lambda: get_player_plane() == 1, max_wait_ms=5000)
                     return
                 elif get_player_plane() == 1 and not chat.dialogue_is_open():
@@ -133,7 +133,7 @@ class RomeoAndJulietPlan(Plan):
                     self.set_phase("FATHER_LAWRENCE", ui)
                     return
                 if get_player_plane() == 1:
-                    objects.click_object_action("Staircase", "Climb-down")
+                    objects.click_object_simple("Staircase", "Climb-down")
                     wait_until(lambda: get_player_plane() == 0, max_wait_ms=5000)
                     return 2000
                 elif not trav.in_area(REGIONS["VARROCK_SQUARE"]):
@@ -191,7 +191,7 @@ class RomeoAndJulietPlan(Plan):
                     trav.go_to("JULIET_MANSION")
                     return
                 elif get_player_plane() == 0:
-                    objects.click_object_action("Staircase", "Climb-up")
+                    objects.click_object_simple("Staircase", "Climb-up")
                     wait_until(lambda: get_player_plane() == 1, max_wait_ms=5000)
                     return
                 elif get_player_plane() == 1 and not chat.can_continue() and not player.in_cutscene():
@@ -213,7 +213,7 @@ class RomeoAndJulietPlan(Plan):
                     press_esc()
                     return
                 if get_player_plane() == 1 and not player.in_cutscene():
-                    objects.click_object_action("Staircase", "Climb-down")
+                    objects.click_object_simple("Staircase", "Climb-down")
                     wait_until(lambda: get_player_plane() == 0, max_wait_ms=5000)
                     return
                 elif not trav.in_area(REGIONS["VARROCK_SQUARE"]) and not player.in_cutscene():

@@ -3,11 +3,10 @@ from typing import Optional, List, Union
 import time
 
 from ..helpers.runtime_utils import ipc
-from ..helpers.navigation import _first_blocking_door_from_waypoints
 from ..helpers.npc import closest_npc_by_name, npc_action_index
 from ..helpers.rects import unwrap_rect, rect_center_xy
 from .chat import dialogue_is_open, can_choose_option, can_continue, any_chat_active, option_exists, choose_option, continue_dialogue
-from .travel import _handle_door_opening
+from .travel import _handle_door_opening, _first_blocking_door_from_waypoints
 from ..services.click_with_camera import click_npc_with_camera
 
 from ..services.camera_integration import dispatch_with_camera
@@ -75,11 +74,6 @@ def click_npc_action(name: str, action: str) -> Optional[dict]:
         fresh_npc = npc_resp.get("npc")
         print(f"[NPC_ACTION] Found NPC: {fresh_npc.get('name')} at distance {fresh_npc.get('distance')}")
         print(f"[NPC_ACTION] NPC actions: {fresh_npc.get('actions')}")
-        
-        idx = npc_action_index(fresh_npc, action)
-        print(f"[NPC_ACTION] Action '{action}' found at index: {idx}")
-        if idx is None:
-            return None
 
         # 1) Check for doors on the path to the NPC
         gx, gy = fresh_npc.get("world", {}).get("x"), fresh_npc.get("world", {}).get("y")
@@ -88,9 +82,11 @@ def click_npc_action(name: str, action: str) -> Optional[dict]:
             door_plan = _first_blocking_door_from_waypoints(wps)
             if door_plan:
                 # Handle door opening with retry logic and recently traversed door tracking
-                if not _handle_door_opening(door_plan):
+                if not _handle_door_opening(door_plan, wps):
                     # Door opening failed after retries, continue to next attempt
                     continue
+                else:
+                    return True
 
         # 2) Click the NPC action with pathing logic
         rect = unwrap_rect(fresh_npc.get("clickbox"))
@@ -98,45 +94,19 @@ def click_npc_action(name: str, action: str) -> Optional[dict]:
 
         # Determine anchor point
         print(f"[NPC_ACTION] Checking coordinates - rect: {rect}, canvas: {fresh_npc.get('canvas')}")
-        
-        if rect:
-            cx, cy = rect_center_xy(rect)
-            anchor = {"bounds": rect}
-            point = {"x": cx, "y": cy}
-            print(f"[NPC_ACTION] Using rect coordinates: ({cx}, {cy})")
-        elif isinstance(fresh_npc.get("canvas", {}).get("x"), (int, float)) and isinstance(fresh_npc.get("canvas", {}).get("y"), (int, float)):
-            cx, cy = int(fresh_npc.get("canvas", {}).get("x")), int(fresh_npc.get("canvas", {}).get("y"))
-            anchor = {}
-            point = {"x": cx, "y": cy}
-            print(f"[NPC_ACTION] Using canvas coordinates: ({cx}, {cy})")
-        else:
-            print(f"[NPC_ACTION] No valid coordinates found, trying next attempt")
-            continue  # Try next attempt
 
         # Get world coordinates for the NPC
         world_coords = fresh_npc.get("world", {})
         if not world_coords or not isinstance(world_coords.get("x"), int) or not isinstance(world_coords.get("y"), int):
             print(f"[NPC_ACTION] No valid world coordinates for NPC, trying next attempt")
             continue
-        
-        if idx == 0:
-            # Desired action is default → use click_npc_with_camera with no action
-            print(f"[NPC_ACTION] Using left-click for action at index 0")
-            result = click_npc_with_camera(
-                npc_name=name_str,
-                action=action,
-                world_coords=world_coords,
-                aim_ms=420
-            )
-        else:
-            # Need context menu → use click_npc_with_camera with action and index
-            print(f"[NPC_ACTION] Using context menu for action at index {idx}")
-            result = click_npc_with_camera(
-                npc_name=name_str,
-                action=action,
-                world_coords=world_coords,
-                aim_ms=420
-            )
+
+        result = click_npc_with_camera(
+            npc_name=name_str,
+            action=action,
+            world_coords=world_coords,
+            aim_ms=420
+        )
         
         print(f"[NPC_ACTION] Click result: {result}")
         
@@ -224,9 +194,9 @@ def chat_with_npc(npc_name: str, options: Optional[List[str]] = None, max_wait_m
             # If no preferred options found, return None
             return None
             
-        elif can_continue():
-            # Continue the dialogue
-            result = continue_dialogue()
-            return result
+    if can_continue():
+        # Continue the dialogue
+        result = continue_dialogue()
+        return result
     
     return None

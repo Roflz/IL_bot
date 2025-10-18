@@ -239,13 +239,15 @@ class IPCClient:
         
         return click_result and click_result.get("ok", False)
 
-    def get_objects(self, name: str = None, types: list = None) -> list:
-        """Get objects, optionally filtered by name and types."""
+    def get_objects(self, name: str = None, types: list = None, radius: int = None) -> list:
+        """Get objects, optionally filtered by name, types, and radius."""
         msg = {"cmd": "objects"}
         if name:
             msg["name"] = name
         if types:
             msg["types"] = types
+        if radius:
+            msg["radius"] = radius
         return self._send(msg) or []
 
     def get_closest_objects(self) -> list:
@@ -258,6 +260,13 @@ class IPCClient:
         if types:
             msg["types"] = types
         return self._send(msg) or {}
+
+    def find_object_by_path(self, name: str, types: list = None) -> dict:
+        """Find the closest object by path distance (waypoint count)."""
+        msg = {"cmd": "find_object_by_path", "name": name}
+        if types:
+            msg["types"] = types
+        return self._send(msg, timeout=20000) or {}
 
     def get_ground_items(self, name: str = None, radius: int = None) -> dict:
         """Get ground items."""
@@ -409,7 +418,7 @@ class IPCClient:
         wps = resp.get("waypoints", []) or [] if resp else []
         return wps, resp
 
-    def path(self, rect=None, goal=None, max_wps=18, visualize=True):
+    def path(self, rect=None, goal=None, visualize=True, max_wps=None):
         """Get pathfinding waypoints with optional visualization."""
         req = {"cmd": "path", "visualize": visualize}
         if rect:
@@ -418,11 +427,38 @@ class IPCClient:
         if goal:
             gx, gy = goal
             req.update({"goalX": gx, "goalY": gy})
-        if max_wps is not None:
-            req["maxWps"] = int(max_wps)
 
         resp = self._send(req)
         wps = resp.get("waypoints", []) or [] if resp else []
+        
+        # Filter waypoints to only include those within 14x14 box around player
+        if wps:
+            player_info = self.get_player()
+            if player_info and player_info.get("ok"):
+                player_x = player_info['player'].get("worldX")
+                player_y = player_info['player'].get("worldY")
+                
+                if isinstance(player_x, int) and isinstance(player_y, int):
+                    # Calculate 29x29 box bounds (14 tiles in each direction from player)
+                    min_x = player_x - 14
+                    max_x = player_x + 14
+                    min_y = player_y - 14
+                    max_y = player_y + 14
+                    
+                    # Filter waypoints to only include those within the box
+                    filtered_wps = []
+                    for wp in wps:
+                        wp_x = wp.get("x")
+                        wp_y = wp.get("y")
+                        if (isinstance(wp_x, int) and isinstance(wp_y, int) and
+                            min_x <= wp_x <= max_x and min_y <= wp_y <= max_y):
+                            filtered_wps.append(wp)
+                        else:
+                            # Stop at first waypoint outside the box
+                            break
+                    
+                    wps = filtered_wps
+        
         return wps, resp
 
     def project_world_tile(self, world_x: int, world_y: int) -> dict:

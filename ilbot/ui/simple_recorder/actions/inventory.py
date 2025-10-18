@@ -14,28 +14,61 @@ def has_item(name: str, min_qty: int = 1) -> bool:
     """
     return inv_has(name, min_qty)
 
-
-def has_items(item_names: List[str], min_qty: int = 1) -> bool:
+def has_items(items: dict, noted: bool = False) -> bool:
     """
-    Check if inventory contains all items in the list with quantity >= min_qty for each.
-    
+    Check whether the inventory contains all specified items in the required quantities.
+
     Args:
-        item_names: List of item names to check for
-        min_qty: Minimum quantity required for each item (default: 1)
-        
-    Returns:
-        True if ALL items are found with sufficient quantity, False otherwise
-    """
-    if not item_names:
-        return True  # Empty list means success
-    
-    # Check each item individually
-    for item_name in item_names:
-        if not has_item(item_name, min_qty):
-            return False
-    
-    return True
+        items (dict or set or list or tuple): Mapping of item name -> required quantity,
+                                              or iterable of item names for ANY quantity.
+        noted (bool): If True, check for noted items; otherwise check for unnoted items.
 
+    Returns:
+        bool: True if all items are present in the required quantities, False otherwise.
+    """
+    if not items:
+        print("[INV] inventory_has_items: Invalid items provided")
+        return False
+
+    # Allow set/list/tuple as "require ANY amount of each item"
+    if isinstance(items, (set, list, tuple)):
+        items = {name: "any" for name in items}
+
+    if not isinstance(items, dict):
+        print("[INV] inventory_has_items: Invalid items type")
+        return False
+
+    for item, qty in items.items():
+        # allow "any" or None as "at least 1 present"
+        if isinstance(qty, str) and qty.lower() == "any":
+            needed_any = True
+        elif qty is None:
+            needed_any = True
+        else:
+            needed_any = False
+
+        if not isinstance(item, str):
+            print(f"[INV] Skipping invalid entry: {item} -> {qty}")
+            continue
+
+        if noted:
+            count = inv_count(item)
+        else:
+            count = count_unnoted_item(item)
+
+        if needed_any:
+            if count <= 0:
+                print(f"[INV] Missing {item}: need ANY, have 0")
+                return False
+        else:
+            if not isinstance(qty, int) or qty <= 0:
+                print(f"[INV] Skipping invalid qty entry: {item} -> {qty}")
+                continue
+            if count < qty:
+                print(f"[INV] Missing {item}: need {qty}, have {count}")
+                return False
+
+    return True
 
 def has_any_items(item_names: List[str], min_qty: int = 1) -> bool:
     """
@@ -77,7 +110,7 @@ def has_noted_item(name: str) -> bool:
             continue
             
         # Check for noted items
-        if target_name in item_name and slot.get("isNoted"):
+        if target_name in item_name and slot.get("noted"):
             return True
     
     return False
@@ -503,7 +536,7 @@ def interact(item_name: str, menu_option: str) -> Optional[dict]:
         return None
     
     # Get item bounds
-    bounds = item['bounds'].get("bounds")
+    bounds = item.get("bounds")
     if not bounds:
         return None
     

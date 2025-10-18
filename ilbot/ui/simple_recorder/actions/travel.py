@@ -44,11 +44,15 @@ def _calculate_path_distance_to_waypoint(waypoint_index: int, player_x: int, pla
     return total_distance
 
 
-def _get_next_long_distance_waypoints(destination_key: str) -> list[tuple[int, int]] | None:
+def _get_next_long_distance_waypoints(destination_key: str, custom_dest_rect: tuple = None) -> list[tuple[int, int]] | None:
     """
     Get the next waypoint from the cached long-distance path.
     Generate path ONCE at the start, then follow it step by step.
     Uses path distance (not straight-line distance) to select waypoints.
+    
+    Args:
+        destination_key: Navigation key for destination
+        custom_dest_rect: Optional custom destination rectangle as (min_x, max_x, min_y, max_y)
     """
     global _long_distance_path_cache, _long_distance_destination, _long_distance_waypoint_index
 
@@ -57,34 +61,42 @@ def _get_next_long_distance_waypoints(destination_key: str) -> list[tuple[int, i
     if (_long_distance_path_cache is None or 
         _long_distance_destination != destination_key):
         
-        waypoints = get_long_distance_waypoints(destination_key)
-        if not waypoints:
-            return None
-        
+        waypoints = get_long_distance_waypoints(destination_key, custom_dest_rect)
         _long_distance_path_cache = waypoints
         _long_distance_destination = destination_key
         _long_distance_waypoint_index = 0
+        if not waypoints:
+            return None
+        
+
     
     # Check if we've reached the end of the path
     if _long_distance_waypoint_index >= len(_long_distance_path_cache):
         print(f"[LONG_DISTANCE] Reached end of path ({_long_distance_waypoint_index}/{len(_long_distance_path_cache)})")
         
         # Check if we're close to destination
-        from ..helpers.navigation import get_nav_rect
-        dest_rect = get_nav_rect(destination_key)
-        if dest_rect and len(dest_rect) == 4:
-            min_x, max_x, min_y, max_y = dest_rect
+        if custom_dest_rect and isinstance(custom_dest_rect, (tuple, list)) and len(custom_dest_rect) == 4:
+            min_x, max_x, min_y, max_y = custom_dest_rect
             dest_center_x = (min_x + max_x) // 2
             dest_center_y = (min_y + max_y) // 2
-            
-            player_x, player_y = player.get_x(), player.get_y()
-            if isinstance(player_x, int) and isinstance(player_y, int):
-                distance_to_dest = _calculate_distance(player_x, player_y, dest_center_x, dest_center_y)
-                if distance_to_dest <= 15:  # Close to destination
-                    print(f"[LONG_DISTANCE] Close to destination ({distance_to_dest:.1f} tiles), path complete!")
-                    clear_long_distance_cache()
-                else:
-                    print(f"[LONG_DISTANCE] Still far from destination ({distance_to_dest:.1f} tiles), path may be incomplete")
+        else:
+            from ..helpers.navigation import get_nav_rect
+            dest_rect = get_nav_rect(destination_key)
+            if dest_rect and len(dest_rect) == 4:
+                min_x, max_x, min_y, max_y = dest_rect
+                dest_center_x = (min_x + max_x) // 2
+                dest_center_y = (min_y + max_y) // 2
+            else:
+                return None
+        
+        player_x, player_y = player.get_x(), player.get_y()
+        if isinstance(player_x, int) and isinstance(player_y, int):
+            distance_to_dest = _calculate_distance(player_x, player_y, dest_center_x, dest_center_y)
+            if distance_to_dest <= 15:  # Close to destination
+                print(f"[LONG_DISTANCE] Close to destination ({distance_to_dest:.1f} tiles), path complete!")
+                clear_long_distance_cache()
+            else:
+                print(f"[LONG_DISTANCE] Still far from destination ({distance_to_dest:.1f} tiles), path may be incomplete")
         
         return None
     
@@ -333,7 +345,7 @@ def _door_has_wall_on_side(orient_a: int, orient_b: int, sides) -> bool:
     return False  # Door has no walls on any of the sides being crossed
 
 
-def _handle_door_opening(door_plan: dict, full_path_waypoints: list = None) -> bool:
+def _handle_door_opening(door_plan: dict, full_path_waypoints: list) -> bool:
     """
     Handle door opening logic with retry mechanism and recently traversed door tracking.
     
@@ -377,7 +389,7 @@ def _handle_door_opening(door_plan: dict, full_path_waypoints: list = None) -> b
 
     while not door_opened and door_retry_count < max_door_retries:
         # Get fresh door data for each retry attempt
-        wps, dbg_path = ipc.path(goal=(door_x, door_y), visualize=False)
+        wps, dbg_path = ipc.path(goal=(full_path_waypoints[-1].get('x'), full_path_waypoints[-1].get('y')), visualize=False)
         fresh_door_plan = _first_blocking_door_from_waypoints(wps)
         
         if not fresh_door_plan:
@@ -544,10 +556,11 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False) -> dict | None:
         
         # Check how many waypoints are left in the long-distance path
         t3_ldp_select = _mark("ldp_select")
-        waypoint_batch = _get_next_long_distance_waypoints(rect_key)
+        waypoint_batch = _get_next_long_distance_waypoints(rect_key, rect)
         waypoints_remaining = len(_long_distance_path_cache) - _long_distance_waypoint_index if _long_distance_path_cache else 0
         timing_data["dur_ms"]["ldp_select"] = (t3_ldp_select - t2_player_pos) / 1_000_000
         timing_data["context"]["waypoints_remaining"] = waypoints_remaining
+
         print(f"[GO_TO_TIMING] Long distance waypoint check took {timing_data['dur_ms']['ldp_select']:.3f}s")
     
         if waypoints_remaining > 0:
@@ -566,15 +579,15 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False) -> dict | None:
                 
                 # Project waypoint to screen coordinates
                 t4_ldp_wp_path_gen = _mark("ldp_wp_path_gen")
-                waypoint_wps, _ = ipc.path(rect=(target_waypoint[0]-1, target_waypoint[0]+1, target_waypoint[1]-1, target_waypoint[1]+1))
+                wps, _ = ipc.path(rect=(target_waypoint[0]-1, target_waypoint[0]+1, target_waypoint[1]-1, target_waypoint[1]+1))
                 timing_data["dur_ms"]["ldp_wp_path_gen"] = (t4_ldp_wp_path_gen - t3_ldp_select) / 1_000_000
-                timing_data["context"]["wps_count"] = len(waypoint_wps) if waypoint_wps else 0
+                timing_data["context"]["wps_count"] = len(wps) if wps else 0
                 print(f"[GO_TO_TIMING] Waypoint path generation took {timing_data['dur_ms']['ldp_wp_path_gen']:.3f}s")
             
-                if waypoint_wps:
+                if wps:
                     t5_ldp_wp_project_merge = _mark("ldp_wp_project_merge")
-                    waypoint_proj, _ = ipc.project_many(waypoint_wps)
-                    waypoint_proj = _merge_door_into_projection(waypoint_wps, waypoint_proj)
+                    waypoint_proj, _ = ipc.project_many(wps)
+                    waypoint_proj = _merge_door_into_projection(wps, waypoint_proj)
                     waypoint_usable = [p for p in waypoint_proj if isinstance(p, dict) and p.get("canvas")]
                     timing_data["dur_ms"]["ldp_wp_project_merge"] = (t5_ldp_wp_project_merge - t4_ldp_wp_path_gen) / 1_000_000
                     print(f"[GO_TO_TIMING] Waypoint projection and filtering took {timing_data['dur_ms']['ldp_wp_project_merge']:.3f}s")
@@ -589,7 +602,7 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False) -> dict | None:
                         
                         if isinstance(gx, int) and isinstance(gy, int):
                             t6_ldp_door_path_gen = _mark("ldp_door_path_gen")
-                            wps, dbg_path = ipc.path(goal=(gx, gy), visualize=False)
+                            # wps, dbg_path = ipc.path(goal=(gx, gy), visualize=False)
                             door_plan = _first_blocking_door_from_waypoints(wps)
                             timing_data["dur_ms"]["ldp_door_path_gen"] = (t6_ldp_door_path_gen - t5_ldp_wp_project_merge) / 1_000_000
                             print(f"[GO_TO_TIMING] Door check path generation took {timing_data['dur_ms']['ldp_door_path_gen']:.3f}s")
@@ -609,6 +622,9 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False) -> dict | None:
                                     timing_data["error"] = "Door opening failed"
                                     _emit(timing_data)
                                     return None  # Door opening failed
+                                else:
+
+                                    return True
                     else:
                         world_coords = {"x": target_waypoint[0], "y": target_waypoint[1], "p": 0}
                 else:
@@ -626,7 +642,7 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False) -> dict | None:
         
             if not wps:
                 timing_data["ok"] = False
-                timing_data["error"] = "No waypoints generated"
+                timing_data["error"] = "No wps generated"
                 _emit(timing_data)
                 return None
             
@@ -651,7 +667,7 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False) -> dict | None:
                 
                 if isinstance(gx, int) and isinstance(gy, int):
                     t6_short_door_path_gen = _mark("short_door_path_gen")
-                    wps, dbg_path = ipc.path(goal=(gx, gy), visualize=False)
+                    # wps, dbg_path = ipc.path(goal=(gx, gy), visualize=False)
                     door_plan = _first_blocking_door_from_waypoints(wps)
                     timing_data["dur_ms"]["short_door_path_gen"] = (t6_short_door_path_gen - t5_short_project_merge) / 1_000_000
                     print(f"[GO_TO_TIMING] Short distance door check path generation took {timing_data['dur_ms']['short_door_path_gen']:.3f}s")
@@ -671,6 +687,8 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False) -> dict | None:
                             timing_data["error"] = "Door opening failed"
                             _emit(timing_data)
                             return None  # Door opening failed
+                        else:
+                            return True
         
             # Pick from the last 3 waypoints (or all if less than 3)
             if len(usable) <= 3:
@@ -714,51 +732,54 @@ def _calculate_distance(x1: int, y1: int, x2: int, y2: int) -> float:
     """Calculate Manhattan distance between two points."""
     return abs(x1 - x2) + abs(y1 - y2)
 
+
 def _first_blocking_door_from_waypoints(waypoints: list[dict]) -> dict | None:
     """
     Find the first blocking door from a list of waypoints.
     """
     if not waypoints:
-            return None
-    
+        return None
+
     for i, wp in enumerate(waypoints):
         door_info = wp.get("door", {})
         if not door_info.get("present"):
             continue
-        
+
         closed = door_info.get("closed")
         if closed is False:
             continue  # already open
-        
+
         # Check if door has clickable geometry
         bounds = door_info.get("bounds")
         canvas = door_info.get("canvas")
-        
+
         if not isinstance(bounds, dict) and not isinstance(canvas, dict):
             continue  # no clickable geometry
-        
+
         # Create door plan
         wx = wp.get("x")
         wy = wp.get("y")
         wp_plane = wp.get("p", 0)
-        
+
         if not isinstance(wx, int) or not isinstance(wy, int):
             continue
-        
+
         door_plan = {
             "x": wx,
             "y": wy,
             "p": wp_plane,
             "door": door_info
         }
-        
-        return door_plan
-    
+
+        # Check if this door is actually blocking the path
+        if _is_door_blocking_path(door_plan, waypoints):
+            return door_plan
+        # If door is not blocking, continue to next door
+
     return None
 
 def go_to_closest_bank() -> dict | None:
     """Go to the closest bank."""
-    player_data = ipc.get_player()
     bank_key = closest_bank_key()
     if bank_key:
         return go_to(bank_key)
@@ -780,10 +801,14 @@ def in_area(area_key: str) -> bool:
     return min_x <= player_x <= max_x and min_y <= player_y <= max_y
 
 
-def get_long_distance_waypoints(destination_key: str) -> list[tuple[int, int]] | None:
+def get_long_distance_waypoints(destination_key: str, custom_dest_rect: tuple = None) -> list[tuple[int, int]] | None:
     """
     Generate waypoints for long-distance travel using the collision map pathfinder.
     This calls the pathfinder.py directly to get a complete path.
+    
+    Args:
+        destination_key: Navigation key for destination
+        custom_dest_rect: Optional custom destination rectangle as (min_x, max_x, min_y, max_y)
     """
     try:
         # Import pathfinder functions
@@ -800,22 +825,25 @@ def get_long_distance_waypoints(destination_key: str) -> list[tuple[int, int]] |
             return None
         
         # Get destination coordinates
-        dest_rect = get_nav_rect(destination_key)
-        if not (isinstance(dest_rect, (tuple, list)) and len(dest_rect) == 4):
-            return None
+        if custom_dest_rect and isinstance(custom_dest_rect, (tuple, list)) and len(custom_dest_rect) == 4:
+            dest_rect = custom_dest_rect
+        else:
+            dest_rect = get_nav_rect(destination_key)
+            if not (isinstance(dest_rect, (tuple, list)) and len(dest_rect) == 4):
+                return None
         
         min_x, max_x, min_y, max_y = dest_rect
         dest_center_x = (min_x + max_x) // 2
         dest_center_y = (min_y + max_y) // 2
         destination = (dest_center_x, dest_center_y)
         
-        # Load collision data
-        collision_data = load_collision_data()
+        # Load collision data filtered by start and destination coordinates
+        collision_data = load_collision_data(current_pos, destination)
         if not collision_data:
             return None
         
         # Get walkable tiles
-        walkable_tiles, blocked_tiles = get_walkable_tiles(collision_data)
+        walkable_tiles, blocked_tiles, wall_orientations  = get_walkable_tiles(collision_data)
         
         # Find closest walkable tiles to start and goal
         def find_closest_walkable(target, candidates):
@@ -901,6 +929,72 @@ def go_to_and_find_npc(rect_or_key: str | tuple | list, npc_name: str,
     return False
 
 
+
+def move_to_random_tile_near_player(max_distance: int = 3) -> bool:
+    """
+    Move to a random walkable tile within the specified distance of the player.
+    
+    Args:
+        max_distance: Maximum distance in tiles from player (default: 3)
+    
+    Returns:
+        bool: True if movement was successful, False otherwise
+    """
+    try:
+        # Get current player position
+        player_pos = get_player_position()
+        if not player_pos:
+            print(f"[RANDOM_MOVE] Could not get player position")
+            return False
+        
+        player_x, player_y = player_pos
+        print(f"[RANDOM_MOVE] Player at ({player_x}, {player_y}), finding walkable tiles within {max_distance} tiles")
+        
+        # Load collision data to find walkable tiles
+        from .long_distance_travel import load_collision_data, get_walkable_tiles
+        
+        collision_data = load_collision_data()
+        if not collision_data:
+            print(f"[RANDOM_MOVE] Could not load collision data")
+            return False
+        
+        walkable_tiles, _ = get_walkable_tiles(collision_data)
+        
+        # Find all walkable tiles within the specified distance
+        nearby_walkable = []
+        for tile_x, tile_y in walkable_tiles:
+            distance = max(abs(tile_x - player_x), abs(tile_y - player_y))
+            if distance <= max_distance and distance > 0:  # Don't include current position
+                nearby_walkable.append((tile_x, tile_y))
+        
+        if not nearby_walkable:
+            print(f"[RANDOM_MOVE] No walkable tiles found within {max_distance} tiles of player")
+            return False
+        
+        # Select a random walkable tile
+        import random
+        target_tile = random.choice(nearby_walkable)
+        target_x, target_y = target_tile
+        
+        print(f"[RANDOM_MOVE] Moving to random tile ({target_x}, {target_y})")
+        
+        # Use click_ground_with_camera to move to the random tile
+        world_coords = {"x": target_x, "y": target_y}
+        result = click_ground_with_camera(
+            world_coords=world_coords,
+            description="Move to random tile"
+        )
+        
+        if result and result.get("ok"):
+            print(f"[RANDOM_MOVE] Successfully moved to ({target_x}, {target_y})")
+            return True
+        else:
+            print(f"[RANDOM_MOVE] Failed to move to ({target_x}, {target_y}): {result}")
+            return False
+            
+    except Exception as e:
+        print(f"[RANDOM_MOVE] Error moving to random tile: {e}")
+        return False
 
 def move_to_random_tile_in_area(area_key: str) -> bool:
     """

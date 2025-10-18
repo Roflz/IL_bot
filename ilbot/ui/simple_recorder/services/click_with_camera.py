@@ -78,6 +78,7 @@ def click_object_with_camera(
             aim_midtop_at_world(world_coords['x'], world_coords['y'], max_ms=aim_ms)
         finally:
             t3_cam_end = _mark_timing("cam_end")
+
             timing_data["dur_ms"]["cam"] = (t3_cam_end - t2_cam_begin) / 1_000_000
         
         # STEP 3: Object finding and rect resampling
@@ -89,17 +90,17 @@ def click_object_with_camera(
                 timing_data["error"] = "No door data in door plan"
                 _emit_timing(timing_data)
                 return None
+            # Get fresh coordinates from door plan
+            door_proj, _ = ipc.project_many([{"x": door_plan['x'], "y": door_plan['y'], "p": door_plan.get('p', 0)}])
+            if door_proj and len(door_proj) > 0 and door_proj[0].get("canvas"):
+                cx, cy = door_proj[0]['door']["canvas"]["x"], door_proj[0]['door']["canvas"]["y"]
+                obj_name = target.get("name") or object_name
+                anchor = {}
+                point = {"x": cx, "y": cy}
         else:
-            # Normal object finding for non-doors
-            obj_resp = ipc.find_object(object_name, ["GAME", "WALL"])
-            
-            if not obj_resp or not obj_resp.get("ok") or not obj_resp.get("found"):
-                timing_data["ok"] = False
-                timing_data["error"] = f"Could not find {object_name} after camera movement"
-                _emit_timing(timing_data)
-                return None
-            
-            target = obj_resp.get("object")
+            # Normal object finding for non-doors - use path-based selection
+            from ..actions.objects import _find_closest_object_by_path
+            target = _find_closest_object_by_path(object_name, ["GAME", "WALL", "DECOR", "GROUND"], max_path_distance=8, max_objects=20)
             
             if not target:
                 timing_data["ok"] = False
@@ -107,25 +108,25 @@ def click_object_with_camera(
                 _emit_timing(timing_data)
                 return None
         
-        timing_data["dur_ms"]["resample"] = (t4_rect_resample - t3_cam_end) / 1_000_000
-    
-        # STEP 4: Coordinate processing
-        rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
-        obj_name = target.get("name") or object_name
-        
-        if rect:
-            cx, cy = rect_center_xy(rect)
-            anchor = {"bounds": rect}
-            point = {"x": cx, "y": cy}
-        elif isinstance(target["canvas"].get("x"), (int, float)) and isinstance(target["canvas"].get("y"), (int, float)):
-            cx, cy = int(target["canvas"]["x"]), int(target["canvas"]["y"])
-            anchor = {}
-            point = {"x": cx, "y": cy}
-        else:
-            timing_data["ok"] = False
-            timing_data["error"] = f"Could not get fresh coordinates for {object_name}"
-            _emit_timing(timing_data)
-            return None
+            timing_data["dur_ms"]["resample"] = (t4_rect_resample - t3_cam_end) / 1_000_000
+
+            # STEP 4: Coordinate processing
+            rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
+            obj_name = target.get("name") or object_name
+
+            if rect:
+                cx, cy = rect_center_xy(rect)
+                anchor = {"bounds": rect}
+                point = {"x": cx, "y": cy}
+            elif isinstance(target["canvas"].get("x"), (int, float)) and isinstance(target["canvas"].get("y"), (int, float)):
+                cx, cy = int(target["canvas"]["x"]), int(target["canvas"]["y"])
+                anchor = {}
+                point = {"x": cx, "y": cy}
+            else:
+                timing_data["ok"] = False
+                timing_data["error"] = f"Could not get fresh coordinates for {object_name}"
+                _emit_timing(timing_data)
+                return None
         
         # STEP 5: Hover positioning
         t5_hover_ready = _mark_timing("hover_ready")
@@ -159,12 +160,13 @@ def click_object_with_camera(
         if not action or action_index is None or action_index == 0:
             step = {
                 "action": "click-object",
-                "click": ({"type": "rect-center"} if rect else {"type": "point", **point}),
+                "click": ({"type": "point", **point}),
                 "target": {"domain": "object", "name": obj_name, **anchor, "world": world_coords},
             }
         else:
             step = {
                 "action": "click-object-context",
+                "option": action,
                 "click": {
                     "type": "context-select",
                     "index": int(action_index),
@@ -174,8 +176,7 @@ def click_object_with_camera(
                     "start_dy": 10,
                     "open_delay_ms": 120,
                 },
-                "target": ({"domain": "object", "name": obj_name, **anchor, "world": world_coords}
-                           if rect else {"domain": "object", "name": obj_name, "world": world_coords}),
+                "target": ({"domain": "object", "name": obj_name, "world": world_coords}),
                 "anchor": point,
             }
 
@@ -460,208 +461,142 @@ def click_ground_with_camera(
         max_attempts = 3  # 20, 19, 18, 17, 16, 15
         initial_max_wps = 18
         
-        for attempt in range(max_attempts):
-            attempt_start = time.time()
-            current_max_wps = initial_max_wps - attempt
-            print(f"[CLICK_GROUND_TIMING] Attempt {attempt + 1}/{max_attempts}: max_wps={current_max_wps}")
-            
-            # Re-run pathfinding logic like in go_to to get fresh waypoint
-            step_start = time.time()
-            wps, dbg_path = ipc.path(rect=(world_coords['x']-1, world_coords['x']+1, world_coords['y']-1, world_coords['y']+1), max_wps=current_max_wps, visualize=False)
-            print(f"[CLICK_GROUND_TIMING] Path generation took {time.time() - step_start:.3f}s")
-            
-            if not wps:
-                print(f"[CLICK_GROUND_TIMING] No waypoints generated, trying next attempt")
-                continue
-            
-            step_start = time.time()
-            proj, dbg_proj = ipc.project_many(wps)
-            proj = _merge_door_into_projection(wps, proj)
-            print(f"[CLICK_GROUND_TIMING] Projection and door merge took {time.time() - step_start:.3f}s")
-            
-            usable = [p for p in proj if isinstance(p, dict) and p.get("canvas")]
-            if not usable:
-                print(f"[CLICK_GROUND_TIMING] No usable waypoints after projection, trying next attempt")
-                continue
-            
-            # Pick from the last 3 waypoints (or all if less than 3) - same logic as go_to
-            if len(usable) <= 3:
-                chosen = random.choice(usable)
-            else:
-                chosen = random.choice(usable[-3:])
-            
-            coords = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
-            print(f"[CLICK_GROUND_TIMING] Selected coordinates: {coords}")
+        # Try camera retry directions: first try without moving camera, then LEFT, then RIGHT
+        camera_retry_directions = [None, "LEFT", "RIGHT"]
+        camera_retry_duration = 0.5  # Move camera for 500ms
         
-            # STEP 1: Target acquisition (pathfinding already done)
-            t1_target_acquired = _mark_timing("target_acquired")
-            timing_data["dur_ms"]["resolve"] = (t1_target_acquired - t0_start) / 1_000_000
+        for camera_retry_idx, direction in enumerate(camera_retry_directions):
+            # Move camera if this is not the first attempt
+            if direction is not None:
+                try:
+                    ipc.key_press(direction)
+                    time.sleep(camera_retry_duration)
+                    ipc.key_release(direction)
+                except Exception:
+                    pass  # Don't fail if camera movement fails
             
-            # STEP 2: Camera movement
-            t2_cam_begin = _mark_timing("cam_begin")
-            try:
-                aim_midtop_at_world(coords['x'], coords['y'], max_ms=aim_ms)
-            finally:
-                t3_cam_end = _mark_timing("cam_end")
-                timing_data["dur_ms"]["cam"] = (t3_cam_end - t2_cam_begin) / 1_000_000
+            for attempt in range(max_attempts):
+                current_max_wps = initial_max_wps - attempt
+                
+                # Re-run pathfinding logic like in go_to to get fresh waypoint
+                wps, dbg_path = ipc.path(rect=(world_coords['x']-1, world_coords['x']+1, world_coords['y']-1, world_coords['y']+1), visualize=False)
+                
+                if not wps:
+                    continue
+                
+                proj, dbg_proj = ipc.project_many(wps)
+                proj = _merge_door_into_projection(wps, proj)
+                
+                usable = [p for p in proj if isinstance(p, dict) and p.get("canvas")]
+                if not usable:
+                    continue
+                
+                # Pick from the last 3 waypoints (or all if less than 3) - same logic as go_to
+                if len(usable) <= 3:
+                    chosen = random.choice(usable)
+                else:
+                    chosen = random.choice(usable[-3:])
+                
+                coords = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
             
-            # STEP 3: Projection and coordinate resampling
-            t4_rect_resample = _mark_timing("rect_resample")
-            
-            # Line 510: Second projection call (redundant!)
-            t_proj2_start = _mark_timing("proj2_start")
-            proj, _ = ipc.project_many([{"x": coords['x'], "y": coords['y'], "p": coords.get('p', 0)}])
-            t_proj2_end = _mark_timing("proj2_end")
-            timing_data["dur_ms"]["proj2_call"] = (t_proj2_end - t_proj2_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 510 (ipc.project_many): {(t_proj2_end - t_proj2_start) / 1_000_000:.3f}ms")
-            
-            # Line 512: Projection validation
-            t_validate_start = _mark_timing("validate_start")
-            if not proj or not isinstance(proj[0], dict) or not proj[0].get("canvas"):
-                timing_data["counts"]["rect_resamples"] += 1
-                continue  # Try next attempt
-            t_validate_end = _mark_timing("validate_end")
-            timing_data["dur_ms"]["validate_proj"] = (t_validate_end - t_validate_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 512 (validate projection): {(t_validate_end - t_validate_start) / 1_000_000:.3f}ms")
-            
-            # Line 517: Canvas coordinate extraction
-            t_canvas_start = _mark_timing("canvas_start")
-            fresh_coords = proj[0]["canvas"]
-            t_canvas_end = _mark_timing("canvas_end")
-            timing_data["dur_ms"]["canvas_extract"] = (t_canvas_end - t_canvas_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 517 (canvas extraction): {(t_canvas_end - t_canvas_start) / 1_000_000:.3f}ms")
-            
-            # Line 518: X coordinate conversion
-            t_x_start = _mark_timing("x_start")
-            cx = int(fresh_coords["x"])
-            t_x_end = _mark_timing("x_end")
-            timing_data["dur_ms"]["x_convert"] = (t_x_end - t_x_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 518 (x coordinate): {(t_x_end - t_x_start) / 1_000_000:.3f}ms")
-            
-            # Line 519: Y coordinate conversion
-            t_y_start = _mark_timing("y_start")
-            cy = int(fresh_coords["y"])
-            t_y_end = _mark_timing("y_end")
-            timing_data["dur_ms"]["y_convert"] = (t_y_end - t_y_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 519 (y coordinate): {(t_y_end - t_y_start) / 1_000_000:.3f}ms")
-            
-            # Line 520: Timing calculation
-            t_timing_calc_start = _mark_timing("timing_calc_start")
-            timing_data["dur_ms"]["resample"] = (t4_rect_resample - t3_cam_end) / 1_000_000
-            t_timing_calc_end = _mark_timing("timing_calc_end")
-            timing_data["dur_ms"]["timing_calc"] = (t_timing_calc_end - t_timing_calc_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 520 (timing calculation): {(t_timing_calc_end - t_timing_calc_start) / 1_000_000:.3f}ms")
+                # STEP 1: Target acquisition (pathfinding already done)
+                t1_target_acquired = _mark_timing("target_acquired")
+                timing_data["dur_ms"]["resolve"] = (t1_target_acquired - t0_start) / 1_000_000
+                
+                # STEP 2: Camera movement
+                t2_cam_begin = _mark_timing("cam_begin")
+                try:
+                    aim_midtop_at_world(coords['x'], coords['y'], max_ms=aim_ms)
+                finally:
+                    t3_cam_end = _mark_timing("cam_end")
+                    timing_data["dur_ms"]["cam"] = (t3_cam_end - t2_cam_begin) / 1_000_000
+                
+                # STEP 3: Projection and coordinate resampling
+                t4_rect_resample = _mark_timing("rect_resample")
+                
+                proj, _ = ipc.project_many([{"x": coords['x'], "y": coords['y'], "p": coords.get('p', 0)}])
+                
+                if not proj or not isinstance(proj[0], dict) or not proj[0].get("canvas"):
+                    timing_data["counts"]["rect_resamples"] += 1
+                    continue  # Try next attempt
+                
+                fresh_coords = proj[0]["canvas"]
+                cx = int(fresh_coords["x"])
+                cy = int(fresh_coords["y"])
+                
+                timing_data["dur_ms"]["resample"] = (t4_rect_resample - t3_cam_end) / 1_000_000
 
-            # STEP 4: Hover positioning
-            t5_hover_ready = _mark_timing("hover_ready")
-            
-            # Line 524: Hover click call
-            t_hover_call_start = _mark_timing("hover_call_start")
-            hover_result = ipc.click(cx, cy, hover_only=True)
-            t_hover_call_end = _mark_timing("hover_call_end")
-            timing_data["dur_ms"]["hover_call"] = (t_hover_call_end - t_hover_call_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 524 (ipc.click hover): {(t_hover_call_end - t_hover_call_start) / 1_000_000:.3f}ms")
-            
-            # Line 525: Hover timing calculation
-            t_hover_calc_start = _mark_timing("hover_calc_start")
-            timing_data["dur_ms"]["hover"] = (t5_hover_ready - t4_rect_resample) / 1_000_000
-            t_hover_calc_end = _mark_timing("hover_calc_end")
-            timing_data["dur_ms"]["hover_calc"] = (t_hover_calc_end - t_hover_calc_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 525 (hover timing calc): {(t_hover_calc_end - t_hover_calc_start) / 1_000_000:.3f}ms")
-            
-            # Line 527: Hover result check
-            t_hover_check_start = _mark_timing("hover_check_start")
-            if not hover_result.get("ok"):
-                continue  # Try next attempt
-            t_hover_check_end = _mark_timing("hover_check_end")
-            timing_data["dur_ms"]["hover_check"] = (t_hover_check_end - t_hover_check_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 527 (hover result check): {(t_hover_check_end - t_hover_check_start) / 1_000_000:.3f}ms")
-            
-            # Line 531: Sleep call
-            t_sleep_start = _mark_timing("sleep_start")
-            time.sleep(0.1)
-            t_sleep_end = _mark_timing("sleep_end")
-            timing_data["dur_ms"]["sleep_100ms"] = (t_sleep_end - t_sleep_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 531 (time.sleep 0.1): {(t_sleep_end - t_sleep_start) / 1_000_000:.3f}ms")
-            
-            # STEP 5: Menu verification
-            t6_menu_open = _mark_timing("menu_open")
-            t7_menu_verified = _mark_timing("menu_verified")
-            
-            # Line 536: Menu verification call
-            t_menu_verify_start = _mark_timing("menu_verify_start")
-            walk_here_available = verify_walk_here_available()
-            t_menu_verify_end = _mark_timing("menu_verify_end")
-            timing_data["dur_ms"]["menu_verify_call"] = (t_menu_verify_end - t_menu_verify_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 536 (verify_walk_here_available): {(t_menu_verify_end - t_menu_verify_start) / 1_000_000:.3f}ms")
-            
-            # Line 537: Menu open timing calculation
-            t_menu_open_calc_start = _mark_timing("menu_open_calc_start")
-            timing_data["dur_ms"]["menu_open"] = (t6_menu_open - t5_hover_ready) / 1_000_000
-            t_menu_open_calc_end = _mark_timing("menu_open_calc_end")
-            timing_data["dur_ms"]["menu_open_calc"] = (t_menu_open_calc_end - t_menu_open_calc_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 537 (menu_open timing calc): {(t_menu_open_calc_end - t_menu_open_calc_start) / 1_000_000:.3f}ms")
-            
-            # Line 538: Menu verify timing calculation
-            t_menu_verify_calc_start = _mark_timing("menu_verify_calc_start")
-            timing_data["dur_ms"]["menu_verify"] = (t7_menu_verified - t6_menu_open) / 1_000_000
-            t_menu_verify_calc_end = _mark_timing("menu_verify_calc_end")
-            timing_data["dur_ms"]["menu_verify_calc"] = (t_menu_verify_calc_end - t_menu_verify_calc_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 538 (menu_verify timing calc): {(t_menu_verify_calc_end - t_menu_verify_calc_start) / 1_000_000:.3f}ms")
-            
-            # Line 540: Menu availability check
-            t_menu_check_start = _mark_timing("menu_check_start")
-            if not walk_here_available:
-                timing_data["counts"]["menu_retries"] += 1
-                continue  # Try next attempt
-            t_menu_check_end = _mark_timing("menu_check_end")
-            timing_data["dur_ms"]["menu_check"] = (t_menu_check_end - t_menu_check_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 540 (menu availability check): {(t_menu_check_end - t_menu_check_start) / 1_000_000:.3f}ms")
-            
-            # STEP 6: Dispatch click
-            t8_click_down = _mark_timing("click_down")
-            
-            # Line 546: Step dictionary creation
-            t_step_dict_start = _mark_timing("step_dict_start")
-            step = {
-                "action": "click-ground",
-                "description": description,
-                "click": {"type": "point", "x": cx, "y": cy},
-                "target": {"domain": "ground", "name": f"Ground→{description}", "world": coords},
-            }
-            t_step_dict_end = _mark_timing("step_dict_end")
-            timing_data["dur_ms"]["step_dict_create"] = (t_step_dict_end - t_step_dict_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 546 (step dictionary creation): {(t_step_dict_end - t_step_dict_start) / 1_000_000:.3f}ms")
-            
-            # Line 553: Dispatch call
-            t_dispatch_start = _mark_timing("dispatch_start")
-            result = dispatch(step)
-            t_dispatch_end = _mark_timing("dispatch_end")
-            timing_data["dur_ms"]["dispatch_call"] = (t_dispatch_end - t_dispatch_start) / 1_000_000
-            print(f"[LINE_TIMING] Line 553 (dispatch call): {(t_dispatch_end - t_dispatch_start) / 1_000_000:.3f}ms")
-            t9_click_up = _mark_timing("click_up")
-            timing_data["dur_ms"]["dispatch"] = (t9_click_up - t8_click_down) / 1_000_000
-            
-            # STEP 7: Post-acknowledgment
-            t10_post_ack = _mark_timing("post_ack")
-            timing_data["dur_ms"]["post_ack"] = (t10_post_ack - t9_click_up) / 1_000_000
-            timing_data["dur_ms"]["total"] = (t10_post_ack - t0_start) / 1_000_000
-            
-            # Get camera state for context
-            try:
-                camera_resp = ipc.get_camera()
-                if camera_resp and camera_resp.get("ok"):
-                    timing_data["camera"]["yaw"] = camera_resp.get("yaw")
-                    timing_data["camera"]["pitch"] = camera_resp.get("pitch")
-                    timing_data["camera"]["scale"] = camera_resp.get("scale")
-            except Exception:
-                pass
-            
-            _emit_timing(timing_data)
-            
-            if result:
-                print(f"[CLICK] Ground")
-                return result
+                # STEP 4: Hover positioning
+                t5_hover_ready = _mark_timing("hover_ready")
+                
+                # hover_result = ipc.click(cx, cy, hover_only=True)
+                
+                timing_data["dur_ms"]["hover"] = (t5_hover_ready - t4_rect_resample) / 1_000_000
+                
+                # if not hover_result.get("ok"):
+                #     continue  # Try next attempt
+                
+                time.sleep(0.1)
+                
+                # STEP 5: Menu verification
+                t6_menu_open = _mark_timing("menu_open")
+                t7_menu_verified = _mark_timing("menu_verified")
+                
+                # walk_here_available = verify_walk_here_available()
+                
+                timing_data["dur_ms"]["menu_open"] = (t6_menu_open - t5_hover_ready) / 1_000_000
+                timing_data["dur_ms"]["menu_verify"] = (t7_menu_verified - t6_menu_open) / 1_000_000
+                
+                # if not walk_here_available:
+                #     timing_data["counts"]["menu_retries"] += 1
+                #     continue  # Try next attempt
+                
+                # STEP 6: Dispatch click
+                t8_click_down = _mark_timing("click_down")
+                
+                step = {
+                    "action": "click-ground-context",
+                    "option": "Walk here",
+                    "click": {
+                        "type": "context-select",
+                        "index": 0,
+                        "x": cx,
+                        "y": cy,
+                        "row_height": 16,
+                        "start_dy": 10,
+                        "open_delay_ms": 120,
+                    },
+                    "target": {"domain": "ground", "name": "", "world": coords},
+                    "anchor": {"x": cx, "y": cy},
+                }
+                
+                result = dispatch(step)
+                t9_click_up = _mark_timing("click_up")
+                timing_data["dur_ms"]["dispatch"] = (t9_click_up - t8_click_down) / 1_000_000
+                
+                # STEP 7: Post-acknowledgment
+                t10_post_ack = _mark_timing("post_ack")
+                timing_data["dur_ms"]["post_ack"] = (t10_post_ack - t9_click_up) / 1_000_000
+                timing_data["dur_ms"]["total"] = (t10_post_ack - t0_start) / 1_000_000
+                
+                # Get camera state for context
+                try:
+                    camera_resp = ipc.get_camera()
+                    if camera_resp and camera_resp.get("ok"):
+                        timing_data["camera"]["yaw"] = camera_resp.get("yaw")
+                        timing_data["camera"]["pitch"] = camera_resp.get("pitch")
+                        timing_data["camera"]["scale"] = camera_resp.get("scale")
+                except Exception:
+                    pass
+                
+                _emit_timing(timing_data)
+                
+                if result:
+                    if direction is not None:
+                        print(f"[CLICK] Ground (after camera {direction})")
+                    else:
+                        print(f"[CLICK] Ground")
+                    return result
     
         # All attempts failed
         timing_data["ok"] = False
