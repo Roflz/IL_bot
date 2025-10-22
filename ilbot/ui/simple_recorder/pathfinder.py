@@ -20,11 +20,11 @@ from ilbot.ui.simple_recorder.helpers.ipc import IPCClient
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def load_collision_data(start_coords=None, dest_coords=None, buffer=100):
+def load_collision_data(start_coords=None, dest_coords=None, buffer=200):
     """Load collision data from cache, filtered by start/destination bounds."""
     script_dir = Path(__file__).parent
-    cache_file = script_dir / "collision_cache" / "collision_map.json"
-    print(f"[DEBUG] Loading collision data from: {cache_file.absolute()}")
+    cache_file = script_dir / "collision_cache" / "collision_map_debug.json"
+    # Loading collision data
     
     if not cache_file.exists():
         print("ERROR: No collision cache found. Run collision mapping first.")
@@ -35,11 +35,11 @@ def load_collision_data(start_coords=None, dest_coords=None, buffer=100):
             data = json.load(f)
         
         all_collision_data = data.get("collision_data", {})
-        print(f"[DEBUG] Total collision tiles in cache: {len(all_collision_data)}")
+        # Total collision tiles in cache
         
         # If no start/dest coordinates provided, return all data
         if not start_coords or not dest_coords:
-            print(f"[DEBUG] No start/dest coordinates provided, returning all collision data")
+            # No start/dest coordinates provided, returning all collision data
             return all_collision_data
         
         # Calculate bounds based on start and destination coordinates
@@ -51,7 +51,7 @@ def load_collision_data(start_coords=None, dest_coords=None, buffer=100):
         min_y = min(start_y, dest_y) - buffer
         max_y = max(start_y, dest_y) + buffer
         
-        print(f"[DEBUG] Filtering collision data to bounds: X({min_x} to {max_x}), Y({min_y} to {max_y})")
+        # Filtering collision data to bounds
         
         # Filter collision data to only include tiles within bounds
         filtered_data = {}
@@ -60,7 +60,7 @@ def load_collision_data(start_coords=None, dest_coords=None, buffer=100):
             if min_x <= x <= max_x and min_y <= y <= max_y:
                 filtered_data[tile_id] = tile_data
         
-        print(f"[DEBUG] Filtered collision data: {len(filtered_data)} tiles (from {len(all_collision_data)} total)")
+        # Filtered collision data
         return filtered_data
         
     except Exception as e:
@@ -75,67 +75,133 @@ def get_walkable_tiles(collision_data):
     wall_masks = {}  # Store normalized orientation masks for drawing/debug
     orientation_blockers = set()  # Only tiles that are non-walkable or doors with passable == False
     
+    # RuneLite CollisionDataFlag constants
+    BLOCK_MOVEMENT_NORTH       = 2
+    BLOCK_MOVEMENT_NORTH_EAST  = 4
+    BLOCK_MOVEMENT_EAST        = 8
+    BLOCK_MOVEMENT_SOUTH_EAST  = 16
+    BLOCK_MOVEMENT_SOUTH       = 32
+    BLOCK_MOVEMENT_SOUTH_WEST  = 64
+    BLOCK_MOVEMENT_WEST        = 128
+    BLOCK_MOVEMENT_NORTH_WEST  = 1
+
+    BLOCK_MOVEMENT_OBJECT      = 256
+    BLOCK_MOVEMENT_FLOOR_DECOR = 262144
+    BLOCK_MOVEMENT_FLOOR       = 2097152
+    BLOCK_MOVEMENT_FULL        = 2359552
+
+    DECOR_BLOCKS = True
+    
+    # Internal mask bits for edges
+    W, N, E, S = 1, 2, 4, 8
+    NW, NE, SE, SW = 16, 32, 64, 128
+    FULL = 1 << 20  # internal "center-blocked" marker
+    
+    def mask_from_flags(flags: int) -> int:
+        m = 0
+        if flags & BLOCK_MOVEMENT_NORTH:  m |= N
+        if flags & BLOCK_MOVEMENT_EAST:  m |= E
+        if flags & BLOCK_MOVEMENT_SOUTH:  m |= S
+        if flags & BLOCK_MOVEMENT_WEST:  m |= W
+        if flags & BLOCK_MOVEMENT_NORTH_EAST: m |= NE
+        if flags & BLOCK_MOVEMENT_SOUTH_EAST: m |= SE
+        if flags & BLOCK_MOVEMENT_SOUTH_WEST: m |= SW
+        if flags & BLOCK_MOVEMENT_NORTH_WEST: m |= NW
+        if flags & BLOCK_MOVEMENT_OBJECT:      m |= FULL
+        if flags & BLOCK_MOVEMENT_FLOOR:       m |= FULL
+        if flags & BLOCK_MOVEMENT_FULL:        m |= FULL
+        if DECOR_BLOCKS and (flags & BLOCK_MOVEMENT_FLOOR_DECOR): m |= FULL
+        return m
+    
+    # stash door edge clear requests; we'll merge after the first pass
+    door_clears_here = {}      # (x,y) -> mask_to_clear_bits
+    door_clears_neighbor = {}  # (nx,ny) -> mask_to_clear_bits
+
+    # pass 1: scan tiles and record clears
     for tile_data in collision_data.values():
         x, y = tile_data['x'], tile_data['y']
-        
-        # Check if tile has a door object
-        if tile_data.get('door'):
-            door_info = tile_data.get('door', {})
-            door_id = door_info.get('id')
-            passable = door_info.get('passable', False)
-            
-            # Extract wall orientation data from door object
-            orientation_a = door_info.get('orientationA')
-            orientation_b = door_info.get('orientationB')
-            
-            # Build normalized mask for any tile with orientation
-            if orientation_a is not None or orientation_b is not None:
-                mask = build_orientation_mask({'orientationA': orientation_a, 'orientationB': orientation_b})
-                wall_masks[(x, y)] = mask
-                print(f"[DEBUG] Door tile with orientation at ({x}, {y}): A={orientation_a}, B={orientation_b}, mask={mask}")
-                # Tiles with orientation data are ALWAYS walkable - the orientation determines which directions are blocked
-                walkable.add((x, y))
-                # Add to orientation_blockers so we check wall blocking for this tile
-                orientation_blockers.add((x, y))
-            # Special case: Bank doors and specific walkable walls are always passable
-            elif door_id in [11787, 11786, 23751, 23752, 23750]:
-                walkable.add((x, y))
-            # Only walkable if the door is passable
-            elif passable:
-                walkable.add((x, y))
-            else:
-                blocked.add((x, y))
-        # Check for wall orientation data at top level (legacy support)
-        elif tile_data.get('wall_orientation'):
-            # Wall tiles WITH orientation data are WALKABLE
-            # The orientation determines which directions are blocked
-            walkable.add((x, y))
-            mask = build_orientation_mask(tile_data['wall_orientation'])
-            wall_masks[(x, y)] = mask
-            print(f"[DEBUG] Wall tile with orientation at ({x}, {y}): {tile_data['wall_orientation']}, mask={mask}")
-        # For tiles without doors or wall orientation, use walkable flag
-        elif tile_data.get('walkable', False):
-            walkable.add((x, y))
+        flags = tile_data.get('flags', 0)
+        mask = mask_from_flags(flags)
+
+        door_info = tile_data.get('door')
+        if door_info and isinstance(door_info, dict):
+            # Check if door has 'Open' action (regardless of passable status)
+            door_actions = door_info.get('actions', [])
+            if 'Open' in door_actions:
+                a = int(door_info.get('orientationA') or 0)
+                b = int(door_info.get('orientationB') or 0)
+
+                # RuneLite door orientation mapping:
+                # 1=West, 2=North, 4=East, 8=South, 16=NW, 32=NE, 64=SE, 128=SW
+
+                # bits to clear on THIS tile
+                clear_here = 0
+                if a & 1:   clear_here |= W  # West edge open
+                if a & 2:   clear_here |= N  # North edge open
+                if a & 4:   clear_here |= E  # East edge open
+                if a & 8:   clear_here |= S  # South edge open
+                if b & 16:  clear_here |= NW # NW diagonal
+                if b & 32:  clear_here |= NE # NE diagonal
+                if b & 64:  clear_here |= SE # SE diagonal
+                if b & 128: clear_here |= SW # SW diagonal
+                if clear_here:
+                    door_clears_here[(x, y)] = door_clears_here.get((x, y), 0) | clear_here
+
+                # And clear the OPPOSITE edge on the NEIGHBOR tile
+                def add_neighbor_clear(dx, dy, opp):
+                    if dx == 0 and dy == 0:
+                        return
+                    key = (x + dx, y + dy)
+                    door_clears_neighbor[key] = door_clears_neighbor.get(key, 0) | opp
+
+                # NOTE: y+1 is NORTH in your grid; opposite edges are paired accordingly
+                if a & 1:   add_neighbor_clear(-1, 0, E)  # WEST opens → neighbor EAST
+                if a & 2:   add_neighbor_clear(0, +1, S)  # NORTH opens → neighbor SOUTH
+                if a & 4:   add_neighbor_clear(+1, 0, W)  # EAST opens → neighbor WEST
+                if a & 8:   add_neighbor_clear(0, -1, N)  # SOUTH opens → neighbor NORTH
+                if b & 16:  add_neighbor_clear(-1, +1, SE) # NW diagonal
+                if b & 32:  add_neighbor_clear(+1, +1, SW) # NE diagonal
+                if b & 64:  add_neighbor_clear(+1, -1, NW) # SE diagonal
+                if b & 128: add_neighbor_clear(-1, -1, NE) # SW diagonal
+
+        # store raw masks for now
+        wall_masks[(x, y)] = mask
+
+    # pass 2: apply clears (on both the door tile and its opposite neighbor)
+    for pos, clr in door_clears_here.items():
+        if pos in wall_masks:
+            wall_masks[pos] &= ~clr
+
+    for pos, clr in door_clears_neighbor.items():
+        if pos in wall_masks:
+            wall_masks[pos] &= ~clr
         else:
+            # neighbor exists but had no edges yet — ensure it exists so entry/exit checks see the cleared edge
+            wall_masks[pos] = 0
+
+    # now decide walkable vs blocked:
+    for tile_data in collision_data.values():
+        x, y = tile_data['x'], tile_data['y']
+        flags = tile_data.get('flags', 0)
+        mask = wall_masks.get((x, y), 0)
+
+        if mask & FULL:
             blocked.add((x, y))
-            # Add to orientation_blockers only if non-walkable
-            orientation_blockers.add((x, y))
+        else:
+            walkable.add((x, y))
     
     # Add all tiles that are NOT in collision_data as walkable (NO DATA = walkable)
-    # We need to find the bounds of the collision data first
     if collision_data:
         all_x = [tile['x'] for tile in collision_data.values()]
         all_y = [tile['y'] for tile in collision_data.values()]
         min_x, max_x = min(all_x), max(all_x)
         min_y, max_y = min(all_y), max(all_y)
         
-        # Add all tiles in the bounds that are not in collision_data as walkable
         for x in range(min_x, max_x + 1):
             for y in range(min_y, max_y + 1):
                 if (x, y) not in walkable and (x, y) not in blocked:
                     walkable.add((x, y))
     
-    print(f"[DEBUG] Loaded {len(wall_masks)} wall masks and {len(orientation_blockers)} orientation blockers")
     return walkable, blocked, wall_masks, orientation_blockers
 
 
@@ -161,47 +227,89 @@ def build_orientation_mask(orient) -> int:
 
 
 def exit_blocked_by_mask(dx: int, dy: int, m: int, use_diag_bars: bool = True) -> bool:
-    """Check if movement is blocked by source tile orientation mask."""
-    # cardinals (source side) - wall blocks exit in opposite direction
-    if dx == 0 and dy == -1 and (m & S): return True  # Moving up blocked by south wall
-    if dx == 1 and dy == 0  and (m & W): return True  # Moving right blocked by west wall
-    if dx == 0 and dy == 1  and (m & N): return True  # Moving down blocked by north wall
-    if dx == -1 and dy == 0 and (m & E): return True  # Moving left blocked by east wall
-    if not use_diag_bars: return False
-    # diagonals: only the corner bar (faces handled via two-leg rule)
-    if dx == 1 and dy == -1 and (m & SW): return True  # Moving NE blocked by SW wall
-    if dx == 1 and dy == 1  and (m & NW): return True  # Moving SE blocked by NW wall
-    if dx == -1 and dy == -1 and (m & SE): return True # Moving NW blocked by SE wall
-    if dx == -1 and dy == 1 and (m & NE): return True  # Moving SW blocked by NE wall
+    # Cardinals: only the matching edge blocks
+    if dx == 1 and dy == 0 and (m & E): return True   # E
+    if dx == -1 and dy == 0 and (m & W): return True  # W
+    if dx == 0 and dy == 1 and (m & N): return True   # N
+    if dx == 0 and dy == -1 and (m & S): return True  # S
+
+    if not use_diag_bars:
+        # With diagonal bars disabled, diagonals are blocked only by crossed source cardinals
+        if dx == 1 and dy == 1:   return bool((m & N) or (m & E))  # NE
+        if dx == -1 and dy == 1:  return bool((m & N) or (m & W))  # NW
+        if dx == 1 and dy == -1:  return bool((m & S) or (m & E))  # SE
+        if dx == -1 and dy == -1: return bool((m & S) or (m & W))  # SW
+        return False
+
+    # Diagonals: the diagonal bar itself blocks, OR either crossed source cardinals
+    if dx == 1 and dy == 1:    # NE
+        return bool((m & NE) or (m & N) or (m & E))
+    if dx == -1 and dy == 1:   # NW
+        return bool((m & NW) or (m & N) or (m & W))
+    if dx == 1 and dy == -1:   # SE
+        return bool((m & SE) or (m & S) or (m & E))
+    if dx == -1 and dy == -1:  # SW
+        return bool((m & SW) or (m & S) or (m & W))
+
     return False
 
 
 def entry_blocked_by_mask(dx: int, dy: int, m: int, use_diag_bars: bool = True) -> bool:
-    """Check if movement is blocked by destination tile orientation mask."""
-    # destination side - wall blocks entry from opposite direction
-    if dx == 0 and dy == -1 and (m & N): return True  # Moving up blocked by north wall
-    if dx == 1 and dy == 0  and (m & E): return True  # Moving right blocked by east wall
-    if dx == 0 and dy == 1  and (m & S): return True  # Moving down blocked by south wall
-    if dx == -1 and dy == 0 and (m & W): return True  # Moving left blocked by west wall
-    if not use_diag_bars: return False
-    # opposite corner bar on destination
-    if dx == 1 and dy == -1 and (m & NE): return True  # Moving NE blocked by NE wall
-    if dx == 1 and dy == 1  and (m & SE): return True  # Moving SE blocked by SE wall
-    if dx == -1 and dy == -1 and (m & NW): return True # Moving NW blocked by NW wall
-    if dx == -1 and dy == 1 and (m & SW): return True  # Moving SW blocked by SW wall
+    """
+    Return True if the *destination* tile's mask `m` blocks entry for a move (dx, dy).
+
+    Cardinals: check the edge you're ENTERING FROM (opposite of motion).
+    Diagonals: check the opposite-corner bar *and* the two cardinal edges crossed.
+    """
+
+    # --- Cardinals ---
+    if dx ==  1 and dy ==  0:  # moving East -> enter from West -> dest.W blocks
+        return bool(m & W)
+    if dx == -1 and dy ==  0:  # moving West -> enter from East -> dest.E blocks
+        return bool(m & E)
+    if dx ==  0 and dy ==  1:  # moving North -> enter from South -> dest.S blocks
+        return bool(m & S)
+    if dx ==  0 and dy == -1:  # moving South -> enter from North -> dest.N blocks
+        return bool(m & N)
+
+    # --- Diagonals ---
+    if not use_diag_bars:
+        # If diagonal bars disabled, still block if either cardinal edge blocks
+        if dx == -1 and dy ==  1:  # NW -> cross dest.S + dest.E
+            return bool((m & S) or (m & E))
+        if dx ==  1 and dy ==  1:  # NE -> cross dest.S + dest.W
+            return bool((m & S) or (m & W))
+        if dx == -1 and dy == -1:  # SW -> cross dest.N + dest.E
+            return bool((m & N) or (m & E))
+        if dx ==  1 and dy == -1:  # SE -> cross dest.N + dest.W
+            return bool((m & N) or (m & W))
+        return False
+
+    # With diagonal bars: check the correct diagonal corner + both cardinals
+    if dx == -1 and dy ==  1:  # NW
+        return bool((m & SE) or (m & S) or (m & E))
+    if dx ==  1 and dy ==  1:  # NE
+        return bool((m & SW) or (m & S) or (m & W))
+    if dx == -1 and dy == -1:  # SW
+        return bool((m & NE) or (m & N) or (m & E))
+    if dx ==  1 and dy == -1:  # SE
+        return bool((m & NW) or (m & N) or (m & W))
+
     return False
 
 
 def is_movement_blocked(a, b, wall_masks, orientation_blockers, use_diag_bars: bool = True) -> bool:
-    """Check if movement from a to b is blocked by wall orientation (gated by blocker set)."""
+    """Check if movement from a to b is blocked by wall orientation."""
     dx, dy = b[0] - a[0], b[1] - a[1]
     
     # Check source tile (exit blocking)
-    if a in orientation_blockers and exit_blocked_by_mask(dx, dy, wall_masks.get(a, 0), use_diag_bars):
+    ma = wall_masks.get(a, 0)
+    if ma and exit_blocked_by_mask(dx, dy, ma, use_diag_bars):
         return True
-    
+
     # Check destination tile (entry blocking)
-    if b in orientation_blockers and entry_blocked_by_mask(dx, dy, wall_masks.get(b, 0), use_diag_bars):
+    mb = wall_masks.get(b, 0)
+    if mb and entry_blocked_by_mask(dx, dy, mb, use_diag_bars):
         return True
     
     return False
@@ -211,30 +319,31 @@ def get_neighbors(pos, walkable_tiles, wall_masks, orientation_blockers):
     """Get walkable neighbors of a position, respecting wall orientation blocking."""
     x, y = pos
     out = []
-    
+
     for dx in (-1, 0, 1):
         for dy in (-1, 0, 1):
-            if dx == 0 and dy == 0: 
+            if dx == 0 and dy == 0:
                 continue
+
             nxt = (x + dx, y + dy)
             if nxt not in walkable_tiles:
                 continue
             if is_movement_blocked(pos, nxt, wall_masks, orientation_blockers):
                 continue
+
             if dx != 0 and dy != 0:
-                # Diagonal move: require both orthogonal legs to be possible
-                a1 = (x + dx, y)      # horizontal leg
-                a2 = (x, y + dy)      # vertical leg
-                if (a1 in walkable_tiles and a2 in walkable_tiles and
-                    not is_movement_blocked(pos, a1, wall_masks, orientation_blockers) and
-                    not is_movement_blocked(a1, nxt, wall_masks, orientation_blockers) and
-                    not is_movement_blocked(pos, a2, wall_masks, orientation_blockers) and
-                    not is_movement_blocked(a2, nxt, wall_masks, orientation_blockers)):
-                    out.append(nxt)
-            else:
-                # Orthogonal move allowed
-                out.append(nxt)
-    
+                a = (x + dx, y)
+                b = (x, y + dy)
+                if (a not in walkable_tiles) or (b not in walkable_tiles):
+                    continue
+                if (is_movement_blocked(pos, a, wall_masks, orientation_blockers) or
+                    is_movement_blocked(pos, b, wall_masks, orientation_blockers) or
+                    is_movement_blocked(a, nxt, wall_masks, orientation_blockers) or
+                    is_movement_blocked(b, nxt, wall_masks, orientation_blockers)):
+                    continue
+
+            out.append(nxt)
+
     return out
 
 
@@ -259,140 +368,100 @@ def find_closest_walkable_tile(goal, walkable_tiles, search_radius=50):
     return None
 
 
-def astar_pathfinding(start, goal, walkable_tiles, max_iterations=50000):
-    """Find path using A* algorithm with wall orientation support."""
+def astar_pathfinding(start, goal, walkable_tiles, max_iterations=100000):
+    """Find path using A* algorithm with wall orientation support and partial fallback."""
     print(f"[DEBUG] Finding path from {start} to {goal}")
     print(f"[DEBUG] Walkable tiles: {len(walkable_tiles)}")
-    
-    # Always load wall orientations automatically, filtered by start/goal coordinates
-    print(f"[DEBUG] Loading wall orientations automatically...")
+
     collision_data = load_collision_data(start, goal)
     if collision_data:
         _, _, wall_masks, orientation_blockers = get_walkable_tiles(collision_data)
-        print(f"[DEBUG] Loaded {len(wall_masks)} wall masks and {len(orientation_blockers)} orientation blockers")
+        # Loaded wall masks and orientation blockers
     else:
         wall_masks = {}
         orientation_blockers = set()
         print(f"[DEBUG] Could not load collision data, using empty wall data")
-    
+
     if start not in walkable_tiles:
         print(f"ERROR: Start position {start} is not walkable")
         return None
-    
+
     if goal not in walkable_tiles:
-        print(f"[DEBUG] Goal position {goal} is not walkable, finding closest walkable tile...")
-        closest_goal = find_closest_walkable_tile(goal, walkable_tiles)
-        if closest_goal is None:
-            print(f"ERROR: No walkable tile found near goal {goal}")
+        print(f"[DEBUG] Goal {goal} not walkable; finding closest walkable...")
+        cg = find_closest_walkable_tile(goal, walkable_tiles)
+        if not cg:
+            print(f"ERROR: No walkable tile near goal {goal}")
             return None
-        goal = closest_goal
+        goal = cg
         print(f"[DEBUG] Using closest walkable goal: {goal}")
-    
-    # Early exit if start and goal are very close
-    distance = abs(start[0] - goal[0]) + abs(start[1] - goal[1])
-    if distance <= 2:
+    else:
+        print(f"[DEBUG] Goal position {goal} is walkable")
+
+    if abs(start[0] - goal[0]) + abs(start[1] - goal[1]) <= 2:
         return [start, goal]
-    
-    # Priority queue: (f_score, tie_breaker, position)
-    # Use deterministic tie-breaking for path consistency
-    tie_breaker = 0
-    open_set = [(0, tie_breaker, start)]
+
+    import heapq
+    open_set = []
+    heapq.heappush(open_set, (heuristic(start, goal), 0, start))
     came_from = {}
-    g_score = {start: 0}
-    f_score = {start: heuristic(start, goal)}
+    g_score = {start: 0.0}
     visited = set()
-    in_open_set = {start}
-    
+    tie = 0
+
+    best_node = start
+    best_h = heuristic(start, goal)
+
     iterations = 0
-    max_queue_size = 1000  # Limit queue size for performance
-    
-    # Removed direction consistency function - using pure A* now
-    
     while open_set and iterations < max_iterations:
         iterations += 1
-        if iterations % 2000 == 0:  # Less frequent debug output
+        if iterations % 2000 == 0:
             print(f"[DEBUG] Iteration {iterations}, visited {len(visited)} tiles, queue size {len(open_set)}")
-            
-    # Don't trim the heap - this breaks A* optimality
-    # if len(open_set) > max_queue_size:
-    #     # Keep only the best candidates
-    #     open_set = open_set[:max_queue_size]
-    #     heapq.heapify(open_set)
-            
-        current = heapq.heappop(open_set)[2]
-        in_open_set.discard(current)
-        
+
+        _, _, current = heapq.heappop(open_set)
         if current in visited:
             continue
         visited.add(current)
-        
+
+        h_cur = heuristic(current, goal)
+        if h_cur < best_h:
+            best_h = h_cur
+            best_node = current
+
         if current == goal:
-            # Reconstruct path
-            path = []
+            path = [current]
             while current in came_from:
-                path.append(current)
                 current = came_from[current]
-            path.append(start)
+                path.append(current)
             path.reverse()
             print(f"[DEBUG] Path found with {len(path)} waypoints after {iterations} iterations")
+            print(f"[DEBUG] Path waypoints: {path}")
             return path
-        
-        # Check if we're close enough to goal (within 2 tiles)
-        if abs(current[0] - goal[0]) + abs(current[1] - goal[1]) <= 2:
-            # Direct path to goal
-            path = []
-            temp_current = current
-            while temp_current in came_from:
-                path.append(temp_current)
-                temp_current = came_from[temp_current]
-            path.append(start)
-            path.reverse()
-            path.append(goal)
-            print(f"[DEBUG] Early path found with {len(path)} waypoints after {iterations} iterations")
-            return path
-        
-        for neighbor in get_neighbors(current, walkable_tiles, wall_masks, orientation_blockers):
-            if neighbor in visited:
+
+        for nbr in get_neighbors(current, walkable_tiles, wall_masks, orientation_blockers):
+            if nbr in visited:
                 continue
-            
-            # Calculate cost (diagonal movement costs more)
-            dx = abs(neighbor[0] - current[0])
-            dy = abs(neighbor[1] - current[1])
-            cost = 1.414 if dx == 1 and dy == 1 else 1.0
-                
-            tentative_g_score = g_score[current] + cost
-            
-            if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
-                came_from[neighbor] = current
-                g_score[neighbor] = tentative_g_score
-                
-                # Use pure A*: f = g + h (no direction bonus)
-                f_score[neighbor] = tentative_g_score + heuristic(neighbor, goal)
-                
-                # Always push improved nodes (lazy deletion of stale entries)
-                tie_breaker += 1
-                # Use deterministic tie-breaking based on position for consistency
-                position_tie_breaker = neighbor[0] * 1000 + neighbor[1]
-                heapq.heappush(open_set, (f_score[neighbor], position_tie_breaker, neighbor))
-                in_open_set.add(neighbor)
-    
-    if iterations >= max_iterations:
-        print(f"WARNING: Pathfinding stopped after {max_iterations} iterations")
-        # Try to return a partial path to the closest point we found
-        if visited:
-            closest_to_goal = min(visited, key=lambda pos: abs(pos[0] - goal[0]) + abs(pos[1] - goal[1]))
-            path = []
-            current = closest_to_goal
-            while current in came_from:
-                path.append(current)
-                current = came_from[current]
-            path.append(start)
-            path.reverse()
-            print(f"[DEBUG] Partial path found with {len(path)} waypoints")
-            return path
-    
-    print(f"ERROR: No path found after {iterations} iterations")
-    print(f"Visited {len(visited)} tiles")
+            dx = abs(nbr[0] - current[0])
+            dy = abs(nbr[1] - current[1])
+            step_cost = 1.414 if dx and dy else 1.0
+            tentative = g_score[current] + step_cost
+            if tentative < g_score.get(nbr, float('inf')):
+                came_from[nbr] = current
+                g_score[nbr] = tentative
+                tie += 1
+                f = tentative + heuristic(nbr, goal)
+                heapq.heappush(open_set, (f, tie, nbr))
+
+    print(f"ERROR: No path found after {iterations} iterations (visited {len(visited)} tiles)")
+    if best_node is not None and best_node != start:
+        print(f"[DEBUG] Returning partial path to closest discovered node {best_node} (h={best_h:.3f})")
+        path = [best_node]
+        cur = best_node
+        while cur in came_from:
+            cur = came_from[cur]
+            path.append(cur)
+        path.reverse()
+        return path
+
     return None
 
 
@@ -411,34 +480,41 @@ def find_closest_walkable(pos, walkable_tiles, max_distance=50):
     return best_pos
 
 
-def draw_wall_lines(draw, x, y, tile_size, orientation_a, orientation_b):
-    """Draw wall lines based on orientation."""
-    # Wall orientation values:
-    # 1 = West, 2 = North, 4 = East, 8 = South
-    # 16 = North-west, 32 = North-east, 64 = South-east, 128 = South-west
-    
-    line_color = (255, 255, 255)  # White for wall lines
+def draw_wall_lines(draw, x, y, tile_size, flags, orientation_b, is_real_door=False):
+    """Draw wall lines based on movement blocking flags."""
+    if is_real_door:
+        line_color = (0, 255, 255)  # Cyan for real door lines
+    else:
+        line_color = (255, 255, 255)  # White for solid wall lines
     line_width = 2  # Thinner lines for better visibility
     
-    # Draw orientation A
-    if orientation_a & 1:  # West
-        draw.line([x, y, x, y + tile_size], fill=line_color, width=line_width)
-    if orientation_a & 2:  # North
+    # Draw lines based on movement blocking flags
+    # BLOCK_MOVEMENT_NORTH (2) - draw line on NORTH edge
+    if flags & 2:  # North
         draw.line([x, y, x + tile_size, y], fill=line_color, width=line_width)
-    if orientation_a & 4:  # East
+    # BLOCK_MOVEMENT_EAST (8) - draw line on EAST edge  
+    if flags & 8:  # East
         draw.line([x + tile_size, y, x + tile_size, y + tile_size], fill=line_color, width=line_width)
-    if orientation_a & 8:  # South
+    # BLOCK_MOVEMENT_SOUTH (32) - draw line on SOUTH edge
+    if flags & 32:  # South
         draw.line([x, y + tile_size, x + tile_size, y + tile_size], fill=line_color, width=line_width)
+    # BLOCK_MOVEMENT_WEST (128) - draw line on WEST edge
+    if flags & 128:  # West
+        draw.line([x, y, x, y + tile_size], fill=line_color, width=line_width)
     
-    # Draw orientation B
-    if orientation_b & 1:  # West
-        draw.line([x, y, x, y + tile_size], fill=line_color, width=line_width)
-    if orientation_b & 2:  # North
-        draw.line([x, y, x + tile_size, y], fill=line_color, width=line_width)
-    if orientation_b & 4:  # East
-        draw.line([x + tile_size, y, x + tile_size, y + tile_size], fill=line_color, width=line_width)
-    if orientation_b & 8:  # South
-        draw.line([x, y + tile_size, x + tile_size, y + tile_size], fill=line_color, width=line_width)
+    # Draw diagonal lines for orientation B (using flags directly)
+    # BLOCK_MOVEMENT_NORTH_EAST (4) - draw diagonal from NW to SE
+    if flags & 4:  # North-east
+        draw.line([x + tile_size, y, x, y + tile_size], fill=line_color, width=line_width)
+    # BLOCK_MOVEMENT_SOUTH_EAST (16) - draw diagonal from SW to NE
+    if flags & 16:  # South-east
+        draw.line([x, y, x + tile_size, y + tile_size], fill=line_color, width=line_width)
+    # BLOCK_MOVEMENT_SOUTH_WEST (64) - draw diagonal from SE to NW
+    if flags & 64:  # South-west
+        draw.line([x + tile_size, y + tile_size, x, y], fill=line_color, width=line_width)
+    # BLOCK_MOVEMENT_NORTH_WEST (1) - draw diagonal from NE to SW
+    if flags & 1:  # North-west
+        draw.line([x, y + tile_size, x + tile_size, y], fill=line_color, width=line_width)
 
 
 def world_to_map_coords(world_x, world_y, min_x, min_y, max_y, tile_size=16, padding=20):
@@ -453,38 +529,30 @@ def world_to_map_coords(world_x, world_y, min_x, min_y, max_y, tile_size=16, pad
     return int(map_x), int(map_y)
 
 
-def draw_path_on_map(image_path, path, collision_data, output_path, start_pos=None, goal_pos=None):
-    """Generate a filtered collision map image and draw the path on it."""
-    print(f"[DEBUG] Generating filtered collision map from collision data")
+def world_to_map_coords_center(world_x, world_y, min_x, min_y, max_y, tile_size=16, padding=20):
+    """Convert world coordinates to map pixel coordinates at tile center."""
+    # X coordinate: simple offset + half tile size for center
+    map_x = padding + (world_x - min_x) * tile_size + (tile_size // 2)
     
-    # Get map bounds from collision data (this is already filtered)
-    all_x = [tile['x'] for tile in collision_data.values()]
-    all_y = [tile['y'] for tile in collision_data.values()]
-    min_x, max_x = min(all_x), max(all_x)
-    min_y, max_y = min(all_y), max(all_y)
+    # Y coordinate: inverted (like in visual_collision_map.py) + half tile size for center
+    map_height = (max_y - min_y + 1) * tile_size
+    map_y = padding + map_height - ((world_y - min_y) * tile_size) - tile_size + (tile_size // 2)
     
-    width_tiles = max_x - min_x + 1
-    height_tiles = max_y - min_y + 1
+    return int(map_x), int(map_y)
+
+
+def draw_path_on_map_simple(image_path, path, collision_data, output_path, start_pos=None, goal_pos=None):
+    """Load existing collision map and draw the path on it."""
+    print(f"[DEBUG] Loading existing collision map: {image_path}")
     
-    print(f"[DEBUG] Filtered map bounds: ({min_x}, {min_y}) to ({max_x}, {max_y})")
-    print(f"[DEBUG] Filtered map size: {width_tiles}x{height_tiles} tiles")
-    
-    # Create a new image for the filtered area
-    tile_size = 16
-    map_width = width_tiles * tile_size
-    map_height = height_tiles * tile_size
-    
-    # Add padding and legend space
-    padding = 20
-    legend_width = 200
-    img_width = map_width + legend_width + (padding * 3)
-    img_height = max(map_height, 300) + (padding * 2)
-    
-    print(f"[DEBUG] Creating image: {img_width}x{img_height} pixels")
-    
-    # Create the image
-    img = Image.new('RGB', (img_width, img_height), color=(0, 0, 0))  # Black background
-    draw = ImageDraw.Draw(img)
+    # Load the existing collision map image
+    try:
+        img = Image.open(image_path)
+        draw = ImageDraw.Draw(img)
+        print(f"[DEBUG] Loaded collision map: {img.size[0]}x{img.size[1]} pixels")
+    except Exception as e:
+        print(f"[ERROR] Could not load collision map: {e}")
+        return False
     
     # Load fonts
     try:
@@ -496,12 +564,26 @@ def draw_path_on_map(image_path, path, collision_data, output_path, start_pos=No
         legend_font = ImageFont.load_default()
         title_font = ImageFont.load_default()
     
+    # Get map bounds from collision data
+    all_x = [tile['x'] for tile in collision_data.values()]
+    all_y = [tile['y'] for tile in collision_data.values()]
+    min_x, max_x = min(all_x), max(all_x)
+    min_y, max_y = min(all_y), max(all_y)
+    
+    # Map parameters (matching visual_collision_map.py)
+    tile_size = 16
+    padding = 20
+    width_tiles = max_x - min_x + 1
+    height_tiles = max_y - min_y + 1
+    map_width = width_tiles * tile_size
+    map_height = height_tiles * tile_size
+    
     # Draw collision tiles
     map_start_x = padding
     map_start_y = padding
     
     # Collect wall tiles for orientation lines
-    wall_tiles = []
+    wall_tiles = []  # (draw_x, draw_y, tile_size, orientation_a, orientation_b, is_real_door)
     
     tiles_drawn = 0
     for key, tile_data in collision_data.items():
@@ -511,43 +593,91 @@ def draw_path_on_map(image_path, path, collision_data, output_path, start_pos=No
         draw_x = map_start_x + (x - min_x) * tile_size
         draw_y = map_start_y + map_height - ((y - min_y) * tile_size) - tile_size  # Invert Y
         
-        # Determine color and symbol
+        # Get flags and compute mask
+        flags = tile_data.get('flags', 0)
+        is_door = tile_data.get('door', False)
+        is_ladder_up = tile_data.get('ladderUp', False)
+        is_ladder_down = tile_data.get('ladderDown', False)
+        
+        # RuneLite CollisionDataFlag constants
+        BLOCK_MOVEMENT_NORTH       = 2
+        BLOCK_MOVEMENT_NORTH_EAST  = 4
+        BLOCK_MOVEMENT_EAST        = 8
+        BLOCK_MOVEMENT_SOUTH_EAST  = 16
+        BLOCK_MOVEMENT_SOUTH       = 32
+        BLOCK_MOVEMENT_SOUTH_WEST  = 64
+        BLOCK_MOVEMENT_WEST        = 128
+        BLOCK_MOVEMENT_NORTH_WEST  = 1
+
+        BLOCK_MOVEMENT_OBJECT      = 256
+        BLOCK_MOVEMENT_FLOOR_DECOR = 262144
+        BLOCK_MOVEMENT_FLOOR       = 2097152
+        BLOCK_MOVEMENT_FULL        = 2359552
+
+        DECOR_BLOCKS = True
+        
+        # Internal mask bits for edges
+        W, N, E, S = 1, 2, 4, 8
+        NW, NE, SE, SW = 16, 32, 64, 128
+        FULL = 1 << 20  # internal "center-blocked" marker
+        
+        def mask_from_flags(flags: int) -> int:
+            m = 0
+            if flags & BLOCK_MOVEMENT_NORTH:  m |= N
+            if flags & BLOCK_MOVEMENT_EAST:  m |= E
+            if flags & BLOCK_MOVEMENT_SOUTH:  m |= S
+            if flags & BLOCK_MOVEMENT_WEST:  m |= W
+            if flags & BLOCK_MOVEMENT_NORTH_EAST: m |= NE
+            if flags & BLOCK_MOVEMENT_SOUTH_EAST: m |= SE
+            if flags & BLOCK_MOVEMENT_SOUTH_WEST: m |= SW
+            if flags & BLOCK_MOVEMENT_NORTH_WEST: m |= NW
+            if flags & BLOCK_MOVEMENT_OBJECT:      m |= FULL
+            if flags & BLOCK_MOVEMENT_FLOOR:       m |= FULL
+            if flags & BLOCK_MOVEMENT_FULL:        m |= FULL
+            if DECOR_BLOCKS and (flags & BLOCK_MOVEMENT_FLOOR_DECOR): m |= FULL
+            return m
+        
+        mask = mask_from_flags(flags)
+        
+        # Determine color and symbol based on flags
         color = (0, 0, 0)  # Default black
         symbol = ""
         
-        if tile_data.get('door'):
-            # Handle door/wall tiles
-            door_info = tile_data.get('door', {})
-            door_id = door_info.get('id')
-            orientation_a = door_info.get('orientationA', 0)
-            orientation_b = door_info.get('orientationB', 0)
-            passable = door_info.get('passable', False)
-            
-            # Special case: Bank doors and specific walkable walls are always walkable
-            if door_id in [11787, 11786, 23751, 23752, 23750]:
-                color = (0, 255, 0)  # Green background
-                symbol = "P"  # P for passable
-            # Check if this wall has orientation data (standable)
-            elif orientation_a > 0 or orientation_b > 0:
-                color = (0, 0, 0)  # Black background
-                symbol = "W"
-                # Store for later drawing of orientation lines
-                wall_tiles.append((draw_x, draw_y, tile_size, orientation_a, orientation_b))
+        # Check for door/ladder markers first (these take priority)
+        door_info = tile_data.get('door')
+        is_real_door = door_info and isinstance(door_info, dict) and 'orientationA' in door_info
+        if is_real_door:
+            color = (0, 0, 0)  # Black background for doors
+            symbol = "D"  # D for door
+            # Store for wall line drawing if has orientation
+            if mask != 0:
+                wall_tiles.append((draw_x, draw_y, tile_size, flags, 0, True))  # True = is_real_door
+        elif is_ladder_up:
+            color = (0, 0, 0)  # Black background
+            symbol = "U"  # U for ladder up
+        elif is_ladder_down:
+            color = (0, 0, 0)  # Black background
+            symbol = "↓"  # ↓ for ladder down
+        # Check for full tile blocked (after doors/ladders)
+        elif mask & FULL:
+            # Check if it's an object vs solid block
+            if (flags & BLOCK_MOVEMENT_OBJECT) == BLOCK_MOVEMENT_OBJECT:
+                color = (0, 0, 255)  # Blue background for objects
+                symbol = "O"  # O for object
             else:
-                color = (128, 128, 128)  # Gray background
-                symbol = "W"
-        elif tile_data.get('solid', False):
-            color = (255, 0, 0)    # Red
-            symbol = "#"
-        elif tile_data.get('object', False):
-            color = (0, 0, 255)    # Blue
-            symbol = "O"
-        elif tile_data.get('walkable', False):
-            color = (0, 255, 0)    # Green
-            symbol = "."
+                color = (255, 0, 0)  # Red background for solid blocks
+                symbol = "#"  # # for solid
+        # Check for tiles with wall orientation data (but not full blocks)
+        elif mask != 0:
+            # Tiles with wall orientation are walkable but block movement
+            color = (0, 0, 0)  # Black background
+            symbol = "W"  # W for wall
+            # Store for wall line drawing
+            wall_tiles.append((draw_x, draw_y, tile_size, flags, 0, False))  # False = not real door
+        # Tiles with no flags are walkable
         else:
-            color = (0, 0, 0)  # Black for no data
-            symbol = "?"
+            color = (0, 0, 0)  # Black background
+            symbol = "."  # . for walkable
         
         # Draw tile background
         draw.rectangle([draw_x, draw_y, draw_x + tile_size, draw_y + tile_size], fill=color)
@@ -560,8 +690,8 @@ def draw_path_on_map(image_path, path, collision_data, output_path, start_pos=No
     
     # Draw wall orientation lines
     print(f"[DEBUG] Drawing {len(wall_tiles)} wall orientation lines...")
-    for draw_x, draw_y, tile_size, orientation_a, orientation_b in wall_tiles:
-        draw_wall_lines(draw, draw_x, draw_y, tile_size, orientation_a, orientation_b)
+    for draw_x, draw_y, tile_size, flags, orientation_b, is_real_door in wall_tiles:
+        draw_wall_lines(draw, draw_x, draw_y, tile_size, flags, orientation_b, is_real_door)
     
     # Draw border around map
     draw.rectangle([map_start_x - 2, map_start_y - 2, 
@@ -585,7 +715,8 @@ def draw_path_on_map(image_path, path, collision_data, output_path, start_pos=No
     legend_y = add_legend_item("Walkable (.)", (0, 255, 0), legend_y)
     legend_y = add_legend_item("Solid (#)", (255, 0, 0), legend_y)
     legend_y = add_legend_item("Object (O)", (0, 0, 255), legend_y)
-    legend_y = add_legend_item("Wall (W) - Standable", (0, 0, 0), legend_y)
+    legend_y = add_legend_item("Door (D) - Cyan lines", (0, 255, 255), legend_y)
+    legend_y = add_legend_item("Wall (W) - White lines", (255, 255, 255), legend_y)
     legend_y = add_legend_item("Wall (W) - Non-standable", (128, 128, 128), legend_y)
     legend_y = add_legend_item("Unknown (?)", (128, 128, 128), legend_y)
     legend_y = add_legend_item("No Data", (0, 0, 0), legend_y)
@@ -617,15 +748,15 @@ def draw_path_on_map(image_path, path, collision_data, output_path, start_pos=No
     else:
         goal_world = (3164, 3487)  # Fallback to GE
     
-    start_pixel = world_to_map_coords(start_world[0], start_world[1], min_x, min_y, max_y)
-    goal_pixel = world_to_map_coords(goal_world[0], goal_world[1], min_x, min_y, max_y)
+    start_pixel = world_to_map_coords_center(start_world[0], start_world[1], min_x, min_y, max_y)
+    goal_pixel = world_to_map_coords_center(goal_world[0], goal_world[1], min_x, min_y, max_y)
     
     print(f"[DEBUG] Start: World {start_world} -> Pixel {start_pixel}")
     print(f"[DEBUG] Goal: World {goal_world} -> Pixel {goal_pixel}")
     
     # Draw straight line first so you can see the actual start/end points
     print(f"[DEBUG] Drawing straight line from {start_pixel} to {goal_pixel}")
-    draw.line([start_pixel, goal_pixel], fill=(255, 255, 0), width=4)  # Yellow straight line
+    draw.line([start_pixel, goal_pixel], fill=(255, 255, 0), width=3)  # Yellow straight line
     
     # Draw start and end points
     print(f"[DEBUG] Drawing start point at {start_pixel}")
@@ -640,10 +771,10 @@ def draw_path_on_map(image_path, path, collision_data, output_path, start_pos=No
     if path and len(path) > 1:
         print(f"[DEBUG] Drawing path with {len(path)} waypoints")
         
-        # Convert path to map coordinates
+        # Convert path to map coordinates (using tile centers)
         map_path = []
         for world_x, world_y in path:
-            map_x, map_y = world_to_map_coords(world_x, world_y, min_x, min_y, max_y)
+            map_x, map_y = world_to_map_coords_center(world_x, world_y, min_x, min_y, max_y)
             map_path.append((map_x, map_y))
         
         # Draw path lines
@@ -654,10 +785,27 @@ def draw_path_on_map(image_path, path, collision_data, output_path, start_pos=No
             # Check if coordinates are within image bounds
             if (0 <= start[0] < img.size[0] and 0 <= start[1] < img.size[1] and
                 0 <= end[0] < img.size[0] and 0 <= end[1] < img.size[1]):
-                draw.line([start, end], fill=(0, 255, 255), width=6)  # Cyan path
+                draw.line([start, end], fill=(0, 255, 255), width=4)  # Cyan path (thicker for visibility)
             else:
                 print(f"[WARNING] Line coordinates out of bounds! Image size: {img.size}")
-                draw.line([start, end], fill=(0, 255, 255), width=6)
+                draw.line([start, end], fill=(0, 255, 255), width=4)
+        
+        # Draw small dots at each waypoint to show which tiles the path goes through
+        for i, waypoint in enumerate(map_path):
+            if (0 <= waypoint[0] < img.size[0] and 0 <= waypoint[1] < img.size[1]):
+                # Different colors for start, end, and middle waypoints
+                if i == 0:
+                    # Start waypoint - green dot
+                    draw.ellipse([waypoint[0]-3, waypoint[1]-3, waypoint[0]+3, waypoint[1]+3], 
+                               fill=(0, 255, 0), outline=(255, 255, 255), width=1)
+                elif i == len(map_path) - 1:
+                    # End waypoint - red dot
+                    draw.ellipse([waypoint[0]-3, waypoint[1]-3, waypoint[0]+3, waypoint[1]+3], 
+                               fill=(255, 0, 0), outline=(255, 255, 255), width=1)
+                else:
+                    # Middle waypoints - white dots
+                    draw.ellipse([waypoint[0]-2, waypoint[1]-2, waypoint[0]+2, waypoint[1]+2], 
+                               fill=(255, 255, 255), outline=(0, 0, 0), width=1)
         
         print(f"[DEBUG] Path drawn from {start_pixel} to {goal_pixel}")
     else:
@@ -678,64 +826,162 @@ def draw_path_on_map(image_path, path, collision_data, output_path, start_pos=No
     return True
 
 
+def draw_path_on_map(image_path, path, collision_data, output_path, start_pos=None, goal_pos=None):
+    """Load existing collision map and draw the path on it."""
+    print(f"[DEBUG] Loading existing collision map: {image_path}")
+    
+    # Load the existing collision map image
+    try:
+        img = Image.open(image_path)
+        draw = ImageDraw.Draw(img)
+        print(f"[DEBUG] Loaded collision map: {img.size[0]}x{img.size[1]} pixels")
+    except Exception as e:
+        print(f"[ERROR] Could not load collision map: {e}")
+        return False
+    
+    # Get map bounds from collision data to convert world coordinates to pixel coordinates
+    all_x = [tile['x'] for tile in collision_data.values()]
+    all_y = [tile['y'] for tile in collision_data.values()]
+    min_x, max_x = min(all_x), max(all_x)
+    min_y, max_y = min(all_y), max(all_y)
+    
+    # Map parameters (matching visual_collision_map.py)
+    tile_size = 16
+    padding = 20
+    
+    # Use provided positions or fallback to path start/end
+    if start_pos:
+        start_world = start_pos
+    elif path and len(path) > 0:
+        start_world = path[0]
+    else:
+        start_world = (3236, 3227)  # Fallback to Lumbridge
+    
+    if goal_pos:
+        goal_world = goal_pos
+    elif path and len(path) > 0:
+        goal_world = path[-1]
+    else:
+        goal_world = (3164, 3487)  # Fallback to GE
+    
+    # Convert world coordinates to pixel coordinates
+    start_pixel = world_to_map_coords_center(start_world[0], start_world[1], min_x, min_y, max_y, tile_size, padding)
+    goal_pixel = world_to_map_coords_center(goal_world[0], goal_world[1], min_x, min_y, max_y, tile_size, padding)
+    
+    print(f"[DEBUG] Start: World {start_world} -> Pixel {start_pixel}")
+    print(f"[DEBUG] Goal: World {goal_world} -> Pixel {goal_pixel}")
+    
+    # Draw straight line first so you can see the actual start/end points
+    print(f"[DEBUG] Drawing straight line from {start_pixel} to {goal_pixel}")
+    draw.line([start_pixel, goal_pixel], fill=(255, 255, 0), width=3)  # Yellow straight line
+    
+    # Draw start and end points
+    print(f"[DEBUG] Drawing start point at {start_pixel}")
+    draw.ellipse([start_pixel[0]-10, start_pixel[1]-10, start_pixel[0]+10, start_pixel[1]+10], 
+                fill=(0, 255, 0), outline=(255, 255, 255), width=3)  # Green start
+    
+    print(f"[DEBUG] Drawing end point at {goal_pixel}")
+    draw.ellipse([goal_pixel[0]-10, goal_pixel[1]-10, goal_pixel[0]+10, goal_pixel[1]+10], 
+                fill=(255, 0, 0), outline=(255, 255, 255), width=3)  # Red end
+    
+    # Draw path (if we have one)
+    if path and len(path) > 1:
+        print(f"[DEBUG] Drawing path with {len(path)} waypoints")
+        
+        # Convert path to pixel coordinates
+        path_pixels = []
+        for world_pos in path:
+            pixel_pos = world_to_map_coords_center(world_pos[0], world_pos[1], min_x, min_y, max_y, tile_size, padding)
+            path_pixels.append(pixel_pos)
+        
+        # Draw path lines
+        for i in range(len(path_pixels) - 1):
+            start_pixel = path_pixels[i]
+            end_pixel = path_pixels[i + 1]
+            draw.line([start_pixel, end_pixel], fill=(255, 0, 255), width=2)  # Magenta path line
+    
+    # Save the image
+    img.save(output_path)
+    print(f"[SUCCESS] Path drawn on collision map saved to: {output_path}")
+    
+    # Verify the file was created
+    if Path(output_path).exists():
+        file_size = Path(output_path).stat().st_size
+        print(f"[DEBUG] Image file created successfully, size: {file_size:,} bytes")
+    else:
+        print(f"[ERROR] Image file was not created!")
+    
+    return True
+
+
 def simple_greedy_path(start, goal, walkable_tiles, wall_masks, orientation_blockers):
     """Simple greedy pathfinding that tries to get as close as possible to goal."""
     print(f"[DEBUG] Creating greedy path from {start} to {goal}")
-    
+
     path = [start]
     current = start
-    visited = set([start])
-    
-    max_steps = 5000  # Much higher limit
+
+    max_steps = 5000
     step = 0
-    
+
+    stagnant_count = 0
+    last_pos = current
+
     while current != goal and step < max_steps:
         step += 1
-        
-        # Find the best next step towards goal
+
         best_next = None
         best_distance = float('inf')
-        
-        # Try all 8 directions
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
+
+        # Primary pass: 8-directional greedy step
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
                 if dx == 0 and dy == 0:
                     continue
-                    
-                next_pos = (current[0] + dx, current[1] + dy)
-                
-                # Check if it's walkable, not visited, and not blocked by walls
-                if (next_pos in walkable_tiles and next_pos not in visited and
-                    not is_movement_blocked(current, next_pos, wall_masks, orientation_blockers)):
-                    # Calculate distance to goal
-                    distance = ((goal[0] - next_pos[0])**2 + (goal[1] - next_pos[1])**2)**0.5
-                    
-                    if distance < best_distance:
-                        best_distance = distance
-                        best_next = next_pos
-        
+                nxt = (current[0] + dx, current[1] + dy)
+                if (nxt in walkable_tiles and
+                    not is_movement_blocked(current, nxt, wall_masks, orientation_blockers)):
+                    d = ((goal[0] - nxt[0])**2 + (goal[1] - nxt[1])**2) ** 0.5
+                    if d < best_distance:
+                        best_distance = d
+                        best_next = nxt
+
+        # Fallback: try a small neighborhood, but NEVER pick current
         if best_next is None:
-            # If no direct neighbors, try to find any nearby walkable tile
-            print(f"[WARNING] No direct neighbors at {current}, searching for nearby tiles...")
-            min_dist = float('inf')
-            for tile in walkable_tiles:
-                if tile not in visited and not is_movement_blocked(current, tile, wall_masks, orientation_blockers):
-                    dist = ((current[0] - tile[0])**2 + (current[1] - tile[1])**2)**0.5
-                    if dist < min_dist and dist < 10:  # Within 10 tiles
-                        min_dist = dist
-                        best_next = tile
-            
-            if best_next is None:
-                print(f"[ERROR] No nearby walkable tiles found at {current}")
-                break
-            
+            near_best = None
+            near_best_d = float('inf')
+            cx, cy = current
+            for x in range(cx - 3, cx + 4):
+                for y in range(cy - 3, cy + 4):
+                    if (x, y) == current:
+                        continue
+                    if (x, y) in walkable_tiles and not is_movement_blocked(current, (x, y), wall_masks, orientation_blockers):
+                        d = ((goal[0] - x)**2 + (goal[1] - y)**2) ** 0.5
+                        if d < near_best_d:
+                            near_best_d = d
+                            near_best = (x, y)
+            best_next = near_best
+
+        if best_next is None or best_next == current:
+            print(f"[ERROR] Greedy stuck at {current}; returning partial path ({len(path)} waypoints)")
+            break
+
         current = best_next
         path.append(current)
-        visited.add(current)
-        
+
+        if current == last_pos:
+            stagnant_count += 1
+        else:
+            stagnant_count = 0
+            last_pos = current
+
         if step % 100 == 0:
             print(f"[DEBUG] Step {step}, current: {current}, distance to goal: {best_distance}")
-    
+
+        if stagnant_count >= 10:
+            print(f"[WARNING] Greedy stagnant near {current}; returning partial path ({len(path)} waypoints)")
+            break
+
     print(f"[DEBUG] Greedy path created with {len(path)} waypoints")
     return path
 
@@ -904,8 +1150,8 @@ def main(destination_x=None, destination_y=None, port=17000):
     min_x, max_x = min(all_x), max(all_x)
     min_y, max_y = min(all_y), max(all_y)
     
-    start_pixel = world_to_map_coords(start[0], start[1], min_x, min_y, max_y)
-    goal_pixel = world_to_map_coords(goal[0], goal[1], min_x, min_y, max_y)
+    start_pixel = world_to_map_coords_center(start[0], start[1], min_x, min_y, max_y)
+    goal_pixel = world_to_map_coords_center(goal[0], goal[1], min_x, min_y, max_y)
     
     print(f"Start pixel coordinates: {start_pixel}")
     print(f"Goal pixel coordinates: {goal_pixel}")
@@ -936,8 +1182,8 @@ def main(destination_x=None, destination_y=None, port=17000):
     
     # Draw path on map
     script_dir = Path(__file__).parent
-    input_image = script_dir / "collision_cache" / "detailed_collision_map.png"
-    output_image = script_dir / "collision_cache" / "path_current_to_ge.png"
+    input_image = script_dir / "collision_cache" / "detailed_collision_map_debug.png"
+    output_image = script_dir / "collision_cache" / "path_current_to_ge_debug.png"
     
     draw_path_on_map(input_image, path, collision_data, output_image, start_pos=current_pos, goal_pos=DESTINATION_TARGET)
     

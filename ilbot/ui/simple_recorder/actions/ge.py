@@ -2,6 +2,8 @@
 # Tiny, reusable GE action builders (return single-click/keypress steps).
 import logging
 import time
+
+from . import inventory
 from .widgets import get_widget_children_with_text, get_widget_children
 from ..helpers.runtime_utils import ui, dispatch, ipc
 from ..helpers.rects import rect_center_xy
@@ -457,6 +459,63 @@ def begin_buy_offer() -> dict | None:
     return None
 
 
+def begin_sell_offer(item_name: str) -> dict | None:
+    """
+    Begin a sell offer by clicking on the item in inventory.
+    
+    Args:
+        item_name: Name of the item to sell
+    
+    Returns:
+        Result of the click action, or None if failed
+    """
+    try:
+        # Get the GE inventory widget to find the item
+        inv_data = ipc.get_widget_children(30605312)  # 465.15 GeOffers.INVENTORY
+        if not inv_data.get("ok"):
+            logging.error("[begin_sell_offer] actions/ge.py: Failed to get GE inventory widget data")
+            return None
+        
+        children = inv_data.get("children", [])
+        target_item = None
+        
+        # Find the item in the GE inventory
+        for child in children:
+            child_text = (child.get("text") or "").strip()
+            child_name = (child.get("name") or "").strip()
+            
+            if (item_name.lower() in child_text.lower() or 
+                item_name.lower() in child_name.lower()):
+                target_item = child
+                break
+        
+        if not target_item:
+            logging.error(f"[begin_sell_offer] actions/ge.py: Item '{item_name}' not found in GE inventory")
+            return None
+        
+        bounds = target_item.get("bounds", {})
+        if not bounds or int(bounds.get("width", 0)) <= 0 or int(bounds.get("height", 0)) <= 0:
+            logging.error(f"[begin_sell_offer] actions/ge.py: Item '{item_name}' has invalid bounds")
+            return None
+        
+        cx = bounds.get("x", 0) + bounds.get("width", 0) // 2
+        cy = bounds.get("y", 0) + bounds.get("height", 0) // 2
+        
+        step = {
+            "id": "ge-begin-sell",
+            "action": "click",
+            "description": f"Open sell offer for {item_name}",
+            "click": {"type": "point", "x": cx, "y": cy},
+            "target": {"domain": "widget", "name": item_name, "bounds": bounds},
+            "preconditions": [], "postconditions": []
+        }
+        return dispatch(step)
+        
+    except Exception as e:
+        logging.error(f"[begin_sell_offer] actions/ge.py: {e}")
+        return None
+
+
 def type_item_name(name: str) -> dict | None:
     if selected_item_is(name):
         return None
@@ -554,6 +613,32 @@ def confirm_buy() -> dict | None:
     return None
 
 
+def confirm_sell() -> dict | None:
+    # Look for confirm button in setup widget children
+    setup_data = ipc.get_widget_children(30474266)  # 465.26 GeOffers.SETUP
+    if not setup_data.get("ok"):
+        return None
+
+    children = setup_data.get("children", [])
+    for child in children:
+        text = (child.get("text") or "").lower()
+        if "confirm" in text:
+            bounds = child.get("bounds", {})
+            if bounds:
+                cx = bounds.get("x", 0) + bounds.get("width", 0) // 2
+                cy = bounds.get("y", 0) + bounds.get("height", 0) // 2
+                step = {
+        "id": "ge-confirm-sell",
+        "action": "click",
+        "description": "Confirm sell offer",
+        "click": {"type": "point", "x": cx, "y": cy},
+                    "target": {"domain": "widget", "name": "confirm", "bounds": bounds},
+        "preconditions": [], "postconditions": []
+                }
+                return dispatch(step)
+    return None
+
+
 def collect_to_inventory() -> dict | None:
     # Look for collect button in main GE container
     ge_data = ipc.get_widget_children(30474241)  # 465.1 GeOffers.CONTENTS
@@ -604,6 +689,35 @@ def find_ge_offer_by_item(item_name: str) -> dict | None:
                 item_name.lower() in widget_name.lower()):
                 return widget
     
+    return None
+
+
+def find_ge_offer_slot_by_item(item_name: str) -> dict | None:
+    """
+    Find the GE offer slot containing the specified item.
+
+    Args:
+        item_name: Name of the item to find
+
+    Returns:
+        Widget data for the offer slot, or None if not found
+    """
+    # Get all GE offer slots
+    offer_slots = get_offer_slots()
+    indices = ['INDEX_0', 'INDEX_1', 'INDEX_2', 'INDEX_3', 'INDEX_4', 'INDEX_5', 'INDEX_6', 'INDEX_7']
+
+    # Search through all offer slots
+    for index_name in indices:
+        widgets = offer_slots.get(index_name, [])
+        for widget in widgets:
+            # Check if this widget contains the item name
+            widget_text = (widget.get("text") or "").strip()
+            widget_name = (widget.get("name") or "").strip()
+
+            if (item_name.lower() in widget_text.lower() or
+                    item_name.lower() in widget_name.lower()):
+                return indices.index(index_name)
+
     return None
 
 def abort_ge_offer(item_name: str) -> dict | None:
@@ -898,13 +1012,128 @@ def buy_item_from_ge(item, retry_items: dict = None) -> bool | None:
             wait_until(lambda: ge_buy_confirm_widget() is None, min_wait_ms=600, max_wait_ms=3000)
 
             # Wait for collect button to appear (offer filled)
+            if wait_until(has_collect, min_wait_ms=600, max_wait_ms=10000):
+                collect_to_inventory()
+            if not wait_until(lambda: inventory.inv_count(item_name) >= item_quantity, min_wait_ms=600, ):
+                return None
+            # Only return None if this is not the last item
+            if not is_last_item:
+                return None
+            else:
+                abort_ge_offer(item_name)
+                if not wait_until(lambda: offer_aborted(find_ge_offer_slot_by_item(item_name)), min_wait_ms=600, max_wait_ms=10000):
+                    return None
+
+    # Close GE after all items are bought
+    close_ge()
+    return True
+
+
+def sell_item_from_ge(items_to_sell: dict) -> bool | None:
+    """
+    Returns True when all items are sold.
+    Otherwise performs exactly one small step toward selling them and returns None.
+    Safe to call every tick.
+    
+    Args:
+        items_to_sell: Dict of items to sell {item_name: (quantity, price_bumps, set_price)}
+    """
+    
+    # Check if we already sold all items (they're no longer in inventory)
+    if not any(inv.has_item(item_name) for item_name in items_to_sell.keys()):
+        close_ge()
+        if is_closed():
+            return True
+        return None
+
+    # Go to GE
+    if not trav.in_area(BANK_REGIONS["GE"]):
+        trav.go_to("GE")
+        return None
+
+    # Open GE
+    if is_closed():
+        open_ge()
+        wait_until(is_open, max_wait_ms=5000)
+        return None
+
+    # Sell each item one by one
+    items_list = list(items_to_sell.items())
+    items_to_process = [(name, data) for name, data in items_list if inv.has_item(name)]
+    
+    for i, (item_name, (item_quantity, item_price_bumps, item_set_price)) in enumerate(items_to_process):
+        is_last_item = (i == len(items_to_process) - 1)
+            
+        # Open sell offer panel
+        if not is_offer_screen_open():
+            if has_collect():
+                collect_to_inventory()
+                return None
+            begin_sell_offer(item_name)
+            if not wait_until(offer_open, max_wait_ms=5000):
+                return None
+            return None
+
+        if selected_item_is(item_name):
+            # Set quantity if needed
+            if item_quantity > 1:
+                if not qty_is(item_quantity):
+                    set_quantity(item_quantity)
+                    return None
+
+            # Set price based on item_set_price from tuple
+            if item_set_price > 0:
+                # Use the set_price from the item tuple
+                result = set_custom_price(item_set_price)
+                if not result:
+                    return None
+                time.sleep(0.5)  # Wait for price to be set
+            else:
+                # Use -5% bumps when set_price is 0 (for selling, we want to lower the price)
+                for _ in range(max(0, int(item_price_bumps))):
+                    # Look for -5% button in setup widget children
+                    setup_data = ipc.get_widget_children(30474266)  # 465.26 GeOffers.SETUP
+                    if not setup_data.get("ok"):
+                        break
+
+                    children = setup_data.get("children", [])
+                    minus = None
+                    for child in children:
+                        text = (child.get("text") or "").strip().replace(" ", "")
+                        if text.lower() == "-5%":
+                            minus = child
+
+                        if not minus:
+                            continue
+                        cx, cy = rect_center_from_widget(minus)
+                        dispatch({
+                            "id": "ge-minus5",
+                            "action": "click",
+                            "description": "-5% price",
+                            "target": {"name": "-5%", "bounds": minus.get("bounds")},
+                            "click": {"type": "point", "x": cx, "y": cy},
+                        })
+                        break
+
+            # Confirm sell
+            confirm_sell()
+            wait_until(lambda: ge_buy_confirm_widget() is None or popup_exists(), min_wait_ms=600, max_wait_ms=3000)
+
+            if popup_exists():
+                select_yes_popup()
+            wait_until(lambda: ge_buy_confirm_widget() is None, min_wait_ms=600, max_wait_ms=3000)
+
+            # Wait for collect button to appear (offer filled)
             if wait_until(has_collect, max_wait_ms=10000):
                 collect_to_inventory()
+                # Check if item is no longer in inventory (sold)
+                if not wait_until(lambda: not inv.has_item(item_name), max_wait_ms=10000):
+                    return None
                 # Only return None if this is not the last item
                 if not is_last_item:
                     return None
 
-    # Close GE after all items are bought
+    # Close GE after all items are sold
     close_ge()
     return True
 
@@ -1200,6 +1429,127 @@ def get_current_price() -> str | None:
     """Get the current price value from the offer screen."""
     from ..helpers.ge import get_current_price as helper_get_current_price
     return helper_get_current_price()
+
+
+def check_and_sell_required_items(required_items: list, item_requirements: dict, plan_id: str = "GE") -> dict | None:
+    """
+    Check if we have all required items to sell and sell them at GE.
+    If items are not in inventory, try to get them from the bank.
+    
+    Args:
+        required_items: List of item names to sell
+        item_requirements: Dict mapping item names to (quantity, five_percent_pushes, set_price) tuples
+        plan_id: Plan identifier for logging
+    
+    Returns:
+        dict with status information:
+        - "status": "complete", "selling", "error", "need_bank", or "no_items_to_sell"
+        - "items_to_sell": dict of items still needed to sell (if status is "selling")
+        - "error": error message (if status is "error")
+        - "missing_items": list of items that need to be withdrawn from bank (if status is "need_bank")
+    """
+    try:
+        # Check if we have any items to sell
+        if not required_items:
+            logging.info(f"[{plan_id}] No items to sell")
+            return {"status": "complete"}
+        
+        # Check if we have all required items to sell in inventory
+        missing_items = []
+        for item in required_items:
+            required_qty = item_requirements[item][0]  # Get quantity from tuple
+            if required_qty == -1 and not is_open():
+                missing_items.append((item, required_qty))
+                continue
+            if not inv.has_item(item, min_qty=required_qty):
+                missing_items.append((item, required_qty))
+        
+        # If we're missing items, try to get them from the bank
+        if missing_items:
+            logging.info(f"[{plan_id}] Missing items in inventory: {missing_items}")
+            
+            # Check if we're near a bank
+            if not trav.in_area(BANK_REGIONS["GE"]):
+                logging.warning(f"[{plan_id}] Not near a bank to withdraw items")
+                return {"status": "error", "error": "Not near a bank to withdraw items"}
+            
+            # Try to open bank and withdraw missing items
+            if not bank.is_open():
+                bank.open_bank()
+                if not wait_until(bank.is_open, max_wait_ms=5000):
+                    logging.warning(f"[{plan_id}] Could not open bank")
+                    return {"status": "error", "error": "Could not open bank"}
+            
+            # Ensure we're in NOTE mode for selling items
+            from ..helpers.bank import select_note, bank_note_selected
+            select_note()
+            # Wait until note mode is actually enabled
+            if not wait_until(bank_note_selected, max_wait_ms=3000):
+                logging.warning(f"[{plan_id}] Note mode did not activate within timeout")
+                return {"status": "error", "error": "Could not activate note mode"}
+            
+            # Withdraw missing items
+            items_withdrawn = []
+            for item, required_qty in missing_items:
+                if inventory.has_item(item):
+                    bank.deposit_item(item)
+                    if not wait_until(lambda: not inv.has_item(item)):
+                        return False
+                try:
+                    # Check if bank has the item
+                    if bank.has_item(item):
+                        if required_qty == -1:
+                            bank.withdraw_item(item, withdraw_all=True)
+                            wait_until(lambda: inv.has_item(item), max_wait_ms=3000)
+                        else:
+                            bank.withdraw_item(item, required_qty)
+                            wait_until(lambda: inv.has_item(item, min_qty=required_qty), max_wait_ms=3000)
+                        items_withdrawn.append(item)
+                        logging.info(f"[{plan_id}] Withdrew {required_qty} {item} from bank (noted)")
+                    else:
+                        logging.warning(f"[{plan_id}] Bank does not have {item}. Skipping {item}")
+                        items_withdrawn.append(item)
+                except Exception as e:
+                    logging.warning(f"[{plan_id}] Could not withdraw {item}: {e}")
+                    return {"status": "error", "error": f"Could not withdraw {item}: {e}"}
+            
+            # Close bank after withdrawing
+            bank.close_bank()
+            logging.info(f"[{plan_id}] Successfully withdrew items: {items_withdrawn}")
+        
+        # Calculate what we need to sell
+        items_to_sell = {}
+        for item in required_items:
+            required_qty, five_percent_pushes, set_price = item_requirements.get(item, (1, 5, 100))
+            current_count = inv.inv_count(item)
+            sell_count = min(required_qty, current_count)  # Don't sell more than we have
+            if sell_count > 0 or sell_count == -1:
+                items_to_sell[item] = (sell_count, five_percent_pushes, set_price)
+        
+        # If we don't need to sell anything, we're done
+        if not items_to_sell:
+            logging.info(f"[{plan_id}] No items to sell")
+            return {"status": "complete"}
+        
+        logging.info(f"[{plan_id}] Calculated items to sell: {items_to_sell}")
+        
+        # Use the centralized GE selling method
+        logging.info(f"[{plan_id}] Selling items at GE...")
+        result = sell_item_from_ge(items_to_sell)
+        
+        if result is None:
+            # Still working on selling items
+            return {"status": "selling", "items_to_sell": items_to_sell}
+        elif result is True:
+            logging.info(f"[{plan_id}] Successfully sold all items")
+            return {"status": "complete"}
+        else:
+            logging.info(f"[{plan_id}] Failed to sell items, retrying...")
+            return {"status": "selling", "items_to_sell": items_to_sell}
+            
+    except Exception as e:
+        logging.error(f"[{plan_id}] Error in check_and_sell_required_items: {e}")
+        return {"status": "error", "error": str(e)}
 
 
 def check_and_buy_required_items(required_items: list, item_requirements: dict, plan_id: str = "GE") -> dict | None:

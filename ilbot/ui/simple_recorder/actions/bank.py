@@ -3,7 +3,7 @@ import time
 import logging
 from typing import List
 
-from . import ge, widgets, inventory
+from . import ge, widgets, inventory, objects
 from .timing import wait_until
 from .travel import in_area, _first_blocking_door_from_waypoints
 from ..helpers.bank import first_bank_slot, deposit_all_button_bounds
@@ -202,16 +202,13 @@ def open_bank(prefer: str | None = None) -> dict | None:
         logging.info(f"[OPEN_BANK] Clicking {name} with action '{action}' at ({cx}, {cy})")
         
         # Use appropriate click function
-        from ..services.click_with_camera import click_object_with_camera, click_npc_with_camera
-        
         if target_type == "object":
-            result = click_object_with_camera(
-                object_name=name,
-                action=action,
-                world_coords={"x": gx, "y": gy, "p": 0},
-                aim_ms=420
+            result = objects.click_object_closest_by_distance(
+                name=name,
+                action=action
             )
         else:  # NPC
+            from ..services.click_with_camera import click_npc_with_camera
             result = click_npc_with_camera(
                 npc_name=name,
                 action=action,
@@ -320,7 +317,7 @@ def withdraw_item(
             "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
         }
         dispatch(step1)
-        if not wait_until(ge.chat_qty_prompt_active, min_wait_ms=300, max_wait_ms=3000):
+        if not wait_until(ge.chat_qty_prompt_active, min_wait_ms=600, max_wait_ms=3000):
             return None
         
         # Step 3: Type the quantity
@@ -329,14 +326,14 @@ def withdraw_item(
             "click": {"type": "type", "text": str(int(withdraw_x)), "enter": False, "per_char_ms": 15, "focus": True}
         }
         dispatch(step3)
-        if not wait_until(lambda: ge.buy_chatbox_text_input_contains(str(withdraw_x)), min_wait_ms=300, max_wait_ms=3000):
+        if not wait_until(lambda: ge.buy_chatbox_text_input_contains(str(withdraw_x)), min_wait_ms=600, max_wait_ms=3000):
             return None
 
         
         # Step 4: Press Enter to confirm
         step4 = {"action": "confirm-withdraw-x", "click": {"type": "key", "key": "enter"}}
         dispatch(step4)
-        if not wait_until(lambda: inv_has(item_name, min_qty=int(withdraw_x)), min_wait_ms=300, max_wait_ms=3000):
+        if not wait_until(lambda: inv_has(item_name, min_qty=int(withdraw_x)), min_wait_ms=600, max_wait_ms=3000):
             return None
         return True
 
@@ -372,10 +369,10 @@ def withdraw_items(
         Result of the last successful withdrawal, or None if all failed or timed out.
     """
     if not isinstance(items, dict) or not items:
-        print("[BANK] withdraw_items: Invalid items dict provided")
+        # Invalid items dict provided
         return None
 
-    print(f"[BANK] Withdrawing {len(items)} items: {list(items.keys())}")
+    print(f"[BANK] Withdrawing {len(items)} items")
 
     last_result = None
     successful_withdrawals = 0
@@ -386,13 +383,13 @@ def withdraw_items(
 
         for item, qty in items.items():
             if not isinstance(item, str) or not isinstance(qty, int) or qty <= 0:
-                print(f"[BANK] Skipping invalid entry: {item} -> {qty}")
+                # Skipping invalid entry
                 continue
 
             current_qty = inventory.count_unnoted_item(item)
             if current_qty < qty:
                 all_items_obtained = False
-                print(f"[BANK] Withdrawing item: {item} (need {qty}, have {current_qty})")
+                print(f"[BANK] Withdrawing {item}")
 
                 result = withdraw_item(
                     name=item,
@@ -403,18 +400,18 @@ def withdraw_items(
                 if result:
                     last_result = result
                     successful_withdrawals += 1
-                    print(f"[BANK] Successfully withdrew: {item}")
+                    # Successfully withdrew item
                 else:
-                    print(f"[BANK] Failed to withdraw: {item}")
+                    print(f"[BANK] Failed to withdraw {item}")
 
                 time.sleep(0.3)
 
         if all_items_obtained:
-            print(f"[BANK] All requested items obtained.")
+            print(f"[BANK] All requested items obtained")
             return last_result
 
         if time.time() - start_time > timeout:
-            print("[BANK] Timed out waiting for items.")
+            print("[BANK] Timed out waiting for items")
             return None
 
         time.sleep(0.5)

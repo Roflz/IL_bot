@@ -1,5 +1,5 @@
 import re, time
-from ilbot.ui.simple_recorder.helpers.runtime_utils import ui, dispatch
+from ilbot.ui.simple_recorder.helpers.runtime_utils import dispatch
 
 _STEP_HITS: dict[str, int] = {}
 _RS_TAG_RE = re.compile(r'</?col(?:=[0-9a-fA-F]+)?>')

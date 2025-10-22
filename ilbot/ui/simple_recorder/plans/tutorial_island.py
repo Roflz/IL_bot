@@ -46,6 +46,10 @@ class TutorialIslandPlan(Plan):
 
     def loop(self, ui):
         phase = self.state.get("phase", "START_TUTORIAL")
+        logged_in = player.logged_in()
+        if not logged_in:
+            player.login()
+            return self.loop_interval_ms
 
         match(phase):
             case "START_TUTORIAL": # WORKING! RUN WITHOUT BREAKPOINTS

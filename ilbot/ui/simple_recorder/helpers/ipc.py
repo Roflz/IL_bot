@@ -110,7 +110,11 @@ class IPCClient:
     
     def get_player(self) -> dict:
         """Get player information."""
-        return self._send({"cmd": "get_player"}) or {}
+        return self._send({"cmd": "get_player"})
+    
+    def get_game_state(self) -> dict:
+        """Get the current game state (LOGIN_SCREEN, LOGGED_IN, etc.)."""
+        return self._send({"cmd": "get_game_state"}) or {}
 
     def get_inventory(self) -> dict:
         """Get inventory information."""
@@ -267,6 +271,31 @@ class IPCClient:
         if types:
             msg["types"] = types
         return self._send(msg, timeout=20000) or {}
+
+    def get_object_at_tile(self, x: int, y: int, plane: int = None, name: str = None, types: list = None) -> dict:
+        """Get object(s) at a specific tile coordinate."""
+        msg = {"cmd": "get_object_at_tile", "x": int(x), "y": int(y)}
+        if plane is not None:
+            msg["plane"] = int(plane)
+        if name:
+            msg["name"] = name
+        if types:
+            msg["types"] = types
+        return self._send(msg) or {}
+
+    def find_object_in_area(self, name: str, min_x: int, max_x: int, min_y: int, max_y: int, types: list = None) -> dict:
+        """Find the closest object within a specific area."""
+        msg = {
+            "cmd": "find_object_in_area", 
+            "name": name,
+            "minX": int(min_x),
+            "maxX": int(max_x), 
+            "minY": int(min_y),
+            "maxY": int(max_y)
+        }
+        if types:
+            msg["types"] = types
+        return self._send(msg) or {}
 
     def get_ground_items(self, name: str = None, radius: int = None) -> dict:
         """Get ground items."""

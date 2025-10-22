@@ -507,9 +507,8 @@ def needs_equipment_change(target_weapon: Optional[dict], target_armor_dict: Opt
 
 
 def get_best_tool_for_level(tool_options: list, skill_name: str, plan_id: str = "EQUIPMENT") -> Optional[tuple]:
-    """Get the best tool available based on skill level and availability in bank/inventory/equipment."""
+    """Get the best tool the player can use based on skill level only (ignores availability)."""
     from .player import get_skill_level
-    from .bank import get_bank_contents, get_bank_inventory
     
     try:
         # Get current skill level
@@ -519,25 +518,12 @@ def get_best_tool_for_level(tool_options: list, skill_name: str, plan_id: str = 
     except:
         skill_level = 1  # Fallback
     
-    # Helper function to check if tool is available
-    def is_tool_available(tool_name):
-    # Check inventory
-        if inventory.has_item(tool_name):
-            return True
-    # Check equipment
-        if has_equipped(tool_name):
-            return True
-    # Check bank
-        if bank.has_item(tool_name):
-            return True
-        return False
-    
-    # Find the best tool we can use that's actually available
+    # Find the best tool we can use based on skill level only
     for tool_name, skill_req, att_req, def_req in tool_options:
-        if (skill_level >= skill_req and is_tool_available(tool_name)):
+        if skill_level >= skill_req:
             return tool_name, skill_req, att_req, def_req
     
-    raise Exception(f"No suitable tool found for {skill_name} level {skill_level}. Check bank, inventory, and equipment for any {skill_name} tool.")
+    raise Exception(f"No suitable tool found for {skill_name} level {skill_level}.")
 
 
 def can_equip_item(item_name: str, required_attack: int = 0, required_defence: int = 0) -> bool:

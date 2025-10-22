@@ -128,7 +128,9 @@ def can_choose_option() -> bool:
     if bool(m.get("open")):
         return True
     opts = m.get("options") or []
-    return opts['exists'] or []
+    if not opts:
+        return False
+    return opts.get('exists', [])
 
 def get_options() -> List[str]:
     m = _menu()

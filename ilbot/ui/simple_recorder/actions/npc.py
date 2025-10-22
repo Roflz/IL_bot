@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Dict, Any
 import time
 
 from ..helpers.runtime_utils import ipc
@@ -8,8 +8,68 @@ from ..helpers.rects import unwrap_rect, rect_center_xy
 from .chat import dialogue_is_open, can_choose_option, can_continue, any_chat_active, option_exists, choose_option, continue_dialogue
 from .travel import _handle_door_opening, _first_blocking_door_from_waypoints
 from ..services.click_with_camera import click_npc_with_camera
+from ..constants import BANK_REGIONS, REGIONS
 
 from ..services.camera_integration import dispatch_with_camera
+
+
+def _find_closest_npc_in_area(name: str, area: str | tuple) -> Dict[str, Any] | None:
+    """
+    Find the closest NPC within a specific area.
+    
+    Args:
+        name: Name of the NPC to search for (partial match)
+        area: Area name from constants.py (e.g., "FALADOR_BANK") or tuple (min_x, max_x, min_y, max_y)
+        
+    Returns:
+        Closest NPC within the area, or None if not found
+    """
+    if not name or not str(name).strip():
+        return None
+
+    # Resolve area coordinates
+    if isinstance(area, str):
+        if area in BANK_REGIONS:
+            min_x, max_x, min_y, max_y = BANK_REGIONS[area]
+        elif area in REGIONS:
+            min_x, max_x, min_y, max_y = REGIONS[area]
+        else:
+            print(f"[ERROR] Unknown area: {area}. Available areas: {list(BANK_REGIONS.keys()) + list(REGIONS.keys())}")
+            return None
+    elif isinstance(area, tuple) and len(area) == 4:
+        min_x, max_x, min_y, max_y = area
+    else:
+        print(f"[ERROR] Invalid area format. Use area name or tuple (min_x, max_x, min_y, max_y)")
+        return None
+
+    # Get all NPCs and filter by area
+    npcs_resp = ipc.get_npcs()
+    if not npcs_resp or not npcs_resp.get("ok"):
+        return None
+    
+    npcs = npcs_resp.get("npcs", [])
+    if not npcs:
+        return None
+    
+    # Filter NPCs by name and area
+    matching_npcs = []
+    for npc in npcs:
+        npc_name = (npc.get("name") or "").lower()
+        if name.lower() in npc_name:
+            # Check if NPC is within the area bounds
+            world_x = npc.get("worldX")
+            world_y = npc.get("worldY")
+            
+            if (isinstance(world_x, int) and isinstance(world_y, int) and
+                min_x <= world_x <= max_x and min_y <= world_y <= max_y):
+                matching_npcs.append(npc)
+    
+    if not matching_npcs:
+        return None
+    
+    # Return the closest NPC by distance
+    closest_npc = min(matching_npcs, key=lambda npc: npc.get("distance", 999))
+    return closest_npc
 
 
 def click_npc_simple(name: str) -> Optional[dict]:

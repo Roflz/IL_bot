@@ -19,7 +19,6 @@ def _emit_timing(data: dict):
         return
     
     data["ts"] = datetime.now().isoformat()
-    print(f"[CAMERA_TIMING] {json.dumps(data)}")
     
     # Also write to file
     try:
@@ -104,8 +103,6 @@ def setup_camera_optimal(target_scale: int = 551, target_pitch: int = 383) -> bo
         "camera": {"yaw": None, "pitch": None, "scale": None}
     }
     
-    print(f"[CAMERA] Setting up camera for optimal view (Scale: {target_scale}, Pitch: {target_pitch})...")
-    
     import time
     
     def hold_until_condition(condition_func, key, max_duration=5.0):
@@ -160,11 +157,8 @@ def setup_camera_optimal(target_scale: int = 551, target_pitch: int = 383) -> bo
         current_scale = camera_stats.get("scale", 512)
         current_pitch = camera_stats.get("pitch", 0)
         
-        print(f"[CAMERA] Starting from Scale: {current_scale}, Pitch: {current_pitch}")
-        
         # First, handle zoom (scale) - scroll out until we're close enough
         if current_scale > target_scale + 30:
-            print(f"[CAMERA] Zooming out from {current_scale} to ~{target_scale}")
             
             def scale_good():
                 stats = get_camera_stats()
@@ -181,7 +175,6 @@ def setup_camera_optimal(target_scale: int = 551, target_pitch: int = 383) -> bo
         
         # Then, handle pitch - hold UP until we're close enough
         if current_pitch < target_pitch - 30:
-            print(f"[CAMERA] Pitching up from {current_pitch} to ~{target_pitch}")
             
             def pitch_good():
                 stats = get_camera_stats()
@@ -207,7 +200,6 @@ def setup_camera_optimal(target_scale: int = 551, target_pitch: int = 383) -> bo
             t1_complete = _mark_timing("complete")
             timing_data["dur_ms"]["total"] = (t1_complete - t0_start) / 1_000_000
             _emit_timing(timing_data)
-            print(f"[CAMERA] Camera setup complete! Scale: {final_scale}, Pitch: {final_pitch}")
             return True
         
         timing_data["ok"] = False

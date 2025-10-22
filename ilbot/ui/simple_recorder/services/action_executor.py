@@ -158,21 +158,22 @@ class ActionExecutor:
                 return
 
             # Hover for 50 ms
-            time.sleep(0.05)
+            time.sleep(0.1)
 
             # 3) read live menu to see what options are available after hover
             info = self.ipc._send({"cmd": "menu"}) or {}
             entries = info.get("entries") or []
-            want_opt = (step.get("option") or "").strip().lower()
-            want_tgt = (target.get("name") or "").strip().lower()
+            from ilbot.ui.simple_recorder.helpers.utils import clean_rs
+            want_opt = clean_rs((step.get("option") or "")).lower()
+            want_tgt = clean_rs((target.get("name") or "")).lower()
             if not want_opt and not want_tgt:
                 return
 
             def _match(e):
-                eo = (e.get("option") or "").strip().lower()
-                et = (e.get("target") or "").strip().lower()
-                return ((not want_opt) or (eo == want_opt or want_opt in eo)) and \
-                    ((not want_tgt) or (want_tgt in et))
+                eo = clean_rs((e.get("option") or "")).lower()
+                et = clean_rs((e.get("target") or "")).lower()
+                return ((not want_opt) or (eo == want_opt or want_opt == eo)) and \
+                    ((not want_tgt) or (want_tgt == et))
 
             cand = [e for e in entries if _match(e)]
             if not cand:
@@ -192,8 +193,8 @@ class ActionExecutor:
                 # Re-read menu after opening
                 info = self.ipc._send({"cmd": "menu"}) or {}
                 entries = info.get("entries") or []
-                want_opt = (step.get("option") or "").strip().lower()
-                want_tgt = (target.get("name") or "").strip().lower()
+                want_opt = clean_rs(step.get("option") or "").lower()
+                want_tgt = clean_rs(target.get("name") or "").lower()
                 if not want_opt and not want_tgt:
                     return
                 cand = [e for e in entries if _match(e)]

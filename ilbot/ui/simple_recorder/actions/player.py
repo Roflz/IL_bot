@@ -1,6 +1,8 @@
+import time
 from typing import Optional, Union
 
-from ilbot.ui.simple_recorder.actions import inventory, tab
+from ilbot.ui.simple_recorder.actions import inventory, tab, widgets
+from .timing import wait_until
 from ..helpers.runtime_utils import ipc
 from ilbot.ui.simple_recorder.helpers.vars import get_var
 from ilbot.ui.simple_recorder.constants import PLAYER_ANIMATIONS
@@ -14,6 +16,123 @@ def get_player_plane(default=None):
     player = player_data.get("player", {})
     plane = player.get("plane")
     return int(plane) if isinstance(plane, (int, float)) else default
+
+
+def logged_in() -> bool:
+    """
+    Check if the player is logged into the game.
+    
+    Returns:
+        - True if logged in (game state is LOGGED_IN)
+        - False if at login screen or other state
+    """
+    try:
+        resp = ipc.get_game_state()
+        if not resp or not resp.get("ok"):
+            return False
+        if widgets.widget_exists(24772680):
+            return False
+        
+        state = resp.get("state", "").upper()
+        return state == "LOGGED_IN"
+    except Exception:
+        return False
+
+def check_total_level(required_level: int) -> bool:
+    """
+    Check if the player's total level meets the required level.
+    
+    Args:
+        required_level: Minimum total level required
+    
+    Returns:
+        True if total level >= required_level, False otherwise
+    """
+    try:
+        player_data = ipc.get_player()
+        if not player_data.get("ok"):
+            return False
+        
+        player_info = player_data.get("player", {})
+        skills = player_info.get("skills", {})
+        
+        total_level = 0
+        for skill_name, skill_data in skills.items():
+            if isinstance(skill_data, dict) and "level" in skill_data:
+                level = int(skill_data.get("level", 1))
+                total_level += level
+        
+        return total_level >= required_level
+        
+    except Exception as e:
+        logging.error(f"[check_total_level] actions/ge.py: {e}")
+        return False
+
+def login() -> bool:
+    """
+    Attempt to log into the game by clicking the "Play Now" button and waiting for the WelcomeScreen.PLAY widget.
+    
+    Args:
+        username: RuneScape username (not used in this simple approach)
+        password: RuneScape password (not used in this simple approach)
+        
+    Returns:
+        - True if login was successful
+        - False if login failed or already logged in
+    """
+    # Check if already logged in
+    if logged_in():
+        print("[LOGIN] Already logged in")
+        return True
+    
+    # Check if we're at the login screen
+    resp = ipc.get_game_state()
+    if not resp or not resp.get("ok"):
+        print("[LOGIN] Could not get game state")
+        return False
+
+    state = resp.get("state", "").upper()
+    if state == "LOGIN_SCREEN":
+
+        print(f"[LOGIN] At login screen, clicking 'Play Now' button")
+
+        import random
+
+        # Define the rectangle for the "Play Now" button
+        min_x, min_y = 860, 265
+        max_x, max_y = 1020, 305
+
+        # Try clicking in the rectangle up to 3 times
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            # Generate random coordinates within the rectangle
+            click_x = random.randint(min_x, max_x)
+            click_y = random.randint(min_y, max_y)
+
+            print(f"[LOGIN] Attempt {attempt + 1}: Clicking at ({click_x}, {click_y})")
+            ipc.click(click_x, click_y)
+            time.sleep(1)
+
+            print("[LOGIN] Clicked 'Play Now' button, waiting for WelcomeScreen.PLAY widget...")
+
+            # Wait for the widget to appear (with 3 second timeout)
+            if wait_until(lambda: widgets.widget_exists(24772680), max_wait_ms=3000):
+                print("[LOGIN] WelcomeScreen.PLAY widget appeared!")
+                return True
+            else:
+                print(f"[LOGIN] WelcomeScreen.PLAY widget did not appear within 3 seconds (attempt {attempt + 1})")
+                if attempt < max_attempts - 1:
+                    print("[LOGIN] Trying again...")
+                    continue
+                else:
+                    print("[LOGIN] All attempts failed")
+                    return False
+    else:
+        if widgets.widget_exists(24772680):
+            print("[LOGIN] WelcomeScreen.PLAY widget appeared, clicking it...")
+            widgets.click_widget(24772680)  # WelcomeScreen.PLAY widget ID
+            return True
+        return False
 
 
 def get_x() -> Optional[int]:
@@ -335,4 +454,110 @@ def make_fire() -> bool:
         return False
     
     return True
+
+
+def get_run_energy() -> Optional[int]:
+    """
+    Get the player's current run energy percentage.
+    
+    Returns:
+        - Run energy percentage (0-100) if successful
+        - None if failed to get data
+    """
+    resp = ipc.get_player()
+    if not resp or not resp.get("ok"):
+        return 10000
+    
+    player_data = resp.get("player")
+    if not player_data:
+        return 10000
+    
+    return player_data.get("runEnergy")
+
+
+def is_run_on() -> bool:
+    """
+    Check if the player's run mode is currently enabled.
+
+    Returns:
+        - True if run mode is on
+        - False if run mode is off or failed to get data
+    """
+    try:
+        run = widgets.get_widget_info(10485793)
+        if not run or not run.get('data'):
+            return False
+
+        run_id = run['data'].get('spriteId')
+        if run_id is None:
+            return False
+
+        if run_id == 1069:
+            return False
+        if run_id == 1070:
+            return True
+        return True
+    except (KeyError, TypeError, AttributeError):
+        return True
+
+def toggle_run() -> bool:
+    """
+    Toggle the player's run mode on/off by clicking the run icon.
+    
+    Returns:
+        - True if run was successfully toggled
+        - False if failed to toggle
+    """
+    try:
+        # Click the run icon (widget ID 10485782)
+        widgets.click_widget(10485793)
+        time.sleep(0.1)  # Small delay to ensure click registers
+        return True
+    except Exception as e:
+        print(f"[RUN] Error toggling run: {e}")
+        return False
+
+
+def ensure_run_on() -> bool:
+    """
+    Ensure run mode is on if we have enough energy (20+).
+    
+    Returns:
+        - True if run is on or was successfully turned on
+        - False if not enough energy or failed to toggle
+    """
+    # Check if already running
+    if is_run_on():
+        return True
+    
+    # Check run energy
+    energy = get_run_energy()
+    if energy is None:
+        print("[RUN] Could not get run energy")
+        return False
+    
+    if energy < 20:
+        print(f"[RUN] Not enough energy to run ({energy}%)")
+        return False
+    
+    # Toggle run on
+    print(f"[RUN] Turning run on (energy: {energy}%)")
+    return toggle_run()
+
+
+def ensure_run_off() -> bool:
+    """
+    Ensure run mode is off.
+    
+    Returns:
+        - True if run is off or was successfully turned off
+        - False if failed to toggle
+    """
+    # Check if already not running
+    if not is_run_on():
+        return True
+    
+    # Toggle run off
+    print("[RUN] Turning run off")
+    return toggle_run()
 

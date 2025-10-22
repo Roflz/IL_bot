@@ -23,9 +23,6 @@ def check_door_traversal(door_x: int, door_y: int, door_p: int, max_time: float 
         (door_x + 1, door_y, door_p),  # after tile
     ]
     
-    print(f"[DOOR] Starting traversal check for door at ({door_x}, {door_y})")
-    print(f"[DOOR] Checking tiles: {tiles_to_check}")
-    
     while (time.time() - start_time) < max_time:
         tile_info = {}
         
@@ -44,8 +41,7 @@ def check_door_traversal(door_x: int, door_y: int, door_p: int, max_time: float 
                     "wall_object": None,
                     "error": resp.get("err") if resp else "no_response"
                 }
-        
-        print(f"[DOOR] Check at {time.time() - start_time:.2f}s:")
+
         for tile_name, info in tile_info.items():
             coords = info["coordinates"]
             wobj = info.get("wall_object")
@@ -56,8 +52,6 @@ def check_door_traversal(door_x: int, door_y: int, door_p: int, max_time: float 
         
         # Check every 100ms
         time.sleep(0.1)
-    
-    print(f"[DOOR] Traversal check completed after {time.time() - start_time:.2f}s")
     
     return {
         "completed": True,

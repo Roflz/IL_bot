@@ -161,62 +161,77 @@ def _attack_npc(npc: dict) -> Optional[dict]:
     return result
 
 
+# Global state to track last known skill levels
+_last_skill_levels = {"attack": 0, "defence": 0, "strength": 0}
+
 def select_combat_style_for_training() -> None:
     """Select combat style based on current skill levels and training goals."""
     from .combat_interface import select_combat_style, current_combat_style
     from .player import get_skill_level
-    
+    global _last_skill_levels
+
     # Get current skill levels
     attack_level = get_skill_level("attack")
     defence_level = get_skill_level("defence")
     strength_level = get_skill_level("strength")
-    
+
     # Get current combat style
     current_style = current_combat_style()
-    
-    # Check if we should switch away from current style
-    should_switch = False
-    current_skill_level = 0
-    
-    if current_style == 0:  # Attack style
-        current_skill_level = attack_level
-        should_switch = (attack_level % 5 == 0 or attack_level >= 40)
-    elif current_style == 1:  # Strength style
-        current_skill_level = strength_level
-        should_switch = (strength_level % 5 == 0)
-    elif current_style == 3:  # Defence style
-        current_skill_level = defence_level
-        should_switch = (defence_level % 5 == 0 or defence_level >= 10)
-    
-    # Determine target style based on 5-level increments and max levels
-    target_style = 1  # Default to Strength
-    reason = f"Defaulting to Strength training (level {strength_level})"
-    
-    # Calculate which skills need training (not at 5-level increments)
-    defence_needs_training = defence_level < 10 and (defence_level % 5 != 0)
-    attack_needs_training = attack_level < 40 and (attack_level % 5 != 0)
-    strength_needs_training = strength_level % 5 != 0
-    
-    # Priority 1: Train Defence if it needs training and is below max (10)
-    if defence_needs_training and defence_level < 10:
-        target_style = 3
-        reason = f"Training Defence (level {defence_level}, needs 5-level increment)"
-    # Priority 2: Train Attack if it needs training and is below max (40)
-    elif attack_needs_training and attack_level < 40:
-        target_style = 0
-        reason = f"Training Attack (level {attack_level}, needs 5-level increment)"
-    # Priority 3: Train Strength if it needs training
-    elif strength_needs_training:
-        target_style = 1
-        reason = f"Training Strength (level {strength_level}, needs 5-level increment)"
-    # Priority 4: If all skills are at 5-level increments, default to Strength
-    else:
-        target_style = 1
-        reason = f"Training Strength (all skills at 5-level increments: Def {defence_level}, Att {attack_level}, Str {strength_level})"
 
-    # Only switch if we need to change styles or if we should switch based on current skill level
-    if should_switch and current_style != target_style:
-        print(f"[COMBAT] {reason}")
+    if attack_level == defence_level == strength_level and not current_style == 1:
+        print(f"[COMBAT] Strength ({strength_level}) is not highest, switching to Strength training")
+        select_combat_style(1)  # Switch to Strength
+        _last_skill_levels = {"attack": attack_level, "defence": defence_level, "strength": strength_level}
+        return
+    elif attack_level == defence_level == strength_level:
+        _last_skill_levels = {"attack": attack_level, "defence": defence_level, "strength": strength_level}
+        return
+
+    # Check if strength is not the highest or equal to the highest
+    max_level = max(attack_level, defence_level, strength_level)
+    if strength_level < max_level and not current_style == 1:
+        print(f"[COMBAT] Strength ({strength_level}) is not highest, switching to Strength training")
+        select_combat_style(1)  # Switch to Strength
+        _last_skill_levels = {"attack": attack_level, "defence": defence_level, "strength": strength_level}
+        return
+
+    # Check if current skill just reached a 5-level increment (leveled up)
+    should_switch = False
+    if current_style == 0:  # Attack
+        # Only switch if attack just leveled up to a 5-level increment
+        should_switch = (attack_level > _last_skill_levels["attack"] and 
+                        attack_level % 5 == 0 and 
+                        attack_level < 40)
+    elif current_style == 1:  # Strength
+        # Only switch if strength just leveled up to a 5-level increment
+        should_switch = (strength_level > _last_skill_levels["strength"] and 
+                        strength_level % 5 == 0)
+    elif current_style == 3:  # Defence
+        # Only switch if defence just leveled up to a 5-level increment
+        should_switch = (defence_level > _last_skill_levels["defence"] and 
+                        defence_level % 5 == 0 and 
+                        defence_level < 10)
+
+    # If we should switch, determine next skill in priority order
+    if should_switch:
+        # Priority order: Strength → Attack → Defence → back to Strength
+        if current_style == 1:  # Currently Strength, go to Attack
+            target_style = 0
+            skill_name = "Attack"
+        elif current_style == 0:  # Currently Attack, go to Defence
+            target_style = 3
+            skill_name = "Defence"
+        elif current_style == 3:  # Currently Defence, go back to Strength
+            target_style = 1
+            skill_name = "Strength"
+        else:
+            target_style = 1
+            skill_name = "Strength"
+
+        print(f"[COMBAT] Switching to {skill_name} training")
         select_combat_style(target_style)
     else:
-        print(f"[COMBAT] Keeping current style {current_style} (no switch needed)")
+        print(f"[COMBAT] Continuing current training (no switch needed)")
+
+    # Update the last known skill levels
+    _last_skill_levels = {"attack": attack_level, "defence": defence_level, "strength": strength_level}

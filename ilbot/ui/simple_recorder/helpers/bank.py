@@ -1,6 +1,7 @@
 import logging
 from .utils import norm_name
 from .widgets import click_listener_on, get_widget_info
+from ..actions.travel import in_area
 from ..constants import BANK_REGIONS, BANK_WIDGETS
 from .runtime_utils import ipc, dispatch
 
@@ -16,7 +17,12 @@ def bank_slots_matching(names: list[str]) -> list[dict]:
         want = { (n or "").strip().lower() for n in names if n }
         out = []
         for s in bank_data.get("slots", []):
-            nm = (s.get("itemName") or "").strip().lower()
+            # Clean item name by removing item ID (e.g., "Leather|14" -> "Leather")
+            item_name = s.get("itemName") or ""
+            if "|" in item_name:
+                item_name = item_name.split("|")[0]
+            
+            nm = item_name.strip().lower()
             qty = int(s.get("quantity") or 0)
             if nm in want and qty > 0:
                 out.append(s)
@@ -30,7 +36,12 @@ def first_bank_slot(name: str) -> dict | None:
         n = norm_name(name)
         best = None
         for s in bank_slots():
-            if norm_name(s.get("name")) == n:
+            # Clean item name by removing item ID (e.g., "Leather|14" -> "Leather")
+            item_name = s.get("name") or ""
+            if "|" in item_name:
+                item_name = item_name.split("|")[0]
+            
+            if norm_name(item_name) == n:
                 if best is None:
                     best = s
                 else:
@@ -138,15 +149,73 @@ def nearest_banker() -> dict | None:
         logging.error(f"[nearest_banker] helpers/bank.py: {e}")
         return None
 
-def near_any_bank() -> bool:
+def near_any_bank(destination_area: str = None) -> bool:
     """
-    True if the player is within any known bank region.
-    Expects BANK_REGIONS = {name: (minX, maxX, minY, maxY), ...}
-    and a helper in_area(rect).
+    Check if there is a bank booth or banker within 20 tiles of the player.
+    Uses find_object_in_area() for bank booths and npc_in_area() for bankers when destination_area is provided.
+    
+    Args:
+        destination_area: Area name to check for bank facilities (e.g., "FALADOR_BANK", "CLOSEST_BANK")
+                          If None, uses regular find_object and get_npcs_in_radius
+                          If "CLOSEST_BANK", finds the closest bank area and checks there
+    
+    Returns:
+        - True if bank booth or banker found within 20 tiles
+        - False if no bank facilities found nearby
     """
     try:
-        from ..actions.travel import in_area
-        return any(in_area(rect) for rect in BANK_REGIONS.values())
+        if destination_area:
+            # Handle special case for CLOSEST_BANK
+            if destination_area == "CLOSEST_BANK":
+                from ..helpers.navigation import closest_bank_key
+                actual_bank_area = closest_bank_key()
+                destination_area = actual_bank_area
+
+            if in_area(destination_area):
+                return True
+
+            # Check for bank booths in the specific area
+            from ..actions.objects import _find_closest_object_in_area
+            bank_booth = _find_closest_object_in_area("bank booth", destination_area)
+            if bank_booth:
+                distance = bank_booth.get("distance", 999)
+                if distance <= 20:
+                    return True
+            
+            # Check for bankers in the specific area
+            from ..actions.npc import _find_closest_npc_in_area
+            banker = _find_closest_npc_in_area("banker", destination_area)
+            if banker:
+                distance = banker.get("distance", 999)
+                if distance <= 20:
+                    return True
+            
+            return False
+        else:
+            # Check for bank booths using find_object
+            bank_booth = ipc.find_object("bank booth")
+            if bank_booth and bank_booth.get("ok") and bank_booth.get("found"):
+                booth_data = bank_booth.get("object", {})
+                distance = booth_data.get("distance", 999)
+                if distance <= 20:
+                    return True
+            
+            # Check for bankers using NPC methods
+            bankers = ipc.get_npcs_in_radius(20)
+            if bankers:
+                # Look for NPCs with "banker" in their name or actions
+                for npc in bankers:
+                    npc_name = (npc.get("name") or "").lower()
+                    npc_actions = npc.get("actions", [])
+                    
+                    # Check if it's a banker by name or actions
+                    if ("banker" in npc_name or 
+                        "bank" in npc_name or 
+                        any("bank" in action.lower() for action in npc_actions if action)):
+                        return True
+            
+            return False
+        
     except Exception as e:
         logging.error(f"[near_any_bank] helpers/bank.py: {e}")
         return False

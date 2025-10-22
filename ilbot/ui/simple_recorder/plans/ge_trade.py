@@ -38,6 +38,10 @@ class GeTradePlan(Plan):
 
     def loop(self, ui):
         phase = self.state.get("phase", "GO_TO_GE")
+        logged_in = player.logged_in()
+        if not logged_in:
+            player.login()
+            return self.loop_interval_ms
 
         match(phase):
             case "GO_TO_GE":

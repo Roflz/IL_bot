@@ -21,7 +21,6 @@ def _emit_timing(data: dict):
         return
     
     data["ts"] = datetime.now().isoformat()
-    print(f"[CAMERA_TIMING] {json.dumps(data)}")
     
     # Also write to file
     try:
