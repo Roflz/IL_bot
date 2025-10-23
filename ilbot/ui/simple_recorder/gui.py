@@ -2075,7 +2075,9 @@ class SimpleRecorderGUI:
         
         # Check if already selected
         for i in range(selected_listbox.size()):
-            if plan_id in selected_listbox.get(i):
+            selected_text = selected_listbox.get(i)
+            selected_plan_id = selected_text.split(' (')[-1].rstrip(')')
+            if plan_id == selected_plan_id:
                 messagebox.showwarning("Already Selected", f"Plan {plan_id} is already in the selection.")
                 return
         

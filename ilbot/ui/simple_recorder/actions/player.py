@@ -6,6 +6,7 @@ from .timing import wait_until
 from ..helpers.runtime_utils import ipc
 from ilbot.ui.simple_recorder.helpers.vars import get_var
 from ilbot.ui.simple_recorder.constants import PLAYER_ANIMATIONS
+from ..helpers.utils import press_spacebar
 
 
 def get_player_plane(default=None):
@@ -209,6 +210,27 @@ def get_player_animation() -> Union[int, str, None]:
     # Return the mapped name if it exists, otherwise return the raw ID
     return PLAYER_ANIMATIONS.get(animation_id, animation_id)
 
+
+def get_skills() -> Optional[int]:
+    """
+    Get the player's current level for a specific skill using direct IPC calls.
+
+    Args:
+        skill_name: Name of the skill (e.g., "fishing", "cooking", "attack")
+
+    Returns:
+        - Skill level (int) if found
+        - None if skill not found or failed to get data
+    """
+    resp = ipc.get_player()
+    if not resp or not resp.get("ok"):
+        return None
+
+    player_data = resp.get("player")
+    if not player_data:
+        return None
+
+    return player_data.get("skills", {})
 
 def get_skill_level(skill_name: str) -> Optional[int]:
     """
@@ -560,4 +582,49 @@ def ensure_run_off() -> bool:
     # Toggle run off
     print("[RUN] Turning run off")
     return toggle_run()
+
+
+def get_world() -> Optional[int]:
+    """
+    Get the current world number using IPC.
+    
+    Returns:
+        - World number (int) if successful
+        - None if failed to get data
+    """
+    resp = ipc.get_world()
+    if not resp or not resp.get("ok"):
+        return None
+    
+    return resp.get("world")
+
+
+def hop_world(world_id: int) -> bool:
+    """
+    Hop to a specific world using IPC.
+    
+    Args:
+        world_id: Target world number to hop to
+        
+    Returns:
+        - True if hop was successful
+        - False if hop failed
+    """
+    resp1 = ipc.open_world_hopper()
+    if not resp1 or not resp1.get("ok"):
+        return False
+    # time.sleep(0.5)
+    resp2 = ipc.hop_world(world_id)
+    if not resp2 or not resp2.get("ok"):
+        return False
+    if not (wait_until(lambda: widgets.widget_exists(12648448), max_wait_ms=3000)):
+        return False
+    current_world = get_world()
+    press_spacebar()
+    if not (wait_until(lambda: not logged_in())):
+        return False
+    if not (wait_until(lambda: logged_in())):
+        return False
+
+    return True
 

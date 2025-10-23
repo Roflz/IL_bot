@@ -1,4 +1,5 @@
-import re, time
+import re, time, csv
+from pathlib import Path
 from ilbot.ui.simple_recorder.helpers.runtime_utils import dispatch
 
 _STEP_HITS: dict[str, int] = {}
@@ -67,3 +68,45 @@ def press_spacebar() -> dict | None:
         "preconditions": [], "postconditions": []
     }
     return dispatch(step)
+
+def type_text(text: str) -> dict | None:
+    step = {
+        "id": "type-text",
+        "action": "type",
+        "description": f"Type text: {text}",
+        "click": {"type": "type", "text": text, "per_char_ms": 20},
+    }
+    return dispatch(step)
+
+
+def get_world_from_csv(username: str) -> int | None:
+    """
+    Get the world number for a specific character from the character_stats.csv file.
+    
+    Args:
+        username: Character username to look up
+        
+    Returns:
+        - World number (int) if character found
+        - None if character not found or error occurred
+    """
+    try:
+        csv_file = Path("D:/repos/bot_runelite_IL/ilbot/ui/simple_recorder/character_data/character_stats.csv")
+        
+        if not csv_file.exists():
+            return None
+            
+        with open(csv_file, 'r', newline='') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                if row.get('username') == username:
+                    world_str = row.get('world_number')
+                    if world_str:
+                        return int(world_str)
+                    return None
+                    
+        return None
+        
+    except Exception as e:
+        print(f"[get_world_from_csv] Error reading CSV: {e}")
+        return None

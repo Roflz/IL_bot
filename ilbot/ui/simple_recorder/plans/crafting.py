@@ -182,7 +182,7 @@ class CraftingPlan(Plan):
                 logging.info(f"[{self.id}] Setting up for gold ring crafting (level {crafting_level}) - need {rings_needed} gold bars")
                 self.bank_plan.inventory_config["required_items"] = [
                     {"name": "ring mould", "quantity": 1},
-                    {"name": "Gold bar", "quantity": rings_needed}
+                    {"name": "Gold bar", "quantity": -1}
                 ]
                 
             else:
@@ -287,7 +287,7 @@ class CraftingPlan(Plan):
                 sapphire_ring_sell_price = self._calculate_sell_price(prices["Sapphire ring"], bumps=5)
                 sell_proceeds = (gold_rings * gold_ring_sell_price) + (sapphire_rings * sapphire_ring_sell_price)
                 
-                # Calculate spending budget (80% of total funds)
+
                 budget = self._calculate_spending_budget(bank_coins, sell_proceeds)
                 
                 # Calculate buy prices with bumps
@@ -506,9 +506,8 @@ class CraftingPlan(Plan):
     def _calculate_spending_budget(self, current_coins, sell_proceeds):
         """Calculate 80% of total available funds."""
         total_funds = current_coins + sell_proceeds
-        budget = int(total_funds * 0.8)
-        logging.info(f"[{self.id}] Budget calculation - Current coins: {current_coins}, Sell proceeds: {sell_proceeds}, Total: {total_funds}, Budget (80%): {budget}")
-        return budget
+        logging.info(f"[{self.id}] Budget calculation - Current coins: {current_coins}, Sell proceeds: {sell_proceeds}, Funds: {total_funds}")
+        return total_funds
     
     def _calculate_equal_purchase_quantities(self, budget, sapphire_price, gold_bar_price):
         """Calculate equal quantities of sapphires and gold bars."""
@@ -561,7 +560,7 @@ class CraftingPlan(Plan):
     
     def _handle_crafting(self) -> int:
         """Handle crafting phase."""
-        if not objects.object_exists("furnace", 18) and inventory.has_item("gold bar"):
+        if not objects.object_exists("furnace", 25) and inventory.has_item("gold bar"):
             go_to("EDGEVILLE_BANK")
             return self.loop_interval_ms
 

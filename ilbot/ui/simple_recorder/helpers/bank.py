@@ -268,6 +268,45 @@ def get_bank_search_widgets() -> list[dict]:
         logging.error(f"[get_bank_search_widgets] helpers/bank.py: {e}")
         return []
 
+def get_bank_quantity_mode() -> dict:
+    """Get current bank withdraw mode and X value using RuneLite Varbits."""
+    try:
+        # Check if bank is open first
+        bank_data = ipc.get_bank()
+        if not bank_data or not bank_data.get("ok"):
+            logging.error("[get_bank_quantity_mode] helpers/bank.py: Bank is not open")
+            return {"ok": False, "mode": None, "x": None, "err": "Bank is not open"}
+        
+        xvalue_data = ipc.get_bank_xvalue()
+        logging.info(f"[get_bank_quantity_mode] Raw response: {xvalue_data}")
+        
+        if not xvalue_data or not xvalue_data.get("ok"):
+            error_msg = xvalue_data.get("err", "Unknown error") if xvalue_data else "No response"
+            logging.error(f"[get_bank_quantity_mode] helpers/bank.py: Failed to get bank quantity mode from IPC: {error_msg}")
+            return {"ok": False, "mode": None, "x": None, "err": f"IPC error: {error_msg}"}
+        
+        mode = xvalue_data.get("mode")
+        x_value = xvalue_data.get("x")
+        
+        # Mode meanings:
+        # 0 = "1" (withdraw 1)
+        # 1 = "5" (withdraw 5) 
+        # 2 = "10" (withdraw 10)
+        # 3 = "X" (withdraw custom amount)
+        # 4 = "All" (withdraw all)
+        
+        logging.info(f"[get_bank_quantity_mode] Mode: {mode}, X: {x_value}")
+        
+        return {
+            "ok": True,
+            "mode": mode,
+            "x": x_value,
+            "mode_name": ["1", "5", "10", "X", "All"][mode] if mode is not None and 0 <= mode <= 4 else "Unknown"
+        }
+    except Exception as e:
+        logging.error(f"[get_bank_quantity_mode] helpers/bank.py: {e}")
+        return {"ok": False, "mode": None, "x": None, "err": str(e)}
+
 def get_bank_items_widgets() -> list[dict]:
     """Get all bank item slot widgets."""
     try:
@@ -351,9 +390,11 @@ def is_note_selected() -> bool:
 def is_quantity1_selected() -> bool:
     """Check if QUANTITY 1 is selected."""
     try:
-        from .widgets import click_listener_on
-        from ..constants import BANK_WIDGETS
-        return click_listener_on(BANK_WIDGETS["QUANTITY1"])
+        mode_data = get_bank_quantity_mode()
+        if not mode_data.get("ok"):
+            logging.error("[is_quantity1_selected] helpers/bank.py: Failed to get bank quantity mode")
+            return False
+        return mode_data.get("mode") == 0
     except Exception as e:
         logging.error(f"[is_quantity1_selected] helpers/bank.py: {e}")
         return False
@@ -361,9 +402,11 @@ def is_quantity1_selected() -> bool:
 def is_quantity5_selected() -> bool:
     """Check if QUANTITY 5 is selected."""
     try:
-        from .widgets import click_listener_on
-        from ..constants import BANK_WIDGETS
-        return click_listener_on(BANK_WIDGETS["QUANTITY5"])
+        mode_data = get_bank_quantity_mode()
+        if not mode_data.get("ok"):
+            logging.error("[is_quantity5_selected] helpers/bank.py: Failed to get bank quantity mode")
+            return False
+        return mode_data.get("mode") == 1
     except Exception as e:
         logging.error(f"[is_quantity5_selected] helpers/bank.py: {e}")
         return False
@@ -371,9 +414,11 @@ def is_quantity5_selected() -> bool:
 def is_quantity10_selected() -> bool:
     """Check if QUANTITY 10 is selected."""
     try:
-        from .widgets import click_listener_on
-        from ..constants import BANK_WIDGETS
-        return click_listener_on(BANK_WIDGETS["QUANTITY10"])
+        mode_data = get_bank_quantity_mode()
+        if not mode_data.get("ok"):
+            logging.error("[is_quantity10_selected] helpers/bank.py: Failed to get bank quantity mode")
+            return False
+        return mode_data.get("mode") == 2
     except Exception as e:
         logging.error(f"[is_quantity10_selected] helpers/bank.py: {e}")
         return False
@@ -381,9 +426,11 @@ def is_quantity10_selected() -> bool:
 def is_quantityx_selected() -> bool:
     """Check if QUANTITY X is selected."""
     try:
-        from .widgets import click_listener_on
-        from ..constants import BANK_WIDGETS
-        return click_listener_on(BANK_WIDGETS["QUANTITYX"])
+        mode_data = get_bank_quantity_mode()
+        if not mode_data.get("ok"):
+            logging.error("[is_quantityx_selected] helpers/bank.py: Failed to get bank quantity mode")
+            return False
+        return mode_data.get("mode") == 3
     except Exception as e:
         logging.error(f"[is_quantityx_selected] helpers/bank.py: {e}")
         return False
@@ -391,9 +438,11 @@ def is_quantityx_selected() -> bool:
 def is_quantityall_selected() -> bool:
     """Check if QUANTITY ALL is selected."""
     try:
-        from .widgets import click_listener_on
-        from ..constants import BANK_WIDGETS
-        return click_listener_on(BANK_WIDGETS["QUANTITYALL"])
+        mode_data = get_bank_quantity_mode()
+        if not mode_data.get("ok"):
+            logging.error("[is_quantityall_selected] helpers/bank.py: Failed to get bank quantity mode")
+            return False
+        return mode_data.get("mode") == 4
     except Exception as e:
         logging.error(f"[is_quantityall_selected] helpers/bank.py: {e}")
         return False
@@ -613,6 +662,44 @@ def select_quantityx() -> dict | None:
         return dispatch(step)
     except Exception as e:
         logging.error(f"[select_quantityx] helpers/bank.py: {e}")
+        return None
+
+def select_quantityx_custom() -> dict | None:
+    """Select QUANTITY X using context-select for 'Custom Quantity' option."""
+    try:
+        widget_info = get_widget_info(BANK_WIDGETS["QUANTITYX"])
+        if not widget_info:
+            logging.error("[select_quantityx_context] helpers/bank.py: Failed to get widget info for QUANTITYX button")
+            return None
+        
+        widget_data = widget_info.get("data", {})
+        bounds = widget_data.get("bounds")
+        
+        if not bounds or int(bounds.get("width", 0)) <= 0 or int(bounds.get("height", 0)) <= 0:
+            logging.error("[select_quantityx_context] helpers/bank.py: QUANTITYX button has invalid bounds")
+            return None
+        
+        # Calculate center point for context menu
+        center_x = bounds.get("x", 0) + bounds.get("width", 0) // 2
+        center_y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+        
+        step = {
+            "action": "bank-select-quantityx-context",
+            "option": "Set custom quantity",
+            "click": {
+                "type": "context-select",
+                "x": center_x,
+                "y": center_y,
+                "row_height": 16,
+                "start_dy": 10,
+                "open_delay_ms": 120,
+            },
+            "target": {"domain": "bank-widget", "name": "", "bounds": bounds},
+            "anchor": {"x": center_x, "y": center_y},
+        }
+        return dispatch(step)
+    except Exception as e:
+        logging.error(f"[select_quantityx_context] helpers/bank.py: {e}")
         return None
 
 def select_quantityall() -> dict | None:

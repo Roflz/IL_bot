@@ -198,10 +198,6 @@ class IPCClient:
         """Get chat widget information (alias for get_chat_widgets)."""
         return self.get_chat_widgets()
 
-    def get_quests(self) -> dict:
-        """Get quest state information for all quests."""
-        return self._send({"cmd": "get_quests"}) or {}
-
     def click_continue_button(self, chat_type: str = "left") -> bool:
         """
         Click the continue button for chat dialogue.
@@ -359,10 +355,6 @@ class IPCClient:
         """Get spellbook information."""
         return self._send({"cmd": "get_spellbook"}) or {}
 
-    def get_last_interaction(self) -> dict:
-        """Get last interaction information."""
-        return self._send({"cmd": "get_last_interaction"}) or {}
-
     def get_menu(self) -> dict:
         """Get menu information."""
         return self._send({"cmd": "menu"}) or {}
@@ -410,6 +402,10 @@ class IPCClient:
     def get_bank_search(self) -> dict:
         """Get bank search interface widgets."""
         return self._send({"cmd": "get_bank_search"}) or {}
+
+    def get_bank_xvalue(self) -> dict:
+        """Get current bank withdraw mode and X value using RuneLite Varbits."""
+        return self._send({"cmd": "bank-xvalue"}) or {}
 
     # ===== GRAND EXCHANGE METHODS =====
     
@@ -545,3 +541,15 @@ class IPCClient:
     def get_players(self) -> dict:
         """Get information about all players around the local player."""
         return self._send({"cmd": "get_players"}) or {}
+    
+    def get_world(self) -> dict:
+        """Get the current world number."""
+        return self._send({"cmd": "get_world"}) or {}
+    
+    def hop_world(self, world_id: int) -> dict:
+        """Hop to a specific world."""
+        return self._send({"cmd": "hop_world", "world_id": world_id}) or {}
+    
+    def open_world_hopper(self) -> dict:
+        """Open the world hopper interface."""
+        return self._send({"cmd": "openWorldHopper"}) or {}

@@ -7,6 +7,7 @@ from typing import Optional
 from datetime import datetime, timedelta
 from ..helpers.runtime_utils import ipc
 from ..actions.player import get_skill_level, check_total_level
+from .character_tracker import update_character_tracking
 
 
 def check_time_rule(start_time: datetime, max_minutes: int) -> bool:
@@ -53,10 +54,19 @@ def check_item_rule(item_name: str, target_quantity: int) -> bool:
 
 
 def check_rules(start_time: datetime, max_minutes: int = 0, skill_name: str = "", skill_level: int = 0, 
-                total_level: int = 0, item_name: str = "", item_quantity: int = 0) -> Optional[str]:
+                total_level: int = 0, item_name: str = "", item_quantity: int = 0, username: str = "") -> Optional[str]:
     """
     Check all rules and return description of triggered rule, or None if none triggered.
+    Also updates character tracking data.
     """
+    # Update character tracking if username provided
+    if username:
+        try:
+            update_character_tracking(username)
+        except Exception as e:
+            # Don't fail rule checking if tracking fails
+            pass
+    
     # Time rule
     if max_minutes > 0 and check_time_rule(start_time, max_minutes):
         return f"Time limit reached: {max_minutes} minutes"

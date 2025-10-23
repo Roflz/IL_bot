@@ -22,7 +22,7 @@ from .utilities.bank_plan import BankPlan
 from ..helpers import quest
 from ..helpers.bank import near_any_bank
 from ..helpers.camera import move_camera_random
-from ..helpers.utils import press_esc, press_spacebar
+from ..helpers.utils import press_esc, press_spacebar, get_world_from_csv
 from ..helpers.widgets import widget_exists
 
 
@@ -62,44 +62,6 @@ class GeTradePlan(Plan):
         from ..helpers.phase_utils import set_phase_with_camera
         return set_phase_with_camera(self, phase, camera_setup)
 
-    def _handle_bank(self, ui) -> int:
-        """Handle banking phase - withdraw all coins from bank."""
-        # Update bank plan to withdraw all coins
-        self.bank_plan.inventory_config["required_items"] = [
-            {"name": "Coins", "quantity": -1}  # Withdraw all coins
-        ]
-        
-        bank_status = self.bank_plan.loop(ui)
-        
-        if bank_status == BankPlan.SUCCESS:
-            logging.info(f"[{self.id}] Banking completed successfully - coins withdrawn!")
-            if self.role == "worker":
-                self.set_phase("WORKER")
-            else:  # mule
-                self.set_phase("MULE")
-            if bank.is_open():
-                bank.close_bank()
-            return self.loop_interval_ms
-        
-        elif bank_status == BankPlan.MISSING_ITEMS:
-            error_msg = self.bank_plan.get_error_message()
-            logging.warning(f"[{self.id}] No coins found in bank: {error_msg}")
-            # Still proceed to GE even without coins
-            if self.role == "worker":
-                self.set_phase("DONE")
-            else:  # mule
-                self.set_phase("MULE")
-            return self.loop_interval_ms
-        
-        elif bank_status == BankPlan.ERROR:
-            error_msg = self.bank_plan.get_error_message()
-            logging.error(f"[{self.id}] Banking error: {error_msg}")
-            return self.loop_interval_ms
-        
-        else:
-            # Still working on banking (TRAVELING, BANKING, etc.)
-            return bank_status
-
     def loop(self, ui):
         phase = self.state.get("phase", "GO_TO_GE")
         logged_in = player.logged_in()
@@ -125,6 +87,11 @@ class GeTradePlan(Plan):
                     return
 
             case "WORKER":
+                mule_world = get_world_from_csv("Batquinn")
+                if not player.get_world() == mule_world:
+                    player.hop_world(mule_world)
+                    return 3000
+
                 if not widget_exists(21954562) and not widget_exists(21889025):
                     if not inventory.has_item("coins"):
                         self.set_phase("DONE")
@@ -171,6 +138,7 @@ class GeTradePlan(Plan):
                     message = find_chat_message("wishes to trade with you")
                     if message:
                         click_chat_message("wishes to trade with you")
+                        wait_until(lambda: widget_exists(21954562))
                     
                     # Small delay to prevent excessive CPU usage
                     time.sleep(0.5)
@@ -185,3 +153,46 @@ class GeTradePlan(Plan):
                 return
 
         return
+
+    def _handle_bank(self, ui) -> int:
+        """Handle banking phase - withdraw all coins from bank."""
+        # Update bank plan to withdraw all coins
+        if self.role == "mule":
+            self.bank_plan.inventory_config["required_items"] = [
+                {"name": "Coins", "quantity": -1}  # Withdraw all coins
+            ]
+        else:
+            self.bank_plan.inventory_config["required_items"] = [
+                {"name": "Coins", "quantity": 300000}
+            ]
+
+        bank_status = self.bank_plan.loop(ui)
+
+        if bank_status == BankPlan.SUCCESS:
+            logging.info(f"[{self.id}] Banking completed successfully - coins withdrawn!")
+            if self.role == "worker":
+                self.set_phase("WORKER")
+            else:  # mule
+                self.set_phase("MULE")
+            if bank.is_open():
+                bank.close_bank()
+            return self.loop_interval_ms
+
+        elif bank_status == BankPlan.MISSING_ITEMS:
+            error_msg = self.bank_plan.get_error_message()
+            logging.warning(f"[{self.id}] No coins found in bank: {error_msg}")
+            # Still proceed to GE even without coins
+            if self.role == "worker":
+                self.set_phase("DONE")
+            else:  # mule
+                self.set_phase("MULE")
+            return self.loop_interval_ms
+
+        elif bank_status == BankPlan.ERROR:
+            error_msg = self.bank_plan.get_error_message()
+            logging.error(f"[{self.id}] Banking error: {error_msg}")
+            return self.loop_interval_ms
+
+        else:
+            # Still working on banking (TRAVELING, BANKING, etc.)
+            return bank_status

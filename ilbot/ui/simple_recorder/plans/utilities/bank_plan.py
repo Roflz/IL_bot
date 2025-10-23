@@ -795,7 +795,11 @@ class BankPlan(Plan):
         
         # Withdraw food
         if self.food_item and bank.has_item(self.food_item):
-            bank.withdraw_item(self.food_item, self.food_quantity)
+            if self.food_quantity == -1:
+                bank.withdraw_item(self.food_item, withdraw_all=True)
+                logging.info(f"[{self.id}] Withdrawing all {self.food_item}")
+            else:
+                bank.withdraw_item(self.food_item, self.food_quantity)
             time.sleep(0.5)
         
         # Withdraw required inventory items
@@ -806,22 +810,28 @@ class BankPlan(Plan):
                 required_quantity = item.get("quantity", 1)
                 
                 if bank.has_item(item_name):
-                    # Check how many we already have in inventory/equipment
-                    already_have = 0
-                    if inventory.has_item(item_name):
-                        already_have += inventory.get_item_count(item_name)
-                    if equipment.has_equipped(item_name):
-                        already_have += 1
-                    
-                    # Calculate how many we need to withdraw
-                    need_to_withdraw = max(0, required_quantity - already_have)
-                    available_in_bank = bank.get_item_count(item_name)
-                    withdraw_quantity = min(need_to_withdraw, available_in_bank)
-                    
-                    if withdraw_quantity > 0:
-                        logging.info(f"[{self.id}] Withdrawing {withdraw_quantity} {item_name} (need {required_quantity}, already have {already_have})")
-                        bank.withdraw_item(item_name, withdraw_quantity)
+                    # Check if we want to withdraw all
+                    if required_quantity == -1:
+                        bank.withdraw_item(item_name, withdraw_all=True)
+                        logging.info(f"[{self.id}] Withdrawing all {item_name}")
                         time.sleep(0.5)
+                    else:
+                        # Check how many we already have in inventory/equipment
+                        already_have = 0
+                        if inventory.has_item(item_name):
+                            already_have += inventory.inv_count(item_name)
+                        if equipment.has_equipped(item_name):
+                            already_have += 1
+                        
+                        # Calculate how many we need to withdraw
+                        need_to_withdraw = max(0, required_quantity - already_have)
+                        available_in_bank = bank.get_item_count(item_name)
+                        withdraw_quantity = min(need_to_withdraw, available_in_bank)
+                        
+                        if withdraw_quantity > 0:
+                            logging.info(f"[{self.id}] Withdrawing {withdraw_quantity} {item_name} (need {required_quantity}, already have {already_have})")
+                            bank.withdraw_item(item_name, withdraw_quantity)
+                            time.sleep(0.5)
             else:
                 # Simple string item (default quantity 1)
                 if bank.has_item(item):
@@ -864,9 +874,58 @@ class BankPlan(Plan):
         # Check for sellable items before closing bank
         self._check_sellable_items()
         
+        # Verify inventory is correct before proceeding
+        inventory_correct = self._verify_inventory()
+        if not inventory_correct:
+            logging.warning(f"[{self.id}] Inventory verification failed - staying in WITHDRAW_ITEMS phase")
+            bank.deposit_inventory()
+            wait_until(inventory.is_empty)
+            return self.INVENTORY_SETUP
+        
         bank.close_bank()
         self.set_phase("SETUP_COMPLETE")
         return self.INVENTORY_SETUP
+    
+    def _verify_inventory(self) -> bool:
+        """Verify that the inventory contains the expected items."""
+        try:
+            # Check required items
+            for item in self.inventory_config.get("required_items", []):
+                if isinstance(item, dict):
+                    # Item with quantity specified
+                    item_name = item.get("name")
+                    required_quantity = item.get("quantity", 1)
+                    
+                    # Check if we have the required quantity
+                    current_quantity = 0
+                    if inventory.has_item(item_name):
+                        current_quantity += inventory.inv_count(item_name)
+                    if equipment.has_equipped(item_name):
+                        current_quantity += 1
+
+                    if required_quantity == -1:
+                        required_quantity = 1
+                    if current_quantity < required_quantity:
+                        logging.warning(f"[{self.id}] Missing {item_name}: need {required_quantity}, have {current_quantity}")
+                        return False
+                else:
+                    # Simple string item (default quantity 1)
+                    if not inventory.has_item(item) and not equipment.has_equipped(item):
+                        logging.warning(f"[{self.id}] Missing required item: {item}")
+                        return False
+            
+            # Check food item
+            if self.food_item and self.food_quantity > 0:
+                if not inventory.has_item(self.food_item, min_qty=self.food_quantity):
+                    logging.warning(f"[{self.id}] Missing food: need {self.food_quantity} {self.food_item}")
+                    return False
+            
+            logging.info(f"[{self.id}] Inventory verification passed")
+            return True
+            
+        except Exception as e:
+            logging.error(f"[{self.id}] Error verifying inventory: {e}")
+            return False
     
     def _check_sellable_items(self):
         """Check for sellable items in the bank and determine if we should sell them."""

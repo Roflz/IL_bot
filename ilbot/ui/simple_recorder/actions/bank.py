@@ -1,16 +1,17 @@
 # ilbot/ui/simple_recorder/actions/banking.py
-import time
 import logging
 from typing import List
 
 from . import ge, widgets, inventory, objects
 from .timing import wait_until
 from .travel import in_area, _first_blocking_door_from_waypoints
-from ..helpers.bank import first_bank_slot, deposit_all_button_bounds
+from ..helpers.bank import first_bank_slot, deposit_all_button_bounds, is_quantityx_selected, select_quantityx, \
+    get_bank_quantity_mode, select_quantityx_custom
 from ..helpers.inventory import inv_has_any, norm_name
 from ..helpers.runtime_utils import ipc, ui, dispatch
 from ..helpers.rects import unwrap_rect, rect_center_xy
-from ..services.camera_integration import dispatch_with_camera
+from ..helpers.utils import type_text, press_enter
+from ..helpers.widgets import widget_exists
 
 
 def is_open() -> bool:
@@ -301,42 +302,66 @@ def withdraw_item(
         }
         return dispatch(step)
 
-    # --- Withdraw-X via live context menu + type amount ---
-    if withdraw_x is not None and withdraw_x > 1:
-        # Step 1: Right-click and select "Withdraw-X"
-        step1 = {
-            "action": "withdraw-item-x-menu",
-            "option": "withdraw-x",
+    if withdraw_x == 5:
+        step = {
+            "action": "withdraw-item-5",
+            "option": "withdraw-5",
             "click": {
-                "type": "context-select",
-                "target": item_name.lower(),
-                "x": int(cx),
+                "type": "context-select",        # uses live menu geometry via IPC "menu"        # case-insensitive match
+                "target": item_name.lower(),     # substring match against menu target
+                "x": int(cx),                    # right-click anchor (canvas)
                 "y": int(cy),
                 "open_delay_ms": 120
             },
             "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
         }
-        dispatch(step1)
-        if not wait_until(ge.chat_qty_prompt_active, min_wait_ms=600, max_wait_ms=3000):
-            return None
-        
-        # Step 3: Type the quantity
-        step3 = {
-            "action": "type-withdraw-x",
-            "click": {"type": "type", "text": str(int(withdraw_x)), "enter": False, "per_char_ms": 15, "focus": True}
+        return dispatch(step)
+
+    if withdraw_x == 10:
+        step = {
+            "action": "withdraw-item-10",
+            "option": "withdraw-10",
+            "click": {
+                "type": "context-select",        # uses live menu geometry via IPC "menu"        # case-insensitive match
+                "target": item_name.lower(),     # substring match against menu target
+                "x": int(cx),                    # right-click anchor (canvas)
+                "y": int(cy),
+                "open_delay_ms": 120
+            },
+            "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
         }
-        dispatch(step3)
-        if not wait_until(lambda: ge.buy_chatbox_text_input_contains(str(withdraw_x)), min_wait_ms=600, max_wait_ms=3000):
-            return None
+        return dispatch(step)
 
+    # --- Withdraw-X via live context menu + type amount ---
+    if withdraw_x is not None and withdraw_x > 1:
+
+        if not get_bank_quantity_mode().get("x") == withdraw_x:
+            select_quantityx_custom()
+            if not wait_until(lambda: widget_exists(10616870), max_wait_ms=3000):
+                return None
+            time.sleep(0.5)
+            type_text(str(withdraw_x))
+            if not wait_until(lambda: ge.buy_chatbox_text_input_contains(str(withdraw_x)), min_wait_ms=600, max_wait_ms=3000):
+                return None
+            time.sleep(0.2)
+            press_enter()
+            if not wait_until(lambda: is_quantityx_selected() and get_bank_quantity_mode().get("x") == withdraw_x, min_wait_ms=600, max_wait_ms=3000):
+                return None
+            time.sleep(0.5)
+        elif not is_quantityx_selected():
+            select_quantityx()
+            if not wait_until(is_quantityx_selected, min_wait_ms=600, max_wait_ms=3000):
+                return None
+
+        step = {
+            "action": "withdraw-item",
+            "click": {"type": "rect-center"},
+            "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
+            "postconditions": [f"inventory contains '{item_name}'"],
+        }
+
+        return dispatch(step)
         
-        # Step 4: Press Enter to confirm
-        step4 = {"action": "confirm-withdraw-x", "click": {"type": "key", "key": "enter"}}
-        dispatch(step4)
-        if not wait_until(lambda: inv_has(item_name, min_qty=int(withdraw_x)), min_wait_ms=600, max_wait_ms=3000):
-            return None
-        return True
-
     # --- Default: simple left-click withdraw (Withdraw-1 / custom shift-click config) ---
     step = {
         "action": "withdraw-item",
@@ -344,7 +369,7 @@ def withdraw_item(
         "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
         "postconditions": [f"inventory contains '{item_name}'"],
     }
-    return dispatch_with_camera(step, aim_ms=420)
+    return dispatch(step)
 
 
 import time

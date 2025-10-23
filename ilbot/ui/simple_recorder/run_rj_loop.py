@@ -427,6 +427,18 @@ Examples:
         logging.info("No rules configured - plan will run indefinitely")
     
     try:
+        # Get username for tracking (extract from session directory path)
+        username = ""
+        try:
+            from ilbot.ui.simple_recorder.helpers.runtime_utils import ipc
+            # Try to get player data and extract name if available
+            player_data = ipc.get_player()
+            if player_data and player_data.get("ok"):
+                player_info = player_data.get("player", {})
+                username = player_info.get("name", "")
+        except Exception:
+            pass
+        
         while True:
             # Check rules every loop
             from ilbot.ui.simple_recorder.helpers.rules import check_rules
@@ -437,7 +449,8 @@ Examples:
                 skill_level=skill_level,
                 total_level=total_level,
                 item_name=item_name,
-                item_quantity=item_quantity
+                item_quantity=item_quantity,
+                username=username
             )
             
             if triggered_rule:

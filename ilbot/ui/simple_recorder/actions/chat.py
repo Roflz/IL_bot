@@ -450,7 +450,7 @@ def find_chat_message(search_text: str, case_sensitive: bool = False) -> Optiona
     """
     try:
         # Get all chat message widgets
-        messages = get_chatbox_scroll_areas()
+        messages = get_chatbox_scroll_areas()[:8]
         
         if not messages:
             return None
