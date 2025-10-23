@@ -253,7 +253,8 @@ def object_exists(
     
     # Use the efficient find_object command
     obj_resp = ipc.find_object(name, types=types)
-    return obj_resp and obj_resp.get("ok") and obj_resp.get("found", False)
+    if obj_resp and obj_resp.get("ok") and obj_resp.get("found", False):
+        return obj_resp['object'].get('distance') < radius
 
 
 def click_object_closest_by_path_distance(name: str, action: str) -> Optional[dict]:

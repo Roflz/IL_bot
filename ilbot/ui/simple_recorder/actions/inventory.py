@@ -2,6 +2,7 @@ import time
 
 from . import tab
 from .tab import open_tab
+from .timing import wait_until
 from ..helpers.inventory import inv_has, inv_has_any, get_item_coordinates, inv_count, first_inv_slot, inv_slot_bounds
 from ..helpers.runtime_utils import ipc, ui, dispatch
 from ..helpers.tab import is_inventory_tab_open
@@ -207,8 +208,8 @@ def use_item_on_item(item1_name: str, item2_name: str, max_retries: int = 3) -> 
     """
     # Ensure inventory tab is open before using items
     if not tab.is_tab_open("INVENTORY"):
-        tab.open_inventory_tab()
-        return None
+        if not tab.ensure_tab_open("INVENTORY"):
+            return None
     
     # Check if both items exist in inventory
     if not has_item(item1_name):
@@ -278,10 +279,11 @@ def use_item_on_item(item1_name: str, item2_name: str, max_retries: int = 3) -> 
         result1 = dispatch(step1)
         
         if result1:
+            time.sleep(0.2)
             break
             
         if attempt < max_retries - 1:
-            time.sleep(0.2)
+            time.sleep(0.5)
     
     if not result1:
         return None

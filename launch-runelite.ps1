@@ -254,15 +254,11 @@ for ($i = 0; $i -lt $Count; $i++) {
   # Write settings.properties
   $instanceSettingsFile = Join-Path $configDir "settings.properties"
   $settingsContent = @"
-stateexporter2.enableExport=true
+  
 runelite.ipcinputplugin=true
 ipcinput.port=$port
 ipcinput.mode=AWT
 ipcinput.hoverDelayMs=10
-runelite.stateexporter2plugin=true
-stateexporter2.maxGamestateFiles=50
-stateexporter2.exportIntervalMs=50
-stateexporter2.gamestatesDirectory=$exp
 defaultworld.lastWorld=$worldForInstance
 defaultworld.useLastWorld=true
 "@

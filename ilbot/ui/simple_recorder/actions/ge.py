@@ -1461,7 +1461,7 @@ def check_and_sell_required_items(required_items: list, item_requirements: dict,
             if required_qty == -1 and not is_open():
                 missing_items.append((item, required_qty))
                 continue
-            if not inv.has_item(item, min_qty=required_qty):
+            if not inv.has_item(item, min_qty=required_qty) and not is_open():
                 missing_items.append((item, required_qty))
         
         # If we're missing items, try to get them from the bank

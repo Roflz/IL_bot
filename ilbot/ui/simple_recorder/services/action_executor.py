@@ -172,8 +172,18 @@ class ActionExecutor:
             def _match(e):
                 eo = clean_rs((e.get("option") or "")).lower()
                 et = clean_rs((e.get("target") or "")).lower()
-                return ((not want_opt) or (eo == want_opt or want_opt == eo)) and \
-                    ((not want_tgt) or (want_tgt == et))
+                
+                # Check if exact match is specified (defaults to current behavior if not specified)
+                exact_match = click.get("exact_match", True)
+                
+                if exact_match:
+                    # Exact match: option and target must match exactly
+                    return ((not want_opt) or (eo == want_opt)) and \
+                        ((not want_tgt) or (et == want_tgt))
+                else:
+                    # Partial match: option contains the wanted text (current behavior)
+                    return ((not want_opt) or (want_opt in eo)) and \
+                        ((not want_tgt) or (want_tgt in et))
 
             cand = [e for e in entries if _match(e)]
             if not cand:
@@ -185,7 +195,15 @@ class ActionExecutor:
 
             if target_visual_index == 0:
                 # First option - use simple left-click instead of context menu
-                return self._click_canvas(ax, ay, button="left")
+                click_result = self._click_canvas(ax, ay, button="left")
+                
+                # Get the last interaction data after the click
+                interaction_data = self._get_last_interaction()
+                
+                return {
+                    "click_result": click_result,
+                    "interaction": interaction_data
+                }
             else:
                 # Menu not open after hover, need to right-click to open it
                 self._click_canvas(ax, ay, button="right")
@@ -214,7 +232,16 @@ class ActionExecutor:
                 cx += int(self.canvas_offset[0])
                 cy += int(self.canvas_offset[1])
 
-                return self._click_canvas(cx, cy, button="left")
+                # Perform the click and capture interaction data
+                click_result = self._click_canvas(cx, cy, button="left")
+                
+                # Get the last interaction data after the click
+                interaction_data = self._get_last_interaction()
+                
+                return {
+                    "click_result": click_result,
+                    "interaction": interaction_data
+                }
 
         if ctype == "wait":
             ms = int(click.get("ms", 0))
@@ -260,3 +287,18 @@ class ActionExecutor:
             return (x + w // 2, y + h // 2)
         except Exception:
             return (None, None)
+
+    def _get_last_interaction(self):
+        """Get the last interaction data from the StateExporter2Plugin."""
+        try:
+            # Small delay to ensure the interaction is captured
+            time.sleep(0.1)
+            
+            # Get the last interaction data via IPC
+            result = self.ipc.get_last_interaction()
+            if result and result.get("ok"):
+                return result.get("interaction")
+            return None
+        except Exception as e:
+            self.debug(f"[IPC] get_last_interaction error: {e}")
+            return None

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Optional, Union
 
 from .timing import wait_until
-from .widgets import click_chat_continue, find_chat_continue_widget
+from .widgets import click_chat_continue, find_chat_continue_widget, get_widget_children
 from ..helpers.runtime_utils import ui, dispatch
 from ..helpers.chat import (
     can_continue as _can_continue,
@@ -14,7 +14,7 @@ from ..helpers.chat import (
     dialogue_is_open as _dialogue_is_open,
     get_dialogue_text_raw as _get_dialogue_text_raw,
 )
-from ..helpers.utils import press_spacebar
+from ..helpers.utils import press_spacebar, clean_rs
 
 
 def dialogue_is_open() -> bool:
@@ -294,3 +294,188 @@ def dialogue_contains_text(phrase: str, case_sensitive: bool = False) -> bool:
     except Exception as e:
         print(f"[DIALOGUE] Error checking dialogue for phrase '{phrase}': {e}")
         return False
+
+
+def get_chatbox_scroll_areas() -> list:
+    """
+    Retrieves all scroll area widgets within the main chatbox scroll area (162.57)
+    that contain actual chat messages.
+    
+    The main chatbox scroll area container is widget group 162, child 57.
+    Its runtime ID is 10616889, and its children also report this as their ParentId.
+    The line widgets (e.g., S 162.58 Chatbox.LINE@) are also children of this
+    container but typically do not have text content.
+    
+    Returns:
+        A list of dictionaries, where each dictionary represents a chat message
+        scroll area widget. Returns an empty list if no widgets are found or
+        an error occurs.
+    """
+    
+    CHATBOX_SCROLLAREA_GROUP_ID = 10616889
+    
+    try:
+        children_widgets = get_widget_children(CHATBOX_SCROLLAREA_GROUP_ID)
+        
+        if not children_widgets:
+            print(f"[CHAT] No children widgets found for {CHATBOX_SCROLLAREA_GROUP_ID}")
+            return []
+
+
+        filtered = []
+        for widget in children_widgets.get("children"):
+            if widget.get('id') == 10616889:
+                filtered.append(widget)
+
+        messages = []
+        waiting_for_body = False
+
+        for m in filtered:
+            # work with a shallow copy so we retain metadata but don't mutate the original list
+            msg = dict(m)
+            text = msg.get("text", "")
+            text_stripped = text.rstrip()
+
+            # speaker/header line like "AllTheTime:"
+            if text_stripped.endswith(":"):
+                author = text_stripped[:-1].strip()
+                msg["author"] = author
+                msg["full_text"] = text_stripped  # we'll append the body next
+                msg["parts"] = [text_stripped]  # [header, body?]
+                messages.append(msg)
+                waiting_for_body = True
+
+            elif waiting_for_body:
+                body = clean_rs(text)
+                # append body to the LAST aggregated message
+                messages[-1]["full_text"] += " " + body
+                messages[-1]["parts"].append(body)
+                waiting_for_body = False
+
+            else:
+                # stand-alone/system/broadcast message; keep metadata + cleaned text
+                msg["author"] = None
+                msg["full_text"] = clean_rs(text)
+                msg["parts"] = [msg["full_text"]]
+                messages.append(msg)
+
+        return messages
+        
+    except Exception as e:
+        print(f"[CHAT] Error retrieving chatbox scroll areas: {e}")
+        return []
+
+def click_chat_message(search_text: str, case_sensitive: bool = False) -> Optional[dict]:
+    """
+    Click on a chat message that matches the search text.
+    
+    Args:
+        search_text: The text to search for in chat messages
+        case_sensitive: Whether the search should be case sensitive (default: False)
+    
+    Returns:
+        Dictionary with click result and interaction data if successful, None if no match found
+    """
+    try:
+        # Get all chat message widgets
+        messages = get_chatbox_scroll_areas()
+        
+        if not messages:
+            print(f"[CHAT] No chat messages found")
+            return None
+        
+        # Prepare search text based on case sensitivity
+        if not case_sensitive:
+            search_text = search_text.lower()
+        
+        # Find matching message
+        matching_message = None
+        for message in messages:
+            # Check both full_text and text fields
+            full_text = message.get("full_text", "")
+            text = message.get("text", "")
+            
+            # Prepare text for comparison based on case sensitivity
+            if not case_sensitive:
+                full_text = full_text.lower()
+                text = text.lower()
+            
+            # Check if search text matches either field
+            if search_text in full_text or search_text in text:
+                # Check if message is visible and clickable
+                if message.get("visible", False):
+                    matching_message = message
+                    break
+        
+        if not matching_message:
+            print(f"[CHAT] No matching visible chat message found for: '{search_text}'")
+            return None
+        
+        # Get click coordinates from bounds
+        bounds = matching_message.get("bounds", {})
+        if not bounds:
+            print(f"[CHAT] No bounds found for matching message")
+            return None
+        
+        # Calculate center coordinates
+        x = bounds.get("x", 0) + bounds.get("width", 0) // 2
+        y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+        
+        print(f"[CHAT] Clicking chat message at ({x}, {y}): {matching_message.get('full_text', '')[:50]}...")
+        
+        # Create click step
+        step = {
+            "action": "click-chat-message",
+            "click": {"type": "point", "x": x, "y": y},
+            "target": {"domain": "chat", "name": "message", "text": search_text},
+        }
+        
+        return dispatch(step)
+        
+    except Exception as e:
+        print(f"[CHAT] Error clicking chat message '{search_text}': {e}")
+        return None
+
+
+def find_chat_message(search_text: str, case_sensitive: bool = False) -> Optional[dict]:
+    """
+    Find a chat message that matches the search text without clicking it.
+    
+    Args:
+        search_text: The text to search for in chat messages
+        case_sensitive: Whether the search should be case sensitive (default: False)
+    
+    Returns:
+        Dictionary with message data if found, None if no match found
+    """
+    try:
+        # Get all chat message widgets
+        messages = get_chatbox_scroll_areas()
+        
+        if not messages:
+            return None
+        
+        # Prepare search text based on case sensitivity
+        if not case_sensitive:
+            search_text = search_text.lower()
+        
+        # Find matching message
+        for message in messages:
+            # Check both full_text and text fields
+            full_text = message.get("full_text", "")
+            text = message.get("text", "")
+            
+            # Prepare text for comparison based on case sensitivity
+            if not case_sensitive:
+                full_text = full_text.lower()
+                text = text.lower()
+            
+            # Check if search text matches either field
+            if search_text in full_text or search_text in text:
+                return message
+        
+        return None
+        
+    except Exception as e:
+        print(f"[CHAT] Error finding chat message '{search_text}': {e}")
+        return None

@@ -533,3 +533,15 @@ class IPCClient:
     def check_door_traversal(self, door_id: int) -> dict:
         """Check if a door can be traversed."""
         return self._send({"cmd": "check_door_traversal", "door_id": door_id}) or {}
+    
+    def get_ge_prices(self) -> dict:
+        """Get current GE prices from RuneLite GE plugin."""
+        return self._send({"cmd": "get_ge_prices"}) or {}
+    
+    def get_last_interaction(self) -> dict:
+        """Get the last interaction data from StateExporter2Plugin."""
+        return self._send({"cmd": "get_last_interaction"}) or {}
+    
+    def get_players(self) -> dict:
+        """Get information about all players around the local player."""
+        return self._send({"cmd": "get_players"}) or {}

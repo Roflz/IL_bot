@@ -590,6 +590,25 @@ def get_widget_at_position(x: int, y: int) -> Optional[Dict[str, Any]]:
     
     return None
 
+def get_crafting_options_rings():
+    rings = get_widget_children(29229062).get("children")
+    options = []
+    for ring in rings:
+        if not ring.get('itemId') == 1647 and not ring.get('itemId') == -1:
+            options.append(ring)
+
+    return options
+
+
+def get_crafting_options_necklaces():
+    necklaces = get_widget_children(29229074).get("children")
+    options = []
+    for necklace in necklaces:
+        if not necklace.get('itemId') == 1647:
+            options.append(necklace)
+
+    return options
+
 def smithing_interface_open() -> bool:
     """
     Check if the smithing interface is open and visible.

@@ -1,3 +1,4 @@
+import logging
 from typing import Optional, Dict, Any
 import time
 import json
@@ -90,67 +91,13 @@ def setup_camera_optimal(target_scale: int = 551, target_pitch: int = 383) -> bo
     Returns:
         True if setup completed successfully, False otherwise
     """
-    # Timing instrumentation
-    t0_start = _mark_timing("start")
-    timing_data = {
-        "phase": "camera_setup_timing",
-        "target_scale": target_scale,
-        "target_pitch": target_pitch,
-        "ok": True,
-        "error": None,
-        "dur_ms": {},
-        "counts": {"key_presses": 0, "scrolls": 0, "checks": 0},
-        "camera": {"yaw": None, "pitch": None, "scale": None}
-    }
     
     import time
-    
-    def hold_until_condition(condition_func, key, max_duration=5.0):
-        """Hold a key until condition is met or max duration reached"""
-        start_time = time.time()
-        check_interval = 0.05  # Check every 50ms
-        
-        # Press the key down
-        ipc.key_press(key)
-        timing_data["counts"]["key_presses"] += 1
-        
-        try:
-            # Monitor the condition while key is held down
-            while time.time() - start_time < max_duration:
-                timing_data["counts"]["checks"] += 1
-                if condition_func():
-                    return True
-                time.sleep(check_interval)
-        finally:
-            # Always release the key when done
-            ipc.key_release(key)
-        
-        return False
-    
-    def scroll_until_condition(condition_func, max_duration=5.0):
-        """Scroll until condition is met or max duration reached"""
-        start_time = time.time()
-        check_interval = 0.1  # Check every 100ms
-        
-        while time.time() - start_time < max_duration:
-            timing_data["counts"]["checks"] += 1
-            if condition_func():
-                return True
-            
-            # Send scroll command
-            ipc.scroll(-1)
-            timing_data["counts"]["scrolls"] += 1
-            time.sleep(check_interval)
-        
-        return False
     
     try:
         # Get initial camera state
         camera_stats = get_camera_stats()
         if not camera_stats or not camera_stats.get("ok"):
-            timing_data["ok"] = False
-            timing_data["error"] = "Could not get initial camera stats"
-            _emit_timing(timing_data)
             print("[CAMERA] Could not get initial camera stats")
             return False
         
@@ -167,9 +114,6 @@ def setup_camera_optimal(target_scale: int = 551, target_pitch: int = 383) -> bo
                 return abs(stats.get("scale", 512) - target_scale) <= 30
             
             if not scroll_until_condition(scale_good, max_duration=8.0):
-                timing_data["ok"] = False
-                timing_data["error"] = "Zoom adjustment timed out"
-                _emit_timing(timing_data)
                 print("[CAMERA] Zoom adjustment timed out")
                 return False
         
@@ -183,36 +127,130 @@ def setup_camera_optimal(target_scale: int = 551, target_pitch: int = 383) -> bo
                 return abs(stats.get("pitch", 0) - target_pitch) <= 30
             
             if not hold_until_condition(pitch_good, "UP", max_duration=8.0):
-                timing_data["ok"] = False
-                timing_data["error"] = "Pitch adjustment timed out"
-                _emit_timing(timing_data)
                 print("[CAMERA] Pitch adjustment timed out")
                 return False
         
         # Final check
         final_stats = get_camera_stats()
         if final_stats and final_stats.get("ok"):
-            final_scale = final_stats.get("scale", 512)
-            final_pitch = final_stats.get("pitch", 0)
-            timing_data["camera"]["yaw"] = final_stats.get("yaw")
-            timing_data["camera"]["pitch"] = final_pitch
-            timing_data["camera"]["scale"] = final_scale
-            t1_complete = _mark_timing("complete")
-            timing_data["dur_ms"]["total"] = (t1_complete - t0_start) / 1_000_000
-            _emit_timing(timing_data)
             return True
-        
-        timing_data["ok"] = False
-        timing_data["error"] = "Could not get final stats"
-        _emit_timing(timing_data)
+
         print("[CAMERA] Camera setup failed - could not get final stats")
         return False
     
     except Exception as e:
-        t2_error = _mark_timing("error")
-        timing_data["ok"] = False
-        timing_data["error"] = str(e)
-        timing_data["dur_ms"]["total"] = (t2_error - t0_start) / 1_000_000
-        _emit_timing(timing_data)
         print(f"[CAMERA] Camera setup failed with error: {e}")
+        return False
+
+def hold_until_condition(condition_func, key, max_duration=5.0):
+    """Hold a key until condition is met or max duration reached"""
+    start_time = time.time()
+    check_interval = 0.05  # Check every 50ms
+
+    # Press the key down
+    ipc.key_press(key)
+
+    try:
+        # Monitor the condition while key is held down
+        while time.time() - start_time < max_duration:
+            if condition_func():
+                return True
+            time.sleep(check_interval)
+    finally:
+        # Always release the key when done
+        ipc.key_release(key)
+
+    return False
+
+def scroll_until_condition(condition_func, max_duration=5.0):
+    """Scroll until condition is met or max duration reached"""
+    start_time = time.time()
+    check_interval = 0.1  # Check every 100ms
+
+    while time.time() - start_time < max_duration:
+        if condition_func():
+            return True
+
+        # Send scroll command
+        ipc.scroll(-1)
+        time.sleep(check_interval)
+
+    return False
+
+def move_camera_random() -> bool:
+    """Move the camera randomly with yaw, pitch, and scroll movements."""
+    try:
+        import random
+        
+        # Get initial camera position
+        initial_stats = get_camera_stats()
+        if not initial_stats or not initial_stats.get("ok"):
+            print(f"[CAMERA] Could not get initial camera stats")
+            return False
+        
+        initial_yaw = initial_stats.get("yaw", 0)
+        initial_pitch = initial_stats.get("pitch", 0)
+        
+        # Random movements with minimum thresholds
+        yaw_amount = random.randint(200, 400) if random.choice([True, False]) else random.randint(-400, -200)
+        pitch_amount = random.randint(50, 100) if random.choice([True, False]) else random.randint(-100, -50)
+        scroll_amount = random.randint(5, 10) if random.choice([True, False]) else random.randint(-10, -5)
+        
+        print(f"[CAMERA] Random movements - Yaw: {yaw_amount}, Pitch: {pitch_amount}, Scroll: {scroll_amount}")
+        
+        # Use existing functions for each movement
+        success = True
+        
+        # Handle yaw movement
+        if yaw_amount != 0:
+            def yaw_condition():
+                current_stats = get_camera_stats()
+                if not current_stats or not current_stats.get("ok"):
+                    return False
+                current_yaw = current_stats.get("yaw", 0)
+                yaw_change = abs(current_yaw - initial_yaw)
+                return yaw_change >= abs(yaw_amount) / 10
+            
+            key = "RIGHT" if yaw_amount > 0 else "LEFT"
+            direction = "right" if yaw_amount > 0 else "left"
+            print(f"[CAMERA] Moving yaw {direction} by {abs(yaw_amount)} pixels")
+            if not hold_until_condition(yaw_condition, key, max_duration=2.0):
+                print(f"[CAMERA] Yaw movement timed out")
+                success = False
+        
+        # Handle pitch movement
+        if pitch_amount != 0:
+            def pitch_condition():
+                current_stats = get_camera_stats()
+                if not current_stats or not current_stats.get("ok"):
+                    return False
+                current_pitch = current_stats.get("pitch", 0)
+                pitch_change = abs(current_pitch - initial_pitch)
+                return pitch_change >= abs(pitch_amount) / 10
+            
+            key = "UP" if pitch_amount > 0 else "DOWN"
+            direction = "up" if pitch_amount > 0 else "down"
+            print(f"[CAMERA] Moving pitch {direction} by {abs(pitch_amount)} pixels")
+            if not hold_until_condition(pitch_condition, key, max_duration=2.0):
+                print(f"[CAMERA] Pitch movement timed out")
+                success = False
+        
+        # Handle scroll movement
+        if scroll_amount != 0:
+            scroll_direction = "in" if scroll_amount > 0 else "out"
+            print(f"[CAMERA] Scrolling zoom {scroll_direction} by {abs(scroll_amount)} steps")
+            
+            for _ in range(abs(scroll_amount)):
+                if scroll_amount > 0:
+                    ipc.scroll(1)  # Scroll in
+                else:
+                    ipc.scroll(-1)  # Scroll out
+                time.sleep(0.1)
+            
+            print(f"[CAMERA] Completed {abs(scroll_amount)} scroll steps")
+        
+        return success
+        
+    except Exception as e:
+        print(f"[CAMERA] Could not move camera: {e}")
         return False

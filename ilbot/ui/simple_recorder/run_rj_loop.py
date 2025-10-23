@@ -269,6 +269,12 @@ Examples:
         help="Stop when skill reaches target level (format: skill_name:level, e.g., woodcutting:20)"
     )
     parser.add_argument(
+        "--total-level", 
+        type=int, 
+        default=0, 
+        help="Stop when total level reaches target (0 = no limit)"
+    )
+    parser.add_argument(
         "--stop-item", 
         type=str, 
         default="", 
@@ -285,6 +291,13 @@ Examples:
         type=str, 
         default="", 
         help="Items to sell (format: name:quantity:bumps:price,name:quantity:bumps:price)"
+    )
+    parser.add_argument(
+        "--role", 
+        type=str, 
+        default="worker", 
+        choices=["worker", "mule"],
+        help="Role for ge_trade plan: 'worker' or 'mule' (default: worker)"
     )
     
     args = parser.parse_args()
@@ -358,6 +371,11 @@ Examples:
             plan_kwargs['items_to_sell'] = sell_items
             print(f"[DEBUG] Sell items: {sell_items}")
     
+    # Add role parameter for ge_trade plan
+    if args.plan == "ge_trade":
+        plan_kwargs['role'] = args.role
+        print(f"[DEBUG] Role: {args.role}")
+    
     plan = plan_class(**plan_kwargs)
     print(f"[DEBUG] Created plan: {plan.__class__.__name__} with id: {getattr(plan, 'id', 'unknown')}")
     print(f"[DEBUG] Plan parameters: {plan_kwargs}")
@@ -390,6 +408,7 @@ Examples:
     # Set up rules
     start_time = datetime.now()
     max_minutes = args.max_runtime if args.max_runtime > 0 else 0
+    total_level = args.total_level if args.total_level > 0 else 0
     
     # Log rules
     rules_log = []
@@ -397,6 +416,8 @@ Examples:
         rules_log.append(f"Time limit: {max_minutes} minutes")
     if skill_name and skill_level > 0:
         rules_log.append(f"Skill: {skill_name} level {skill_level}")
+    if total_level > 0:
+        rules_log.append(f"Total level: {total_level}")
     if item_name and item_quantity > 0:
         rules_log.append(f"Item: {item_quantity} {item_name}")
     
@@ -414,6 +435,7 @@ Examples:
                 max_minutes=max_minutes,
                 skill_name=skill_name,
                 skill_level=skill_level,
+                total_level=total_level,
                 item_name=item_name,
                 item_quantity=item_quantity
             )

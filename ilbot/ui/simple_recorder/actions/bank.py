@@ -826,7 +826,7 @@ def get_item_count(item_name: str) -> int:
     
     total_count = 0
     for item in bank_items:
-        if item.get("name") == item_name:
+        if item.get("name").lower() == item_name.lower():
             total_count += item.get("quantity", 0)
     
     return total_count
