@@ -44,7 +44,7 @@ def _calculate_path_distance_to_waypoint(waypoint_index: int, player_x: int, pla
     return total_distance
 
 
-def _get_next_long_distance_waypoints(destination_key: str, custom_dest_rect: tuple = None) -> list[tuple[int, int]] | None:
+def _get_next_long_distance_waypoints(destination_key: str, custom_dest_rect: tuple = None, destination: str = "center") -> list[tuple[int, int]] | None:
     """
     Get the next waypoint from the cached long-distance path.
     Generate path ONCE at the start, then follow it step by step.
@@ -61,7 +61,7 @@ def _get_next_long_distance_waypoints(destination_key: str, custom_dest_rect: tu
     if (_long_distance_path_cache is None or 
         _long_distance_destination != destination_key):
         
-        waypoints = get_long_distance_waypoints(destination_key, custom_dest_rect)
+        waypoints = get_long_distance_waypoints(destination_key, custom_dest_rect, destination)
         _long_distance_path_cache = waypoints
         _long_distance_destination = destination_key
         _long_distance_waypoint_index = 0
@@ -473,13 +473,14 @@ def _door_is_open(door_plan: dict) -> bool:
     return False  # Door still exists with same ID, it's closed
 
 
-def go_to(rect_or_key: str | tuple | list, center: bool = False) -> dict | None:
+def go_to(rect_or_key: str | tuple | list, center: bool = False, destination: str = "center") -> dict | None:
     """
     One movement click toward an area.
     
     Args:
         rect_or_key: Region key or (minX, maxX, minY, maxY) tuple
         center: If True, go to center of region instead of stopping at boundary
+        destination: Destination selection method ("center", "random", "center_weighted")
     """
     try:
         run_energy = player.get_run_energy()
@@ -499,6 +500,22 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False) -> dict | None:
                 rect_key = actual_bank_key  # Use the actual bank key for consistency
             else:
                 rect = get_nav_rect(rect_key)
+        
+        # Handle destination selection
+        if destination != "center" and rect_key != "custom":
+            if destination == "random":
+                from ..helpers.utils import get_random_walkable_tile
+                selected_tile = get_random_walkable_tile(rect_key)
+            elif destination == "center_weighted":
+                from ..helpers.utils import get_center_weighted_walkable_tile
+                selected_tile = get_center_weighted_walkable_tile(rect_key)
+            else:
+                selected_tile = None
+            
+            if selected_tile:
+                # Use the selected tile as a custom destination
+                rect = (selected_tile[0], selected_tile[0], selected_tile[1], selected_tile[1])
+                rect_key = "custom"
 
         player_x, player_y = player.get_x(), player.get_y()
     
@@ -507,7 +524,7 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False) -> dict | None:
             return None
         
         # Check how many waypoints are left in the long-distance path
-        waypoint_batch = _get_next_long_distance_waypoints(rect_key, rect)
+        waypoint_batch = _get_next_long_distance_waypoints(rect_key, rect, destination)
         waypoints_remaining = len(_long_distance_path_cache) - _long_distance_waypoint_index if _long_distance_path_cache else 0
     
         if waypoints_remaining > 0:
@@ -606,6 +623,20 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False) -> dict | None:
     except Exception as e:
         raise e
 
+def travel_to_bank(bank_area= None):
+    """Handle traveling to the bank."""
+    # Check if we're near a bank in the destination area
+    from ilbot.ui.simple_recorder.helpers.bank import near_any_bank
+    destination_area = bank_area if bank_area else None
+    if not near_any_bank(destination_area):
+        if bank_area:
+            go_to(bank_area)
+        else:
+            go_to_closest_bank()
+        return False
+    else:
+        return True
+
 
 def _calculate_distance(x1: int, y1: int, x2: int, y2: int) -> float:
     """Calculate Manhattan distance between two points."""
@@ -680,7 +711,7 @@ def in_area(area_key: str) -> bool:
     return min_x <= player_x <= max_x and min_y <= player_y <= max_y
 
 
-def get_long_distance_waypoints(destination_key: str, custom_dest_rect: tuple = None) -> list[tuple[int, int]] | None:
+def get_long_distance_waypoints(destination_key: str, custom_dest_rect: tuple = None, destination: str = "center") -> list[tuple[int, int]] | None:
     """
     Generate waypoints for long-distance travel using the collision map pathfinder.
     This calls the pathfinder.py directly to get a complete path.
@@ -688,6 +719,7 @@ def get_long_distance_waypoints(destination_key: str, custom_dest_rect: tuple = 
     Args:
         destination_key: Navigation key for destination
         custom_dest_rect: Optional custom destination rectangle as (min_x, max_x, min_y, max_y)
+        destination: Destination selection method ("center", "random", "center_weighted")
     """
     try:
         # Import pathfinder functions
@@ -712,9 +744,24 @@ def get_long_distance_waypoints(destination_key: str, custom_dest_rect: tuple = 
                 return None
         
         min_x, max_x, min_y, max_y = dest_rect
-        dest_center_x = (min_x + max_x) // 2
-        dest_center_y = (min_y + max_y) // 2
-        destination = (dest_center_x, dest_center_y)
+        
+        # Handle destination selection
+        if destination == "random":
+            from ..helpers.utils import get_random_walkable_tile
+            selected_tile = get_random_walkable_tile(destination_key, dest_rect)
+        elif destination == "center_weighted":
+            from ..helpers.utils import get_center_weighted_walkable_tile
+            selected_tile = get_center_weighted_walkable_tile(destination_key, dest_rect)
+        else:  # "center" or default
+            selected_tile = None
+        
+        if selected_tile:
+            destination = selected_tile
+        else:
+            # Fallback to center if no tile found or using center mode
+            dest_center_x = (min_x + max_x) // 2
+            dest_center_y = (min_y + max_y) // 2
+            destination = (dest_center_x, dest_center_y)
         
         # Load collision data filtered by start and destination coordinates
         collision_data = load_collision_data(current_pos, destination)

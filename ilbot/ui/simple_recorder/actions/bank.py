@@ -1,8 +1,8 @@
 # ilbot/ui/simple_recorder/actions/banking.py
 import logging
-from typing import List
+from typing import List, Dict, Optional, Tuple
 
-from . import ge, widgets, inventory, objects
+from . import ge, widgets, inventory, objects, equipment, player
 from .timing import wait_until
 from .travel import in_area, _first_blocking_door_from_waypoints
 from ..helpers.bank import first_bank_slot, deposit_all_button_bounds, is_quantityx_selected, select_quantityx, \
@@ -10,7 +10,7 @@ from ..helpers.bank import first_bank_slot, deposit_all_button_bounds, is_quanti
 from ..helpers.inventory import inv_has_any, norm_name
 from ..helpers.runtime_utils import ipc, ui, dispatch
 from ..helpers.rects import unwrap_rect, rect_center_xy
-from ..helpers.utils import type_text, press_enter
+from ..helpers.utils import type_text, press_enter, clean_rs
 from ..helpers.widgets import widget_exists
 
 
@@ -377,7 +377,7 @@ import time
 import time
 
 def withdraw_items(
-    items: dict,
+    items,
     withdraw_all: bool = False,
     timeout: float = 15.0,
 ) -> dict | None:
@@ -386,15 +386,45 @@ def withdraw_items(
     or the timeout expires.
 
     Args:
-        items (dict): Mapping of item name -> quantity desired.
+        items: Either dict (item name -> quantity) or list of item names (withdraw all available).
         withdraw_all (bool): If True, withdraw all of each item regardless of quantity.
         timeout (float): Max seconds to wait before giving up (default 15s).
 
     Returns:
         Result of the last successful withdrawal, or None if all failed or timed out.
     """
-    if not isinstance(items, dict) or not items:
-        # Invalid items dict provided
+    if not items:
+        # Invalid items provided
+        return None
+
+    # Handle list of item names (withdraw all available)
+    if isinstance(items, list):
+        print(f"[BANK] Withdrawing all available quantities of {len(items)} items")
+        
+        last_result = None
+        for item_name in items:
+            if not isinstance(item_name, str):
+                continue
+                
+            if has_item(item_name):
+                bank_count = get_item_count(item_name)
+                if bank_count == 1:
+                    result = withdraw_item(item_name, withdraw_x=1)
+                else:
+                    result = withdraw_item(item_name, withdraw_all=True)
+                
+                if result:
+                    last_result = result
+                    print(f"[BANK] Withdrew {bank_count} {item_name}")
+                else:
+                    print(f"[BANK] Failed to withdraw {item_name}")
+                
+                time.sleep(0.3)
+        
+        return last_result
+
+    # Handle dict format (original functionality)
+    if not isinstance(items, dict):
         return None
 
     print(f"[BANK] Withdrawing {len(items)} items")
@@ -482,6 +512,14 @@ def ensure_note_mode_disabled() -> dict | None:
         return toggle_note_mode()
     return None
 
+
+def ensure_note_mode_enabled() -> dict | None:
+    """Ensure bank note mode is disabled (withdraw as items, not notes)"""
+
+    from ..helpers.bank import bank_note_selected
+    if not bank_note_selected():
+        return toggle_note_mode()
+    return None
 
 def deposit_equipment() -> dict | None:
     """Deposit all equipped items into the bank."""
@@ -629,7 +667,7 @@ def deposit_item(item_name: str) -> dict | None:
                 continue
                 
             # Remove color codes from the name for comparison
-            clean_name = child_name.replace("<col=ff9040>", "").replace("</col>", "").strip()
+            clean_name = clean_rs(child_name)
             if norm_name(clean_name) == search_name:
                 target_item = child
                 break
@@ -1014,3 +1052,245 @@ def click_bank_tab(tab_name: str) -> dict | None:
         "postconditions": [],
     }
     return dispatch(step)
+
+
+# Equipment setup functions for complex plans
+def setup_equipment_from_bank(equipment_config: Dict, plan_id: str = "UNKNOWN") -> Tuple[bool, List[str]]:
+    """
+    Set up equipment from bank based on skill levels and available items.
+    
+    Args:
+        equipment_config: Equipment configuration dict
+        plan_id: Plan ID for logging
+        
+    Returns:
+        Tuple of (success, missing_items)
+    """
+    try:
+        missing_items = []
+        
+        # Setup weapons
+        if "weapon_tiers" in equipment_config and equipment_config["weapon_tiers"]:
+            success, missing_weapons = _setup_weapons(equipment_config["weapon_tiers"], plan_id)
+            if not success:
+                missing_items.extend(missing_weapons)
+        
+        # Setup armor
+        if "armor_tiers" in equipment_config and equipment_config["armor_tiers"]:
+            success, missing_armor = _setup_armor(equipment_config["armor_tiers"], plan_id)
+            if not success:
+                missing_items.extend(missing_armor)
+        
+        # Setup jewelry
+        if "jewelry_tiers" in equipment_config and equipment_config["jewelry_tiers"]:
+            success, missing_jewelry = _setup_jewelry(equipment_config["jewelry_tiers"], plan_id)
+            if not success:
+                missing_items.extend(missing_jewelry)
+        
+        # Setup tools (with conditional equipping)
+        if "tool_tiers" in equipment_config and equipment_config["tool_tiers"]:
+            success, missing_tools = _setup_tools(equipment_config["tool_tiers"], plan_id, allow_fallback=True)
+            if not success:
+                missing_items.extend(missing_tools)
+        
+        return len(missing_items) == 0, missing_items
+        
+    except Exception as e:
+        logging.error(f"[setup_equipment_from_bank] actions/bank.py: {e}")
+        return False, [f"Equipment setup error: {e}"]
+
+
+def _setup_weapons(weapon_tiers: List[Dict], plan_id: str) -> Tuple[bool, List[str]]:
+    """Setup weapons based on attack level."""
+    try:
+        from .equipment import get_best_weapon_for_level
+        
+        target_weapon = get_best_weapon_for_level(weapon_tiers, plan_id)
+        if not target_weapon:
+            return True, []  # No weapon needed
+        
+        weapon_name = target_weapon["name"]
+        
+        # Check if we have the weapon
+        if not (has_item(weapon_name) or inventory.has_item(weapon_name) or equipment.has_equipped(weapon_name)):
+            return False, [weapon_name]
+        
+        # Equip the weapon if not already equipped
+        if not equipment.has_equipped(weapon_name):
+            if inventory.has_item(weapon_name):
+                equipment.equip_item(weapon_name)
+            elif has_item(weapon_name):
+                withdraw_item(weapon_name, 1)
+                equipment.equip_item(weapon_name)
+        
+        return True, []
+        
+    except Exception as e:
+        logging.error(f"[_setup_weapons] actions/bank.py: {e}")
+        return False, [f"Weapon setup error: {e}"]
+
+
+def _setup_armor(armor_tiers: Dict, plan_id: str) -> Tuple[bool, List[str]]:
+    """Setup armor based on defence level."""
+    try:
+        from .equipment import get_best_armor_for_level
+        
+        target_armor_dict = get_best_armor_for_level(armor_tiers, plan_id)
+        if not target_armor_dict:
+            return True, []  # No armor needed
+        
+        missing_items = []
+        
+        for armor_type, armor_item in target_armor_dict.items():
+            armor_name = armor_item["name"]
+            
+            # Check if we have the armor piece
+            if not (has_item(armor_name) or inventory.has_item(armor_name) or equipment.has_equipped(armor_name)):
+                missing_items.append(armor_name)
+                continue
+            
+            # Equip the armor if not already equipped
+            if not equipment.has_equipped(armor_name):
+                if inventory.has_item(armor_name):
+                    equipment.equip_item(armor_name)
+                elif has_item(armor_name):
+                    withdraw_item(armor_name, 1)
+                    equipment.equip_item(armor_name)
+        
+        return len(missing_items) == 0, missing_items
+        
+    except Exception as e:
+        logging.error(f"[_setup_armor] actions/bank.py: {e}")
+        return False, [f"Armor setup error: {e}"]
+
+
+def _setup_jewelry(jewelry_tiers: Dict, plan_id: str) -> Tuple[bool, List[str]]:
+    """Setup jewelry based on defence level."""
+    try:
+        from .equipment import get_best_armor_for_level
+        
+        target_jewelry_dict = get_best_armor_for_level(jewelry_tiers, plan_id)
+        if not target_jewelry_dict:
+            return True, []  # No jewelry needed
+        
+        missing_items = []
+        
+        for jewelry_type, jewelry_item in target_jewelry_dict.items():
+            jewelry_name = jewelry_item["name"]
+            
+            # Check if we have the jewelry piece
+            if not (has_item(jewelry_name) or inventory.has_item(jewelry_name) or equipment.has_equipped(jewelry_name)):
+                missing_items.append(jewelry_name)
+                continue
+            
+            # Equip the jewelry if not already equipped
+            if not equipment.has_equipped(jewelry_name):
+                if inventory.has_item(jewelry_name):
+                    equipment.equip_item(jewelry_name)
+                elif has_item(jewelry_name):
+                    withdraw_item(jewelry_name, 1)
+                    equipment.equip_item(jewelry_name)
+        
+        return len(missing_items) == 0, missing_items
+        
+    except Exception as e:
+        logging.error(f"[_setup_jewelry] actions/bank.py: {e}")
+        return False, [f"Jewelry setup error: {e}"]
+
+
+def _setup_tools(tool_tiers: List[Tuple], plan_id: str, allow_fallback: bool = False) -> Tuple[bool, List[str]]:
+    """Setup tools with optional fallback logic."""
+    try:
+        from .equipment import get_best_tool_for_level
+        
+        target_tool, _, _, _ = get_best_tool_for_level(tool_tiers, "woodcutting", plan_id)
+        if not target_tool:
+            return True, []  # No tool needed
+        
+        # Check if we have the best tool
+        if has_item(target_tool) or inventory.has_item(target_tool) or equipment.has_equipped(target_tool):
+            # Equip the tool if not already equipped
+            if not equipment.has_equipped(target_tool):
+                if inventory.has_item(target_tool):
+                    equipment.equip_item(target_tool)
+                elif has_item(target_tool):
+                    withdraw_item(target_tool, 1)
+                    equipment.equip_item(target_tool)
+            return True, []
+        
+        # If we don't have the best tool and fallback is allowed, try to find a fallback
+        if allow_fallback:
+            fallback_tool = _find_fallback_tool(target_tool, tool_tiers)
+            if fallback_tool:
+                logging.info(f"[_setup_tools] Using fallback tool: {fallback_tool} instead of {target_tool}")
+                if not equipment.has_equipped(fallback_tool):
+                    if inventory.has_item(fallback_tool):
+                        equipment.equip_item(fallback_tool)
+                    elif has_item(fallback_tool):
+                        withdraw_item(fallback_tool, 1)
+                        equipment.equip_item(fallback_tool)
+                return True, []  # Success with fallback
+        
+        return False, [target_tool]
+        
+    except Exception as e:
+        logging.error(f"[_setup_tools] actions/bank.py: {e}")
+        return False, [f"Tool setup error: {e}"]
+
+
+def _find_fallback_tool(target_tool: str, tool_tiers: List[Tuple]) -> Optional[str]:
+    """Find a fallback tool that we have available."""
+    try:
+        # Find the index of the target tool in the tiers
+        target_index = -1
+        for i, (tool_name, _, _, _) in enumerate(tool_tiers):
+            if tool_name == target_tool:
+                target_index = i
+                break
+        
+        if target_index == -1:
+            return None
+        
+        # Look for any tool we have that's lower tier (higher index)
+        for i in range(target_index + 1, len(tool_tiers)):
+            tool_name, _, _, _ = tool_tiers[i]
+            if has_item(tool_name) or inventory.has_item(tool_name) or equipment.has_equipped(tool_name):
+                return tool_name
+        
+        return None
+        
+    except Exception as e:
+        logging.error(f"[_find_fallback_tool] actions/bank.py: {e}")
+        return None
+
+
+def check_sellable_items(sellable_items: Dict) -> Tuple[bool, Dict, Optional[str]]:
+    """
+    Check if we have items to sell and determine what equipment we could buy.
+    
+    Args:
+        sellable_items: Dict of {item_name: min_quantity}
+        
+    Returns:
+        Tuple of (has_sellable_items, items_to_sell, target_equipment)
+    """
+    try:
+        items_to_sell = {}
+        target_equipment = None
+        
+        for item_name, min_quantity in sellable_items.items():
+            count = get_item_count(item_name)
+            if count >= min_quantity:
+                items_to_sell[item_name] = count
+                logging.info(f"[check_sellable_items] Found {count} {item_name} to sell")
+        
+        if items_to_sell:
+            # Determine what equipment we could buy with the proceeds
+            # This logic would be plan-specific
+            target_equipment = "Better equipment"  # Placeholder
+        
+        return len(items_to_sell) > 0, items_to_sell, target_equipment
+        
+    except Exception as e:
+        logging.error(f"[check_sellable_items] actions/bank.py: {e}")
+        return False, {}, None

@@ -742,7 +742,7 @@ class SimpleRecorderGUI:
         
         # Delay between launches
         ttk.Label(runelite_config, text="Delay (seconds):", style='Header.TLabel').grid(row=1, column=0, sticky=tk.W, pady=2)
-        self.launch_delay = tk.IntVar(value=5)
+        self.launch_delay = tk.IntVar(value=0)
         ttk.Entry(runelite_config, textvariable=self.launch_delay, width=8).grid(row=1, column=1, sticky=tk.W, pady=2, padx=(5, 0))
         
         # Instance count display (read-only)

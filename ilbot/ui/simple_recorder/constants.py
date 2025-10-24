@@ -327,3 +327,26 @@ CRAFTING_EXP = {
     "gold_ring": 15.0,       # Experience per gold ring
     "sapphire_ring": 40.0    # Experience per sapphire ring
 }
+
+# Jewelry Crafting Widget IDs
+JEWELRY_CRAFTING_WIDGETS = {
+    # Ring crafting options (Id 29229064 - Id 29229071)
+    "GOLD_RING": 29229064,        # S 446.8 CraftingGold.GOLD_RING
+    "SAPPHIRE_RING": 29229065,    # S 446.9 CraftingGold.SAPPHIRE_RING
+    "EMERALD_RING": 29229066,     # S 446.10 CraftingGold.EMERALD_RING
+    "RUBY_RING": 29229067,        # S 446.11 CraftingGold.RUBY_RING
+    "DIAMOND_RING": 29229068,     # S 446.12 CraftingGold.DIAMOND_RING
+    "DRAGON_RING": 29229069,      # S 446.13 CraftingGold.DRAGON_RING
+    "ONYX_RING": 29229070,        # S 446.14 CraftingGold.ONYX_RING
+    "ZENYTE_RING": 29229071,      # S 446.15 CraftingGold.ZENYTE_RING
+    
+    # Necklace crafting options (Id 29229079 - Id 29229086)
+    "GOLD_NECKLACE": 29229079,    # S 446.23 CraftingGold.GOLD_NECKLACE
+    "SAPPHIRE_NECKLACE": 29229080, # S 446.24 CraftingGold.SAPPHIRE_NECKLACE
+    "EMERALD_NECKLACE": 29229081,  # S 446.25 CraftingGold.EMERALD_NECKLACE
+    "RUBY_NECKLACE": 29229082,     # S 446.26 CraftingGold.RUBY_NECKLACE
+    "DIAMOND_NECKLACE": 29229083,  # S 446.27 CraftingGold.DIAMOND_NECKLACE
+    "DRAGON_NECKLACE": 29229084,   # S 446.28 CraftingGold.DRAGON_NECKLACE
+    "ONYX_NECKLACE": 29229085,     # S 446.29 CraftingGold.ONYX_NECKLACE
+    "ZENYTE_NECKLACE": 29229086,   # S 446.30 CraftingGold.ZENYTE_NECKLACE
+}

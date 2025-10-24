@@ -152,11 +152,11 @@ def has_unnoted_item(name: str, min_qty: int = 1) -> bool:
 
 
 
-def is_empty() -> bool:
+def is_empty(excepted_items: list[str] = None) -> bool:
     """
     True if the player's inventory is empty.
     """
-    return not inv_has_any()
+    return not inv_has_any(excepted_items=excepted_items)
 
 
 def get_empty_slots_count() -> int:

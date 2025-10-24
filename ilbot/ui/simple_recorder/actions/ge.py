@@ -7,7 +7,7 @@ from . import inventory
 from .widgets import get_widget_children_with_text, get_widget_children
 from ..helpers.runtime_utils import ui, dispatch, ipc
 from ..helpers.rects import rect_center_xy
-from ..helpers.utils import closest_object_by_names
+from ..helpers.utils import closest_object_by_names, sleep_exponential
 from ..helpers.widgets import rect_center_from_widget
 from ..helpers.ge import (
     ge_open, ge_offer_open, ge_selected_item_is, ge_first_buy_slot_btn,
@@ -221,21 +221,8 @@ def buy_chatbox_first_item_is(name: str) -> bool:
     Returns:
         True if the first item in chatbox matches the name, False otherwise
     """
-    # Get the chatbox scroll contents widget (162.51)
-    chatbox_widget_id = 10616883  # 162.51
-    
-    # Get child widgets of the chatbox
-    from ..actions.widgets import get_widget_children
-    children = get_widget_children(chatbox_widget_id).get('children')
-    
-    if not children or len(children) < 2:
-        return False
-
     items = buy_chatbox_first_x_items(5)
-    
-    # Each item has 3 children, so check the second child (index 1) of the first item
-    # The item name is in the text field of the second child
-    first_item_text = children[0].get("text", "").strip()
+    first_item_text = items[0]
     
     # Check if the first item matches the name (case-insensitive)
     return name.lower() == first_item_text.lower()
@@ -390,14 +377,20 @@ def open_ge() -> dict | None:
     return None
 
 def close_ge() -> dict | None:
-    step = {
-        "id": "ge-close",
-        "action": "click",
-        "description": "Close GE",
-        "click": {"type": "key", "key": "escape"},
-        "preconditions": [], "postconditions": []
-    }
-    return dispatch(step)
+    while ge_open():
+        step = {
+            "id": "ge-close",
+            "action": "click",
+            "description": "Close GE",
+            "click": {"type": "key", "key": "escape"},
+            "preconditions": [], "postconditions": []
+        }
+        sleep_exponential(0.2, 0.6)
+        result = dispatch(step)
+        if not ge_open():
+            break
+        sleep_exponential(1, 2)
+    return result
 
 def get_offer_slots() -> dict:
     """
@@ -545,8 +538,9 @@ def set_quantity(qty: int = 0) -> dict | None:
                 "target": {"domain": "widget", "name": "qty_button", "bounds": dot.get("bounds")},
                 "preconditions": [], "postconditions": []
             }
-            return dispatch(step)
-        return None
+            dispatch(step)
+            if not wait_until(lambda: chat_qty_prompt_active(), min_wait_ms=600, max_wait_ms=5000):
+                return None
 
     if not buy_chatbox_text_input_contains(str(qty)):
         step = {
@@ -556,10 +550,11 @@ def set_quantity(qty: int = 0) -> dict | None:
             "click": {"type": "type", "text": str(qty), "per_char_ms": 20},
             "preconditions": [], "postconditions": []
         }
-        return dispatch(step)
+        dispatch(step)
+        if not wait_until(lambda: buy_chatbox_text_input_contains(str(qty)), min_wait_ms=600, max_wait_ms=5000):
+            return None
 
-    else:
-        return press_enter()
+    return press_enter()
 
 
 def click_plus5() -> dict | None:
@@ -905,69 +900,68 @@ def buy_item_from_ge(item, retry_items: dict = None) -> bool | None:
     if not inv.has_item("coins"):
         if bank.is_closed():
             bank.open_bank()
-            wait_until(bank.is_open, max_wait_ms=6000)
-            return None
+            if not wait_until(bank.is_open, max_wait_ms=6000):
+                return None
         if bank.is_open():
             # make space then withdraw all coins
-            if not inv.is_empty():
+            if not inv.is_empty(excepted_items=["Coins"]):
                 bank.deposit_inventory()
-                wait_until(inv.is_empty, max_wait_ms=4000, min_wait_ms=150)
-                return None
+                if not wait_until(inv.is_empty, max_wait_ms=4000, min_wait_ms=150):
+                    return None
             bank.withdraw_item("coins", withdraw_all=True)
-            wait_until(lambda: inv.has_item("coins"), max_wait_ms=3000)
-            return None
-    elif bank.is_open():
-        bank.close_bank()
-        return None
+            if not wait_until(lambda: inv.has_item("coins"), max_wait_ms=3000):
+                return None
+            bank.close_bank()
+            if not wait_until(lambda: not bank.is_open(), max_wait_ms=3000):
+                return None
+
 
     # Open GE
     if is_closed():
         open_ge()
-        wait_until(is_open, max_wait_ms=5000)
-        return None
+        if not wait_until(is_open, max_wait_ms=5000):
+            return None
 
     # Buy each item one by one
     items_list = list(items_to_buy.items())
     items_to_process = [(name, data) for name, data in items_list if not inv.has_item(name)]
     
     for i, (item_name, (item_quantity, item_price_bumps, item_set_price)) in enumerate(items_to_process):
-        is_last_item = (i == len(items_to_process) - 1)
-            
         # Open buy offer panel
         if not is_offer_screen_open():
             if has_collect():
                 collect_to_inventory()
-                return None
+                if not wait_until(lambda: not has_collect(), min_wait_ms=600, max_wait_ms=5000):
+                    return None
             begin_buy_offer()
-            if not wait_until(offer_open, max_wait_ms=5000):
+            if not wait_until(offer_open, min_wait_ms=600, max_wait_ms=5000):
                 return None
-            return None
 
         # Type item name and select first result
         if not buy_chatbox_item_in_first_x(item_name, 5) and not selected_item_is(item_name):
             type_item_name(item_name)
             if not wait_until(lambda: buy_chatbox_first_item_is(item_name), min_wait_ms=600, max_wait_ms=3000):
                 return None
-            return None
 
-        elif not buy_chatbox_item_in_first_x(item_name, 1) and not selected_item_is(item_name):
-            # Search through the first 5 items to find and click the correct one
-            result = click_chatbox_item_by_name(item_name, 5)
-            if result:
-                if not wait_until(lambda: selected_item_is(item_name)):
-                    return None
-
-        elif buy_chatbox_item_in_first_x(item_name, 1) and not selected_item_is(item_name):
+        if buy_chatbox_item_in_first_x(item_name, 1) and not selected_item_is(item_name):
             press_enter()
             if not wait_until(lambda: selected_item_is(item_name), min_wait_ms=600, max_wait_ms=3000):
                 return None
+
+        if not buy_chatbox_item_in_first_x(item_name, 1) and not selected_item_is(item_name):
+            # Search through the first 5 items to find and click the correct one
+            result = click_chatbox_item_by_name(item_name, 5)
+            if result:
+                if not wait_until(lambda: selected_item_is(item_name), min_wait_ms=600, max_wait_ms=3000):
+                    return None
 
         if selected_item_is(item_name):
             # Set quantity if needed
             if item_quantity > 1:
                 if not qty_is(item_quantity):
                     set_quantity(item_quantity)
-                    return None
+                    if not wait_until(lambda: qty_is(item_quantity), min_wait_ms=600, max_wait_ms=3000):
+                        return None
 
             # Set price based on item_set_price from tuple
             if item_set_price > 0:
@@ -1001,93 +995,98 @@ def buy_item_from_ge(item, retry_items: dict = None) -> bool | None:
                             "target": {"name": "+5%", "bounds": plus.get("bounds")},
                             "click": {"type": "point", "x": cx, "y": cy},
                         })
+                        sleep_exponential(0.1, 0.3, 2)
                         break
 
             # Confirm buy
             confirm_buy()
-            wait_until(lambda: ge_buy_confirm_widget() is None or popup_exists(), min_wait_ms=600, max_wait_ms=3000)
+            if not wait_until(lambda: ge_buy_confirm_widget() is None or popup_exists(), min_wait_ms=600, max_wait_ms=3000):
+                return None
 
             if popup_exists():
                 select_yes_popup()
-            wait_until(lambda: ge_buy_confirm_widget() is None, min_wait_ms=600, max_wait_ms=3000)
+                if not wait_until(lambda: not popup_exists(), min_wait_ms=600, max_wait_ms=3000):
+                    return None
 
             # Wait for collect button to appear (offer filled)
-            if wait_until(has_collect, min_wait_ms=600, max_wait_ms=10000):
-                collect_to_inventory()
+            if not wait_until(has_collect, min_wait_ms=600, max_wait_ms=10000):
+                return None
+            collect_to_inventory()
             if not wait_until(lambda: inventory.inv_count(item_name) >= item_quantity, min_wait_ms=600, ):
                 return None
-            # Only return None if this is not the last item
-            if not is_last_item:
-                return None
-            else:
-                abort_ge_offer(item_name)
-                if not wait_until(lambda: offer_aborted(find_ge_offer_slot_by_item(item_name)), min_wait_ms=600, max_wait_ms=10000):
-                    return None
 
     # Close GE after all items are bought
     close_ge()
     return True
 
 
-def sell_item_from_ge(items_to_sell: dict) -> bool | None:
+def sell_item_from_ge(items_to_sell: dict) -> dict:
     """
-    Returns True when all items are sold.
-    Otherwise performs exactly one small step toward selling them and returns None.
+    Returns status dictionary indicating selling progress.
     Safe to call every tick.
     
     Args:
         items_to_sell: Dict of items to sell {item_name: (quantity, price_bumps, set_price)}
+        
+    Returns:
+        dict with status information:
+        - "status": "complete", "selling", or "error"
+        - "error": error message (if status is "error")
     """
     
     # Check if we already sold all items (they're no longer in inventory)
     if not any(inv.has_item(item_name) for item_name in items_to_sell.keys()):
         close_ge()
         if is_closed():
-            return True
-        return None
+            return {"status": "complete"}
+        return {"status": "selling"}
 
     # Go to GE
     if not trav.in_area(BANK_REGIONS["GE"]):
         trav.go_to("GE")
-        return None
+        return {"status": "selling"}
+
+    if bank.is_open():
+        bank.close_bank()
+        wait_until(bank.is_closed,min_wait_ms=600, max_wait_ms=5000)
+        return {"status": "selling"}
 
     # Open GE
     if is_closed():
         open_ge()
         wait_until(is_open, max_wait_ms=5000)
-        return None
+        return {"status": "selling"}
 
     # Sell each item one by one
     items_list = list(items_to_sell.items())
     items_to_process = [(name, data) for name, data in items_list if inv.has_item(name)]
     
     for i, (item_name, (item_quantity, item_price_bumps, item_set_price)) in enumerate(items_to_process):
-        is_last_item = (i == len(items_to_process) - 1)
-            
         # Open sell offer panel
         if not is_offer_screen_open():
             if has_collect():
                 collect_to_inventory()
-                return None
+                if not wait_until(lambda: not has_collect(), min_wait_ms=600, max_wait_ms=5000):
+                    return {"status": "selling"}
             begin_sell_offer(item_name)
-            if not wait_until(offer_open, max_wait_ms=5000):
-                return None
-            return None
+            if not wait_until(offer_open, min_wait_ms=600, max_wait_ms=5000):
+                return {"status": "error", "error": "Failed to open sell offer"}
 
         if selected_item_is(item_name):
             # Set quantity if needed
             if item_quantity > 1:
                 if not qty_is(item_quantity):
                     set_quantity(item_quantity)
-                    return None
+                    if not wait_until(lambda: qty_is(item_quantity), min_wait_ms=600, max_wait_ms=5000):
+                        return {"status": "selling"}
 
             # Set price based on item_set_price from tuple
             if item_set_price > 0:
                 # Use the set_price from the item tuple
                 result = set_custom_price(item_set_price)
                 if not result:
-                    return None
-                time.sleep(0.5)  # Wait for price to be set
+                    return {"status": "error", "error": "Failed to set custom price"}
+                sleep_exponential(0.5, 1, 1)  # Wait for price to be set
             else:
                 # Use -5% bumps when set_price is 0 (for selling, we want to lower the price)
                 for _ in range(max(0, int(item_price_bumps))):
@@ -1113,29 +1112,29 @@ def sell_item_from_ge(items_to_sell: dict) -> bool | None:
                             "target": {"name": "-5%", "bounds": minus.get("bounds")},
                             "click": {"type": "point", "x": cx, "y": cy},
                         })
+                        sleep_exponential(0.1, 0.3, 2)
                         break
 
             # Confirm sell
             confirm_sell()
-            wait_until(lambda: ge_buy_confirm_widget() is None or popup_exists(), min_wait_ms=600, max_wait_ms=3000)
+            if not wait_until(lambda: ge_buy_confirm_widget() is None or popup_exists(), min_wait_ms=600, max_wait_ms=3000):
+                return {"status": "selling"}
 
             if popup_exists():
                 select_yes_popup()
-            wait_until(lambda: ge_buy_confirm_widget() is None, min_wait_ms=600, max_wait_ms=3000)
+                if not wait_until(lambda: not popup_exists() is None, min_wait_ms=600, max_wait_ms=3000):
+                    return {"status": "selling"}
 
             # Wait for collect button to appear (offer filled)
             if wait_until(has_collect, max_wait_ms=10000):
                 collect_to_inventory()
                 # Check if item is no longer in inventory (sold)
                 if not wait_until(lambda: not inv.has_item(item_name), max_wait_ms=10000):
-                    return None
-                # Only return None if this is not the last item
-                if not is_last_item:
-                    return None
+                    return {"status": "selling"}
 
     # Close GE after all items are sold
     close_ge()
-    return True
+    return {"status": "complete"}
 
 
 # ===== GE OFFER SCREEN ACTIONS =====
@@ -1431,6 +1430,94 @@ def get_current_price() -> str | None:
     return helper_get_current_price()
 
 
+def withdraw_items_to_sell(required_items: list, item_requirements: dict, plan_id: str = "GE") -> dict | None:
+    """
+    Check if we have all required items to sell and withdraw them from the bank.
+    Does not perform any selling - just withdrawal.
+    
+    Args:
+        required_items: List of item names to withdraw
+        item_requirements: Dict mapping item names to (quantity, five_percent_pushes, set_price) tuples
+        plan_id: Plan identifier for logging
+    
+    Returns:
+        dict with status information:
+        - "status": "complete", "need_bank", or "error"
+        - "missing_items": list of items that need to be withdrawn from bank (if status is "need_bank")
+        - "error": error message (if status is "error")
+    """
+    try:
+        # Check if we have any items to withdraw
+        if not required_items:
+            logging.info(f"[{plan_id}] No items to withdraw")
+            return {"status": "complete"}
+        
+        # Check if we have all required items to withdraw in inventory
+        missing_items = []
+        for item in required_items:
+            required_qty = item_requirements[item][0]  # Get quantity from tuple
+            if required_qty == -1 and not is_open():
+                missing_items.append((item, required_qty))
+                continue
+            if not inv.has_item(item, min_qty=required_qty) and not is_open():
+                missing_items.append((item, required_qty))
+        
+        # If we're missing items, try to get them from the bank
+        if missing_items:
+            logging.info(f"[{plan_id}] Missing items in inventory: {missing_items}")
+            
+            # Check if we're near a bank
+            if not trav.in_area(BANK_REGIONS["GE"]):
+                logging.warning(f"[{plan_id}] Not near a bank to withdraw items")
+                return {"status": "error", "error": "Not near a bank to withdraw items"}
+
+            # Try to open bank and withdraw missing items
+            if not bank.is_open():
+                bank.open_bank()
+                if not wait_until(bank.is_open, max_wait_ms=5000):
+                    logging.warning(f"[{plan_id}] Could not open bank")
+                    return {"status": "error", "error": "Could not open bank"}
+            
+            # Ensure we're in NOTE mode for selling items
+            from ilbot.ui.simple_recorder.actions.bank import ensure_note_mode_enabled
+            ensure_note_mode_enabled()
+            
+            # Withdraw missing items
+            items_withdrawn = []
+            for item, required_qty in missing_items:
+                if inventory.has_unnoted_item(item) or (bank.has_item(item) and inventory.has_item(item)):
+                    bank.deposit_item(item)
+                    if not wait_until(lambda: not inv.has_item(item)):
+                        return False
+                try:
+                    # Check if bank has the item
+                    if bank.has_item(item):
+                        if required_qty == -1:
+                            bank.withdraw_item(item, withdraw_all=True)
+                            wait_until(lambda: inv.has_item(item), max_wait_ms=3000)
+                        else:
+                            bank.withdraw_item(item, required_qty)
+                            wait_until(lambda: inv.has_item(item, min_qty=required_qty), max_wait_ms=3000)
+                        items_withdrawn.append(item)
+                        logging.info(f"[{plan_id}] Withdrew {required_qty} {item} from bank (noted)")
+                    else:
+                        logging.warning(f"[{plan_id}] Bank does not have {item}. Skipping {item}")
+                        items_withdrawn.append(item)
+                except Exception as e:
+                    logging.warning(f"[{plan_id}] Could not withdraw {item}: {e}")
+                    return {"status": "error", "error": f"Could not withdraw {item}: {e}"}
+            
+            # Close bank after withdrawing
+            # bank.close_bank()
+            logging.info(f"[{plan_id}] Successfully withdrew items: {items_withdrawn}")
+        
+        logging.info(f"[{plan_id}] All required items are now in inventory")
+        return {"status": "complete"}
+            
+    except Exception as e:
+        logging.error(f"[{plan_id}] Error in withdraw_items_to_sell: {e}")
+        return {"status": "error", "error": str(e)}
+
 def check_and_sell_required_items(required_items: list, item_requirements: dict, plan_id: str = "GE") -> dict | None:
     """
     Check if we have all required items to sell and sell them at GE.
@@ -1472,7 +1559,7 @@ def check_and_sell_required_items(required_items: list, item_requirements: dict,
             if not trav.in_area(BANK_REGIONS["GE"]):
                 logging.warning(f"[{plan_id}] Not near a bank to withdraw items")
                 return {"status": "error", "error": "Not near a bank to withdraw items"}
-            
+
             # Try to open bank and withdraw missing items
             if not bank.is_open():
                 bank.open_bank()
@@ -1491,7 +1578,7 @@ def check_and_sell_required_items(required_items: list, item_requirements: dict,
             # Withdraw missing items
             items_withdrawn = []
             for item, required_qty in missing_items:
-                if inventory.has_item(item):
+                if inventory.has_unnoted_item(item) or (bank.has_item(item) and inventory.has_item(item)):
                     bank.deposit_item(item)
                     if not wait_until(lambda: not inv.has_item(item)):
                         return False
@@ -1514,7 +1601,7 @@ def check_and_sell_required_items(required_items: list, item_requirements: dict,
                     return {"status": "error", "error": f"Could not withdraw {item}: {e}"}
             
             # Close bank after withdrawing
-            bank.close_bank()
+            # bank.close_bank()
             logging.info(f"[{plan_id}] Successfully withdrew items: {items_withdrawn}")
         
         # Calculate what we need to sell
@@ -1600,9 +1687,11 @@ def check_and_buy_required_items(required_items: list, item_requirements: dict, 
             return {"status": "buying", "items_to_buy": {}}  # Still working on banking
         
         # Deposit all inventory items to get accurate counts
-        if bank.is_open():
+        if bank.is_open() and not inventory.is_empty(excepted_items=["coins"]):
             bank.deposit_inventory()
-            time.sleep(0.5)  # Brief wait for deposit to complete
+            if not wait_until(inventory.is_empty):
+                return {"status": "error", "error": "error depositing inventory"}
+
         
         # Calculate what we need to buy
         items_to_buy = {}

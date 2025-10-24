@@ -68,8 +68,9 @@ from ...actions.timing import wait_until
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from ..base import Plan
-from ...actions import ge, travel, player
-from ...actions.ge import check_and_buy_required_items, check_and_sell_required_items, close_ge
+from ...actions import ge, travel, player, bank
+from ...actions.ge import check_and_buy_required_items, check_and_sell_required_items, close_ge, sell_item_from_ge, \
+    withdraw_items_to_sell
 from ...actions.travel import go_to, in_area
 
 
@@ -121,6 +122,9 @@ class GePlan(Plan):
         
         # Items to sell configuration
         self.items_to_sell = items_to_sell or []
+        
+        # Track whether items have been withdrawn for selling
+        self.items_withdrawn = False
         
         # Convert items to the format expected by check_and_buy_required_items
         self.required_items = []
@@ -207,6 +211,9 @@ class GePlan(Plan):
     def _handle_travel_to_ge(self) -> int:
         """Handle traveling to the Grand Exchange."""
         if not in_area("GE"):
+            if bank.is_open():
+                bank.close_bank()
+                return self.loop_interval_ms
             logging.info(f"[{self.id}] Traveling to Grand Exchange...")
             go_to("GE")
             return self.TRAVELING
@@ -322,13 +329,37 @@ class GePlan(Plan):
         """Handle selling items at the Grand Exchange."""
         logging.info(f"[{self.id}] Starting to sell items at GE...")
         
-        # Handle regular quantity-based selling
         if self.sell_items:
-            result = check_and_sell_required_items(
-                self.sell_items, 
-                self.sell_requirements, 
-                self.id
-            )
+            # Only withdraw items if we haven't already done so
+            if not self.items_withdrawn:
+                # Withdraw items from bank first
+                if not bank.is_open():
+                    bank.open_bank()
+                    wait_until(bank.is_open, min_wait_ms=600)
+
+                # Prepare items for withdrawal
+                item_names = [item for item in self.sell_items]
+                item_requirements = {}
+                for item in self.items_to_sell:
+                    item_requirements[item["name"]] = (item["quantity"], item["bumps"], item["set_price"])
+                
+                bank.ensure_note_mode_enabled()
+                result = withdraw_items_to_sell(item_names, item_requirements, self.id)
+                
+                if result["status"] == "complete":
+                    logging.info(f"[{self.id}] Successfully withdrew items: {item_names}")
+                    self.items_withdrawn = True
+                else:
+                    logging.error(f"[{self.id}] Failed to withdraw items: {result.get('error', 'Unknown error')}")
+                    return self.ERROR
+            
+            # Convert items to sell format for sell_item_from_ge
+            items_to_sell_dict = {}
+            for item in self.items_to_sell:
+                items_to_sell_dict[item["name"]] = (item["quantity"], item["bumps"], item["set_price"])
+            
+            # Sell the items
+            result = sell_item_from_ge(items_to_sell_dict)
             
             if result["status"] == "complete":
                 logging.info(f"[{self.id}] All items sold successfully!")
@@ -347,7 +378,6 @@ class GePlan(Plan):
             elif result["status"] == "error":
                 error_msg = result.get("error", "Unknown error")
                 logging.error(f"[{self.id}] Error selling items: {error_msg}")
-
                 self.error_message = f"Error selling items: {error_msg}"
                 return self.ERROR
             
@@ -355,10 +385,9 @@ class GePlan(Plan):
                 logging.warning(f"[{self.id}] Unknown result status: {result.get('status')}")
                 return self.WAITING
         else:
-            # No regular items to sell, just "sell all" items
-            logging.info(f"[{self.id}] All items sold successfully!")
+            # No items to sell
+            logging.info(f"[{self.id}] No items to sell")
             self.selling_complete = True
-            # After selling, check coins for buying if we have items to buy
             if self.items_to_buy:
                 self.set_phase("CHECK_COINS")
             else:

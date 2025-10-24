@@ -2,6 +2,7 @@ import logging
 from .runtime_utils import ipc, dispatch
 from .utils import norm_name
 from .widgets import unwrap_rect, widget_exists
+from ..actions import widgets
 
 
 def ge_open() -> bool:
@@ -113,22 +114,31 @@ def widget_by_id_text(wid: int, txt: str | None) -> dict | None:
                 return child
     return None
 
-def widget_by_id_text_contains(wid: int, substr: str) -> dict | None:
-  from .runtime_utils import ipc
-  # Get widget by ID using widget children from the appropriate parent
-  ge_data = ipc.get_widget_children(30474241)  # 465.1 GeOffers.CONTENTS
-  if not ge_data.get("ok"):
-      return None
-  
-  sub = norm_name(substr)
-  children = ge_data.get("children", [])
-  for child in children:
-      if child.get("id") == wid:
-          text = (child.get("text") or "").strip()
-          if sub in norm_name(text) and child.get("bounds"):
-              return child
-  return None
 
+def widget_by_id_text_contains(wid: int, substr: str) -> dict | None:
+    from .runtime_utils import ipc
+    sub = norm_name(substr)
+
+    data = widgets.get_widget_info(wid)
+    if not data:
+        return None
+
+    data = widgets.get_widget_info(wid).get("data")
+    text = (data.get("text") or "").strip()
+    if sub in norm_name(text) and data.get("bounds"):
+        return data
+
+    data = ipc.get_widget_children(wid)
+    if not data.get("ok"):
+        return None
+
+    children = data.get("children", [])
+    for child in children:
+        if child.get("id") == wid:
+            text = (child.get("text") or "").strip()
+            if sub in norm_name(text) and child.get("bounds"):
+                return child
+    return None
 
 def widget_by_id_sprite(parent_wid: int, sprite_id: int) -> dict | None:
   # Sprite-based widget finding not supported with current targeted commands

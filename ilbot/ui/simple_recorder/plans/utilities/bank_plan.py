@@ -268,6 +268,10 @@ class BankPlan(Plan):
         # Get available coins for affordability checking
         coin_count = 0
         try:
+            if inventory.has_item("coins"):
+                bank.deposit_item("coins")
+                if not wait_until(lambda: not inventory.has_item("coins"), min_wait_ms=600, max_wait_ms=3000):
+                    return False
             coin_count = bank.get_item_count("Coins")
             logging.info(f"[{self.id}] Found {coin_count} coins in bank")
         except Exception as e:
@@ -875,6 +879,7 @@ class BankPlan(Plan):
         self._check_sellable_items()
         
         # Verify inventory is correct before proceeding
+        time.sleep(0.5)
         inventory_correct = self._verify_inventory()
         if not inventory_correct:
             logging.warning(f"[{self.id}] Inventory verification failed - staying in WITHDRAW_ITEMS phase")

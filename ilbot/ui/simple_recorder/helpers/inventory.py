@@ -55,19 +55,32 @@ def inv_slot_bounds(slot_id: int) -> dict | None:
 def coins() -> int:
     return inv_count("Coins")
 
-def inv_has_any() -> bool:
+def inv_has_any(excepted_items: list[str] = None) -> bool:
     from .runtime_utils import ipc
     inventory_data = ipc.get_inventory()
     
     if not inventory_data or not inventory_data.get("ok"):
         return False
     
+    # Normalize excepted items if provided
+    excepted_normalized = set()
+    if excepted_items:
+        excepted_normalized = {norm_name(item) for item in excepted_items if item}
+    
     # Check if there are any actual items (not empty slots)
     slots = inventory_data.get("slots", [])
     for slot in slots:
         # Empty slots have id: -1 and quantity: 0
         if slot.get("id", -1) != -1 and slot.get("quantity", 0) > 0:
-            return True
+            # If we have excepted items, check if this item is in the excepted list
+            if excepted_items:
+                item_name = slot.get("itemName", "")
+                item_normalized = norm_name(item_name)
+                if item_normalized not in excepted_normalized:
+                    return True
+            else:
+                # No excepted items, return True for any item
+                return True
     
     return False
 

@@ -63,6 +63,51 @@ def discover_plans():
             print(f"[PLAN_DISCOVERY] Error importing {plan_name}: {e}")
             continue
     
+    # Scan subdirectories for plans (like crafting/)
+    for subdir in plans_dir.iterdir():
+        if subdir.is_dir() and not subdir.name.startswith("__"):
+            for plan_file in subdir.glob("*.py"):
+                if plan_file.name.startswith("__"):
+                    continue
+                
+                plan_name = plan_file.stem
+                module_name = f"ilbot.ui.simple_recorder.plans.{subdir.name}.{plan_name}"
+                
+                try:
+                    import importlib
+                    import sys
+                    
+                    # Remove the module from cache if it exists to force fresh import
+                    if module_name in sys.modules:
+                        del sys.modules[module_name]
+                    
+                    module = importlib.import_module(module_name)
+                    
+                    # Look for a plan class
+                    plan_class = None
+                    for attr_name in dir(module):
+                        attr = getattr(module, attr_name)
+                        if (isinstance(attr, type) and 
+                            attr_name.endswith('Plan') and 
+                            attr_name != 'Plan' and
+                            hasattr(attr, '__call__')):
+                            # Check if this class is actually defined in this module
+                            if hasattr(attr, '__module__') and attr.__module__ == module_name:
+                                plan_class = attr
+                                print(f"[PLAN_DISCOVERY] Found plan class {attr_name} in {subdir.name}.{plan_name}")
+                                break
+                    
+                    if plan_class:
+                        # Use the subdirectory name as the plan key (e.g., "crafting")
+                        plans[subdir.name] = plan_class
+                        print(f"[PLAN_DISCOVERY] Registered plan: {subdir.name} -> {plan_class.__name__}")
+                    else:
+                        print(f"[PLAN_DISCOVERY] No plan class found in {subdir.name}.{plan_name}")
+                        
+                except Exception as e:
+                    print(f"[PLAN_DISCOVERY] Error importing {subdir.name}.{plan_name}: {e}")
+                    continue
+    
     # Scan utilities subdirectory
     utilities_dir = plans_dir / "utilities"
     if utilities_dir.exists():
