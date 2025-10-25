@@ -8,6 +8,7 @@ from . import player
 from .player import get_player_position
 from ..helpers.runtime_utils import ipc
 from ..helpers.navigation import get_nav_rect, closest_bank_key, _merge_door_into_projection
+from ..helpers.utils import sleep_exponential, get_random_walkable_tile, get_center_weighted_walkable_tile
 from ..services.click_with_camera import click_ground_with_camera, click_object_with_camera
 
 # Timing instrumentation constants
@@ -80,7 +81,6 @@ def _get_next_long_distance_waypoints(destination_key: str, custom_dest_rect: tu
             dest_center_x = (min_x + max_x) // 2
             dest_center_y = (min_y + max_y) // 2
         else:
-            from ..helpers.navigation import get_nav_rect
             dest_rect = get_nav_rect(destination_key)
             if dest_rect and len(dest_rect) == 4:
                 min_x, max_x, min_y, max_y = dest_rect
@@ -417,13 +417,13 @@ def _handle_door_opening(door_plan: dict, full_path_waypoints: list) -> bool:
                     # Door opened successfully
                     door_opened = True
                     break
-                time.sleep(0.1)
+                sleep_exponential(0.05, 0.15, 1.5)
 
         if not door_opened:
             door_retry_count += 1
             if door_retry_count < max_door_retries:
                 # Door opening attempt failed, retrying...
-                time.sleep(0.5)
+                sleep_exponential(0.3, 0.8, 1.2)
 
     if not door_opened:
         # Door opening failed after retries
@@ -494,7 +494,6 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False, destination: st
             rect_key = str(rect_or_key)
             # Handle special case for CLOSEST_BANK
             if rect_key == "CLOSEST_BANK":
-                from ..helpers.navigation import closest_bank_key
                 actual_bank_key = closest_bank_key()
                 rect = get_nav_rect(actual_bank_key)
                 rect_key = actual_bank_key  # Use the actual bank key for consistency
@@ -504,10 +503,8 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False, destination: st
         # Handle destination selection
         if destination != "center" and rect_key != "custom":
             if destination == "random":
-                from ..helpers.utils import get_random_walkable_tile
                 selected_tile = get_random_walkable_tile(rect_key)
             elif destination == "center_weighted":
-                from ..helpers.utils import get_center_weighted_walkable_tile
                 selected_tile = get_center_weighted_walkable_tile(rect_key)
             else:
                 selected_tile = None
@@ -623,11 +620,11 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False, destination: st
     except Exception as e:
         raise e
 
-def travel_to_bank(bank_area= None):
+def travel_to_bank(bank_area= "CLOSEST_BANK"):
     """Handle traveling to the bank."""
     # Check if we're near a bank in the destination area
+    destination_area = bank_area
     from ilbot.ui.simple_recorder.helpers.bank import near_any_bank
-    destination_area = bank_area if bank_area else None
     if not near_any_bank(destination_area):
         if bank_area:
             go_to(bank_area)
@@ -694,18 +691,26 @@ def go_to_closest_bank() -> dict | None:
     if bank_key:
         return go_to(bank_key)
 
-def in_area(area_key: str) -> bool:
-    """Check if player is in the specified area."""
+def in_area(rect_or_key: str | tuple | list) -> bool:
+    """Check if player is in the specified area.
+    
+    Args:
+        rect_or_key: Region key or (minX, maxX, minY, maxY) tuple
+    """
     
     # Get player position
     player_x, player_y = player.get_x(), player.get_y()
     if not isinstance(player_x, int) or not isinstance(player_y, int):
         return False
     
-    # Get area rectangle
-    rect = get_nav_rect(area_key)
-    if not (isinstance(rect, (tuple, list)) and len(rect) == 4):
-        return False
+    # Get area rectangle - handle both tuple/rect and string key
+    if isinstance(rect_or_key, (tuple, list)) and len(rect_or_key) == 4:
+        rect = tuple(rect_or_key)
+    else:
+        # Treat as area key and get rectangle
+        rect = get_nav_rect(str(rect_or_key))
+        if not (isinstance(rect, (tuple, list)) and len(rect) == 4):
+            return False
     
     min_x, max_x, min_y, max_y = rect
     return min_x <= player_x <= max_x and min_y <= player_y <= max_y
@@ -728,7 +733,6 @@ def get_long_distance_waypoints(destination_key: str, custom_dest_rect: tuple = 
             get_walkable_tiles, 
             astar_pathfinding
         )
-        from ..helpers.navigation import get_nav_rect
         
         # Get current player position
         current_pos = get_player_position()
@@ -747,10 +751,8 @@ def get_long_distance_waypoints(destination_key: str, custom_dest_rect: tuple = 
         
         # Handle destination selection
         if destination == "random":
-            from ..helpers.utils import get_random_walkable_tile
             selected_tile = get_random_walkable_tile(destination_key, dest_rect)
         elif destination == "center_weighted":
-            from ..helpers.utils import get_center_weighted_walkable_tile
             selected_tile = get_center_weighted_walkable_tile(destination_key, dest_rect)
         else:  # "center" or default
             selected_tile = None

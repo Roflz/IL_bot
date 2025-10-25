@@ -1,4 +1,5 @@
 from ilbot.ui.simple_recorder.helpers.rects import unwrap_rect, rect_center_xy
+from ilbot.ui.simple_recorder.helpers.utils import rect_beta_xy
 from ilbot.ui.simple_recorder.helpers.runtime_utils import ipc
 
 
@@ -20,7 +21,10 @@ def bank_widget_rect(key: str) -> dict | None:
 
 def rect_center_from_widget(w: dict | None) -> tuple[int | None, int | None]:
     rect = unwrap_rect((w or {}).get("bounds"))
-    return rect_center_xy(rect)
+    if rect:
+        return rect_beta_xy((rect.get("x", 0), rect.get("x", 0) + rect.get("width", 0),
+                             rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)), alpha=2.0, beta=2.0)
+    return None, None
 
 def get_widget_text(widget_id: int) -> str | None:
     """Get text content from a widget by its ID."""

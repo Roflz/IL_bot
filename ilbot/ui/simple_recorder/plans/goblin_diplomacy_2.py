@@ -36,8 +36,8 @@ from ..actions.bank import close_bank
 from ..constants import REGIONS
 from ..helpers import quest as quest_helper
 from ..helpers.npc import closest_npc_by_name
-from ..helpers.utils import press_esc
-from .utilities.bank_plan import BankPlan
+from ..helpers.keyboard import press_esc
+from .utilities.bank_plan_simple import BankPlanSimple
 from .utilities.ge import GePlan, create_ge_plan
 from .base import Plan
 
@@ -62,28 +62,18 @@ class GoblinDiplomacy2Plan(Plan):
         self.loop_interval_ms = 600
         
         # Quest item configuration
-        self.quest_items = ["Blue dye", "Orange dye", "Goblin mail"]
+        self.quest_items = [
+            {"name": "Blue dye", "quantity": 1},
+            {"name": "Orange dye", "quantity": 1},
+            {"name": "Goblin mail", "quantity": 3}
+        ]
         
         # Bank plan for quest setup
-        self.bank_plan = BankPlan(
-            bank_area="CLOSEST_BANK",  # Use closest bank for convenience
-            food_item=None,  # No food needed for this quest
-            food_quantity=0,
-            equipment_config={
-                "weapon_tiers": [],  # No weapons needed for this quest
-                "armor_tiers": {},   # No armor needed for this quest
-                "jewelry_tiers": {}, # No jewelry needed for this quest
-                "tool_tiers": []     # No tools needed for this quest
-            },
-            inventory_config={
-                "required_items": [
-                    "Blue dye",
-                    "Orange dye", 
-                    {"name": "Goblin mail", "quantity": 3}
-                ],
-                "optional_items": [],
-                "deposit_all": True
-            }
+        self.bank_plan = BankPlanSimple(
+            bank_area="VARROCK_WEST",  # Use Varrock West for quest
+            required_items=self.quest_items,
+            deposit_all=True,
+            equip_items={}  # No equipment needed for this quest
         )
         
         # GE plan for buying missing items
@@ -161,92 +151,82 @@ class GoblinDiplomacy2Plan(Plan):
         # Run the bank plan
         bank_status = self.bank_plan.loop(ui)
         
-        if bank_status == BankPlan.SUCCESS:
+        if bank_status == BankPlanSimple.SUCCESS:
             logging.info(f"[{self.id}] Bank setup completed successfully")
             self.set_phase("MAKE_ARMOURS")
             return self.QUEST_PROGRESS
         
-        elif bank_status == BankPlan.MISSING_ITEMS:
-            logging.info(f"[{self.id}] Missing quest items, transitioning to GE")
+        elif bank_status == BankPlanSimple.MISSING_ITEMS:
+            logging.info(f"[{self.id}] Missing quest items detected, will try to buy from GE")
+            missing_items = self.bank_plan.get_missing_items()
+            logging.info(f"[{self.id}] Missing items: {missing_items}")
+            
+            # Create GE plan to buy missing items
+            if missing_items:
+                items_to_buy = []
+                for item in missing_items:
+                    if isinstance(item, dict):
+                        item_name = item.get("name")
+                        quantity = item.get("quantity", 1)
+                        strategy = self.ge_strategy.get(item_name, self.ge_strategy["default"])
+                        items_to_buy.append({
+                            "name": item_name,
+                            "quantity": quantity,
+                            "bumps": strategy.get("bumps", 0),
+                            "set_price": strategy.get("set_price", 0)
+                        })
+                
+                if items_to_buy:
+                    self.ge_plan = create_ge_plan(items_to_buy, [])
+                    logging.info(f"[{self.id}] Created GE plan to buy: {items_to_buy}")
+            
+            # Reset bank plan so it can start fresh when we go back to banking
+            if self.bank_plan is not None:
+                logging.info(f"[{self.id}] Resetting bank plan for fresh start...")
+                self.bank_plan.reset()
             self.set_phase("MISSING_ITEMS")
             return self.MISSING_ITEMS
         
-        elif bank_status == BankPlan.ITEMS_TO_SELL:
-            # Quest plans don't need to sell items, treat as success
-            logging.info(f"[{self.id}] Bank found items to sell, but quest doesn't need selling - treating as success")
-            self.set_phase("MAKE_ARMOURS")
-            return self.QUEST_PROGRESS
-        
-        elif bank_status == BankPlan.ERROR:
-            logging.error(f"[{self.id}] Bank setup failed: {self.bank_plan.get_error_message()}")
+        elif bank_status == BankPlanSimple.ERROR:
+            error_msg = self.bank_plan.get_error_message()
+            logging.error(f"[{self.id}] Bank setup error: {error_msg}")
             self.set_phase("ERROR_STATE")
-            self.error_message = f"Bank setup failed: {self.bank_plan.get_error_message()}"
+            self.error_message = f"Bank setup failed: {error_msg}"
             return self.ERROR
         
         else:
-            # Still working on bank setup
-            return self.BANK_SETUP
+            # Still working on bank setup (TRAVELING, BANKING, etc.)
+            return bank_status
     
     def _handle_missing_items(self, ui) -> int:
         """Handle buying missing quest items from GE."""
         logging.info(f"[{self.id}] Handling missing quest items...")
         
-        # Parse missing items from bank plan
-        missing_items = []
-        error_msg = self.bank_plan.get_error_message()
-        if error_msg and "Missing required items:" in error_msg:
-            # Extract item names from error message
-            items_str = error_msg.split("Missing required items: ")[1]
-            items_str = items_str.strip("[]")
-            missing_items = [item.strip().strip("'\"") for item in items_str.split(",")]
-        
-        if not missing_items:
-            logging.warning(f"[{self.id}] No missing items found in error message")
-            self.set_phase("ERROR_STATE")
-            self.error_message = "Could not determine missing items"
-            return self.ERROR
-        
-        # Create GE plan if not already created
+        # GE plan should have been created in _handle_bank_setup
         if self.ge_plan is None:
-            logging.info(f"[{self.id}] Creating GE plan for items: {missing_items}")
-            
-            # Create items list with GE strategy (correct format)
-            items_to_buy = []
-            for item_info in missing_items:
-                # Parse item info - could be "ItemName" or "ItemName|quantity"
-                if "|" in item_info:
-                    item_name, needed_quantity = item_info.split("|", 1)
-                    needed_quantity = int(needed_quantity)
-                else:
-                    item_name = item_info
-                    needed_quantity = 1
-                
-                # Use specific strategy for this item, or default if not found
-                strategy = self.ge_strategy.get(item_name, self.ge_strategy["default"])
-                items_to_buy.append({
-                    "name": item_name,
-                    "quantity": needed_quantity,  # Use the actual needed quantity
-                    "bumps": strategy["bumps"],
-                    "set_price": strategy["set_price"]
-                })
-            
-            self.ge_plan = create_ge_plan(items_to_buy)
+            logging.error(f"[{self.id}] No GE plan created, returning to bank")
+            self.bank_plan.reset()
+            self.set_phase("BANK_SETUP")
+            return self.BANK_SETUP
         
-        # Run the GE plan
+        logging.info(f"[{self.id}] Running GE plan to buy quest items...")
+        
+        # Use the GE plan to buy missing items
         ge_status = self.ge_plan.loop(ui)
         
         if ge_status == GePlan.SUCCESS:
-            logging.info(f"[{self.id}] GE purchase completed successfully")
-            # Reset bank plan and go back to bank setup
+            logging.info(f"[{self.id}] Successfully purchased all missing items!")
+            # Reset bank plan and try banking again
             self.bank_plan.reset()
             self.ge_plan = None
             self.set_phase("BANK_SETUP")
             return self.BANK_SETUP
         
         elif ge_status == GePlan.ERROR:
-            logging.error(f"[{self.id}] GE purchase failed")
+            error_msg = self.ge_plan.get_error_message()
+            logging.error(f"[{self.id}] GE plan failed: {error_msg}")
             self.set_phase("ERROR_STATE")
-            self.error_message = "Failed to purchase quest items from GE"
+            self.error_message = f"GE purchase failed: {error_msg}"
             return self.ERROR
         
         elif ge_status == GePlan.INSUFFICIENT_FUNDS:
@@ -257,8 +237,9 @@ class GoblinDiplomacy2Plan(Plan):
             return self.ERROR
         
         else:
-            # Still working on GE purchase
-            return self.MISSING_ITEMS
+            # Still working on buying items (TRAVELING, CHECKING_COINS, BUYING, WAITING)
+            logging.info(f"[{self.id}] GE plan in progress... Status: {ge_status}")
+            return ge_status
     
     def _handle_make_armours(self, ui) -> int:
         """Handle making the dyed goblin mail armours."""

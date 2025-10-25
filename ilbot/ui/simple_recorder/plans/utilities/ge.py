@@ -64,11 +64,15 @@ from typing import List, Dict, Any
 import sys
 
 from ...actions.timing import wait_until
+from ...helpers.camera import setup_camera_optimal
+from ...helpers.inventory import inv_has_any
+from ...helpers.phase_utils import set_phase_with_camera
+from ...helpers.utils import sleep_exponential
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from ..base import Plan
-from ...actions import ge, travel, player, bank
+from ...actions import ge, travel, player, bank, inventory
 from ...actions.ge import check_and_buy_required_items, check_and_sell_required_items, close_ge, sell_item_from_ge, \
     withdraw_items_to_sell
 from ...actions.travel import go_to, in_area
@@ -112,7 +116,6 @@ class GePlan(Plan):
         
         # Set up camera immediately during initialization
         try:
-            from ...helpers.camera import setup_camera_optimal
             setup_camera_optimal()
         except Exception as e:
             logging.warning(f"[{self.id}] Could not setup camera: {e}")
@@ -167,7 +170,6 @@ class GePlan(Plan):
     
     def set_phase(self, phase: str, camera_setup: bool = True):
         """Set the current phase."""
-        from ...helpers.phase_utils import set_phase_with_camera
         return set_phase_with_camera(self, phase, camera_setup)
     
     def loop(self, ui) -> int:
@@ -232,11 +234,15 @@ class GePlan(Plan):
         
         try:
             from ...actions import bank
-            
+
+            if ge.is_open():
+                ge.close_ge()
+                return self.loop_interval_ms
+
             # Get available coins from bank
             if not bank.is_open():
                 bank.open_bank()
-                time.sleep(1)
+                sleep_exponential(0.8, 1.5, 1.0)
                 return self.CHECKING_COINS
 
             # Deposit any coins from inventory to bank first
@@ -246,7 +252,7 @@ class GePlan(Plan):
                 bank.deposit_inventory()
                 if not wait_until(lambda: not inventory.has_item("Coins")):
                     return None
-                time.sleep(1)
+                sleep_exponential(0.8, 1.5, 1.0)
             
             # Get coin count from bank
             coin_count = 0
@@ -329,34 +335,84 @@ class GePlan(Plan):
         """Handle selling items at the Grand Exchange."""
         logging.info(f"[{self.id}] Starting to sell items at GE...")
         
+        # Track which items are available for selling
+        available_items = []
+        
         if self.sell_items:
             # Only withdraw items if we haven't already done so
             if not self.items_withdrawn:
                 # Withdraw items from bank first
                 if not bank.is_open():
                     bank.open_bank()
-                    wait_until(bank.is_open, min_wait_ms=600)
+                    wait_until(bank.is_open, min_wait_ms=3000)
 
-                # Prepare items for withdrawal
-                item_names = [item for item in self.sell_items]
-                item_requirements = {}
-                for item in self.items_to_sell:
-                    item_requirements[item["name"]] = (item["quantity"], item["bumps"], item["set_price"])
+                # Prepare items for withdrawal - filter out items that don't exist
+                available_items = []
+                available_item_requirements = {}
+                
+                for item_config in self.items_to_sell:
+                    item_name = item_config["name"]
+                    
+                    # Check if item exists in bank or inventory
+                    item_exists = False
+                    if bank.has_item(item_name):
+                        item_exists = True
+                        logging.info(f"[{self.id}] Found {item_name} in bank")
+                    elif inventory.has_item(item_name):
+                        item_exists = True
+                        logging.info(f"[{self.id}] Found {item_name} in inventory")
+                    
+                    if item_exists:
+                        available_items.append(item_name)
+                        available_item_requirements[item_name] = (item_config["quantity"], item_config["bumps"], item_config["set_price"])
+                    else:
+                        logging.warning(f"[{self.id}] Skipping {item_name} - not found in bank or inventory")
+                
+                if not available_items:
+                    logging.warning(f"[{self.id}] No items available to sell")
+                    self.selling_complete = True
+                    if self.items_to_buy:
+                        self.set_phase("CHECK_COINS")
+                    else:
+                        self.set_phase("CLOSE_GE")
+                    return self.loop_interval_ms
                 
                 bank.ensure_note_mode_enabled()
-                result = withdraw_items_to_sell(item_names, item_requirements, self.id)
-                
-                if result["status"] == "complete":
-                    logging.info(f"[{self.id}] Successfully withdrew items: {item_names}")
-                    self.items_withdrawn = True
+                result = withdraw_items_to_sell(available_items, available_item_requirements, self.id)
+
+                if inventory.has_items(available_items, noted=True):
+                    if result["status"] == "complete":
+                        logging.info(f"[{self.id}] Successfully withdrew items: {available_items}")
+                        self.items_withdrawn = True
                 else:
                     logging.error(f"[{self.id}] Failed to withdraw items: {result.get('error', 'Unknown error')}")
                     return self.ERROR
+            else:
+                # Items already withdrawn, check what's actually available in inventory
+                for item_config in self.items_to_sell:
+                    item_name = item_config["name"]
+                    if inventory.has_noted_item(item_name):
+                        available_items.append(item_name)
+                        logging.info(f"[{self.id}] Found {item_name} in inventory (already withdrawn)")
+                    else:
+                        logging.warning(f"[{self.id}] {item_name} not found in inventory (may have been sold already)")
+                
+                if not available_items:
+                    logging.warning(f"[{self.id}] No items available to sell (already sold or not found)")
+                    self.selling_complete = True
+                    if self.items_to_buy:
+                        self.set_phase("CHECK_COINS")
+                    else:
+                        self.set_phase("CLOSE_GE")
+                    return self.loop_interval_ms
             
-            # Convert items to sell format for sell_item_from_ge
+            # Convert items to sell format for sell_item_from_ge - only include available items
             items_to_sell_dict = {}
-            for item in self.items_to_sell:
-                items_to_sell_dict[item["name"]] = (item["quantity"], item["bumps"], item["set_price"])
+            for item_config in self.items_to_sell:
+                item_name = item_config["name"]
+                # Only include items that were successfully withdrawn
+                if item_name in available_items:
+                    items_to_sell_dict[item_name] = (item_config["quantity"], item_config["bumps"], item_config["set_price"])
             
             # Sell the items
             result = sell_item_from_ge(items_to_sell_dict)
@@ -412,7 +468,6 @@ class GePlan(Plan):
             
             # Define equipment tiers (from worst to best)
             equipment_tiers = {
-                "axe": ["Bronze axe", "Iron axe", "Steel axe", "Black axe", "Mithril axe", "Adamant axe", "Rune axe", "Dragon axe"],
                 "scimitar": ["Bronze scimitar", "Iron scimitar", "Steel scimitar", "Black scimitar", "Mithril scimitar", "Adamant scimitar", "Rune scimitar"],
                 "helmet": ["Bronze full helm", "Iron full helm", "Steel full helm", "Black full helm", "Mithril full helm", "Adamant full helm", "Rune full helm"],
                 "platebody": ["Bronze platebody", "Iron platebody", "Steel platebody", "Black platebody", "Mithril platebody", "Adamant platebody", "Rune platebody"],

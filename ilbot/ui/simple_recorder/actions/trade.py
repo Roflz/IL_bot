@@ -5,7 +5,7 @@ from typing import Optional, List, Dict
 
 from .widgets import get_widget_children, click_widget
 from ..helpers.runtime_utils import dispatch
-from ..helpers.utils import clean_rs
+from ..helpers.utils import clean_rs, rect_beta_xy
 
 
 def get_other_offer() -> List[Dict]:
@@ -343,8 +343,8 @@ def _offer_item_quantity(item_name: str, option: str, quantity: int) -> bool:
             return False
         
         # Calculate center coordinates
-        x = bounds.get("x", 0) + bounds.get("width", 0) // 2
-        y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+        x, y = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                             bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
         
         print(f"[TRADE] Offering {quantity} {item_name} at ({x}, {y})")
         

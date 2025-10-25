@@ -6,7 +6,8 @@ from .timing import wait_until
 from ..helpers.runtime_utils import ipc
 from ilbot.ui.simple_recorder.helpers.vars import get_var
 from ilbot.ui.simple_recorder.constants import PLAYER_ANIMATIONS
-from ..helpers.utils import press_spacebar
+from ..helpers.utils import sleep_exponential
+from ..helpers.keyboard import press_spacebar
 
 
 def get_player_plane(default=None):
@@ -112,7 +113,7 @@ def login() -> bool:
 
             print(f"[LOGIN] Attempt {attempt + 1}: Clicking at ({click_x}, {click_y})")
             ipc.click(click_x, click_y)
-            time.sleep(1)
+            sleep_exponential(0.8, 1.5, 1.0)
 
             print("[LOGIN] Clicked 'Play Now' button, waiting for WelcomeScreen.PLAY widget...")
 
@@ -533,7 +534,7 @@ def toggle_run() -> bool:
     try:
         # Click the run icon (widget ID 10485782)
         widgets.click_widget(10485793)
-        time.sleep(0.1)  # Small delay to ensure click registers
+        sleep_exponential(0.05, 0.15, 1.5)  # Small delay to ensure click registers
         return True
     except Exception as e:
         print(f"[RUN] Error toggling run: {e}")
@@ -627,4 +628,52 @@ def hop_world(world_id: int) -> bool:
         return False
 
     return True
+
+
+def logout() -> bool:
+    """
+    Log out of the game using specific widget IDs.
+    
+    Returns:
+        - True if logout was successful
+        - False if logout failed or already logged out
+    """
+    # Check if already logged out
+    if not logged_in():
+        print("[LOGOUT] Already logged out")
+        return True
+    
+    try:
+        # Step 1: Click the logout button (widget ID 10747938)
+        print("[LOGOUT] Clicking logout button...")
+        result1 = widgets.click_widget(10747938)
+        if not result1:
+            print("[LOGOUT] Failed to click logout button")
+            return False
+        
+        # Step 2: Wait for confirmation dialog to appear (widget ID 11927560)
+        print("[LOGOUT] Waiting for logout confirmation dialog...")
+        if not wait_until(lambda: widgets.widget_exists(11927560), max_wait_ms=3000):
+            print("[LOGOUT] Logout confirmation dialog did not appear")
+            return False
+        
+        # Step 3: Click the confirmation button (widget ID 11927560)
+        print("[LOGOUT] Clicking logout confirmation...")
+        result2 = widgets.click_widget(11927560)
+        if not result2:
+            print("[LOGOUT] Failed to click logout confirmation")
+            return False
+        
+        # Step 4: Wait until we are logged out
+        print("[LOGOUT] Waiting for logout to complete...")
+        if wait_until(lambda: not logged_in(), max_wait_ms=5000):
+            print("[LOGOUT] Successfully logged out")
+            return True
+        else:
+            print("[LOGOUT] Logout confirmation clicked but still logged in")
+            return False
+            
+    except Exception as e:
+        print(f"[LOGOUT] Error during logout: {e}")
+        return False
 

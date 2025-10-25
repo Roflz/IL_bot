@@ -9,10 +9,32 @@ import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 
-from ilbot.ui.simple_recorder.helpers.runtime_utils import set_ui, set_ipc, set_action_executor
+from ilbot.ui.simple_recorder.helpers.runtime_utils import set_ui, set_ipc, set_action_executor, set_rule_params
 import logging
 from ilbot.ui.simple_recorder.services.action_executor import ActionExecutor
 import socket
+
+# Configure logging to write to files instead of console/GUI
+def setup_file_logging(port: int):
+    """Set up logging to write to files instead of GUI output."""
+    # Create logs directory if it doesn't exist
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+    
+    # Create log file for this instance
+    log_file = logs_dir / f"instance_{port}.log"
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file, mode='a', encoding='utf-8'),
+            # Remove console handler to avoid GUI slowdown
+        ]
+    )
+    
+    logging.info(f"Logging configured for instance {port} -> {log_file}")
 
 # Dynamic plan discovery
 def discover_plans():
@@ -264,6 +286,7 @@ Examples:
   python run_rj_loop.py goblin_diplomacy --port 17001
   python run_rj_loop.py --list
   python run_rj_loop.py romeo_and_juliet --session-dir "D:\\data\\sessions\\player1\\gamestates\\"
+  python run_rj_loop.py tutorial_island --credentials-file "unnamed_character_00"
         """
     )
     
@@ -344,6 +367,18 @@ Examples:
         choices=["worker", "mule"],
         help="Role for ge_trade plan: 'worker' or 'mule' (default: worker)"
     )
+    parser.add_argument(
+        "--wait-minutes", 
+        type=float, 
+        default=1.0, 
+        help="Wait time in minutes for wait_plan (default: 1.0)"
+    )
+    parser.add_argument(
+        "--credentials-file", 
+        type=str, 
+        default="", 
+        help="Credentials file name (without .properties) to rename after character creation (for tutorial_island plan)"
+    )
     
     args = parser.parse_args()
     
@@ -385,6 +420,9 @@ Examples:
         print(f"Error: {e}")
         sys.exit(1)
     
+    # Set up file logging for this instance
+    setup_file_logging(args.port)
+    
     # Create loop runner and plan instances
     loop_runner = LoopRunner(
         session_dir=args.session_dir, 
@@ -420,6 +458,16 @@ Examples:
     if args.plan == "ge_trade":
         plan_kwargs['role'] = args.role
         print(f"[DEBUG] Role: {args.role}")
+    
+    # Add wait_minutes parameter for wait_plan
+    if args.plan == "wait_plan":
+        plan_kwargs['wait_minutes'] = args.wait_minutes
+        print(f"[DEBUG] Wait minutes: {args.wait_minutes}")
+    
+    # Add credentials_file parameter for tutorial_island plan
+    if args.plan == "tutorial_island" and args.credentials_file:
+        plan_kwargs['credentials_file'] = args.credentials_file
+        print(f"[DEBUG] Credentials file: {args.credentials_file}")
     
     plan = plan_class(**plan_kwargs)
     print(f"[DEBUG] Created plan: {plan.__class__.__name__} with id: {getattr(plan, 'id', 'unknown')}")
@@ -471,6 +519,17 @@ Examples:
     else:
         logging.info("No rules configured - plan will run indefinitely")
     
+    # Store rule parameters globally
+    set_rule_params({
+        "start_time": start_time,
+        "max_minutes": max_minutes,
+        "skill_name": skill_name,
+        "skill_level": skill_level,
+        "total_level": total_level,
+        "item_name": item_name,
+        "item_quantity": item_quantity
+    })
+    
     try:
         # Get username for tracking (extract from session directory path)
         username = ""
@@ -484,19 +543,39 @@ Examples:
         except Exception:
             pass
         
+        # Write rule parameters to file for StatsMonitor to read
+        rule_params_file = None
+        triggered_rule_file = None
+        if username:
+            rule_params_file = Path(__file__).parent / "character_data" / f"rule_params_{username}.json"
+            rule_params_file.parent.mkdir(parents=True, exist_ok=True)
+            import json
+            with open(rule_params_file, 'w', encoding='utf-8') as f:
+                # Convert datetime to ISO format string for JSON serialization
+                params = {
+                    "start_time": start_time.isoformat(),
+                    "max_minutes": max_minutes,
+                    "skill_name": skill_name,
+                    "skill_level": skill_level,
+                    "total_level": total_level,
+                    "item_name": item_name,
+                    "item_quantity": item_quantity
+                }
+                json.dump(params, f)
+            logging.info(f"Wrote rule parameters to {rule_params_file}")
+            
+            # File path for triggered rule check
+            triggered_rule_file = Path(__file__).parent / "character_data" / f"triggered_rule_{username}.txt"
+        
         while True:
-            # Check rules every loop
-            from ilbot.ui.simple_recorder.helpers.rules import check_rules
-            triggered_rule = check_rules(
-                start_time=start_time,
-                max_minutes=max_minutes,
-                skill_name=skill_name,
-                skill_level=skill_level,
-                total_level=total_level,
-                item_name=item_name,
-                item_quantity=item_quantity,
-                username=username
-            )
+            # Check for triggered rule from StatsMonitor (reads from file)
+            triggered_rule = None
+            if triggered_rule_file and triggered_rule_file.exists():
+                try:
+                    with open(triggered_rule_file, 'r', encoding='utf-8') as f:
+                        triggered_rule = f.read().strip()
+                except Exception as e:
+                    logging.warning(f"Error reading triggered rule file: {e}")
             
             if triggered_rule:
                 runtime_minutes = (datetime.now() - start_time).total_seconds() / 60
@@ -538,6 +617,20 @@ Examples:
         logging.info(f"Fatal error traceback: {traceback.format_exc()}")
         sys.exit(1)
     finally:
+        # Clean up rule parameter file
+        if rule_params_file and rule_params_file.exists():
+            try:
+                rule_params_file.unlink()
+                logging.info(f"Cleaned up rule parameters file: {rule_params_file}")
+            except Exception as e:
+                logging.warning(f"Error cleaning up rule parameters file: {e}")
+        if triggered_rule_file and triggered_rule_file.exists():
+            try:
+                triggered_rule_file.unlink()
+                logging.info(f"Cleaned up triggered rule file: {triggered_rule_file}")
+            except Exception as e:
+                logging.warning(f"Error cleaning up triggered rule file: {e}")
+        
         # Show final runtime statistics
         final_time = datetime.now()
         total_runtime = (final_time - start_time).total_seconds() / 60

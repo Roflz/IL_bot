@@ -16,8 +16,10 @@ import ilbot.ui.simple_recorder.actions.chat as chat
 from .base import Plan
 from ..helpers import quest
 from ..helpers.bank import near_any_bank
-from ..helpers.camera import move_camera_random
-from ..helpers.utils import press_esc, press_spacebar
+from ..helpers.camera import move_camera_random, setup_camera_optimal
+from ..helpers.utils import sleep_exponential
+from ..helpers.keyboard import press_esc, press_spacebar
+from ..helpers.phase_utils import set_phase_with_camera
 
 
 class GeTradePlan(Plan):
@@ -30,11 +32,9 @@ class GeTradePlan(Plan):
         self.loop_interval_ms = 600
 
         # Set up camera immediately during initialization
-        from ilbot.ui.simple_recorder.helpers.camera import setup_camera_optimal
         setup_camera_optimal()
 
     def set_phase(self, phase: str, camera_setup: bool = True):
-        from ..helpers.phase_utils import set_phase_with_camera
         return set_phase_with_camera(self, phase, camera_setup)
 
     def loop(self, ui):
@@ -49,7 +49,7 @@ class GeTradePlan(Plan):
             case "GO_TO_GE":
                 # Check if we're already at the Grand Exchange
                 if trav.in_area("GE"):
-                    self.set_phase("TRADE_PLAYER", ui)
+                    self.set_phase("REMOVE_EQUIPMENT", ui)
                     return
                 else:
                     # Use enhanced long-distance travel for GE
@@ -57,10 +57,16 @@ class GeTradePlan(Plan):
                     result = trav.go_to("GE")
                     return
 
-            case "TRADE_PLAYER":
+            case "REMOVE_EQUIPMENT":
+                bank.open_bank()
+                bank.deposit_equipment()
+                bank.close_bank()
+                self.set_phase("WAIT", ui)
+
+            case "WAIT":
                 logging.info("Moving camera a random amount")
                 move_camera_random()
-                time.sleep(60)
+                sleep_exponential(50, 70, 1.0)
                 return
 
             case "DONE":

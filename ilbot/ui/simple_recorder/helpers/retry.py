@@ -72,7 +72,8 @@ def retry_interaction(
             continue
         
         # Wait for the game to register the interaction
-        time.sleep(verification_delay)
+        from .utils import sleep_exponential
+        sleep_exponential(verification_delay * 0.8, verification_delay * 1.2, 1.0)
         
         # Verify the interaction was successful
         if verify_interaction(expected_action, expected_target):
@@ -80,7 +81,8 @@ def retry_interaction(
         
         # If verification failed, wait before retrying
         if attempt < max_retries - 1:  # Don't wait after the last attempt
-            time.sleep(retry_delay)
+            from .utils import sleep_exponential
+            sleep_exponential(retry_delay * 0.8, retry_delay * 1.2, 1.0)
     
     return None
 

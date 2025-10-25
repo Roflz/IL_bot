@@ -4,6 +4,7 @@
 import time
 import random
 from typing import Optional, Dict, Any, Tuple
+from ilbot.ui.simple_recorder.helpers.utils import sleep_exponential, clean_rs, rect_beta_xy
 
 
 class ActionExecutor:
@@ -86,7 +87,7 @@ class ActionExecutor:
                     self.ipc.focus()
                     # Use key press/release for better control
                     self.ipc.key_press(key)
-                    time.sleep(dur / 1000.0)  # Convert ms to seconds
+                    sleep_exponential(dur / 1000.0 * 0.8, dur / 1000.0 * 1.2, 1.0)  # Convert ms to seconds
                     self.ipc.key_release(key)
                 except Exception as e:
                     self.debug(f"[IPC] key-hold error: {e}")
@@ -152,18 +153,23 @@ class ActionExecutor:
             ax = int(x) + int(self.canvas_offset[0])
             ay = int(y) + int(self.canvas_offset[1])
 
+            if step.get("option", "") == "":
+                # First option - use simple left-click instead of context menu
+                click_result = self._click_canvas(ax, ay, button="left")
+
+                return click_result
+
             # 2) Hover at the target coordinates first (like other methods)
             hover_result = self.ipc.click(ax, ay, hover_only=True)
             if not hover_result.get("ok"):
                 return
 
             # Hover for 50 ms
-            time.sleep(0.1)
+            sleep_exponential(0.05, 0.15, 1.5)
 
             # 3) read live menu to see what options are available after hover
             info = self.ipc._send({"cmd": "menu"}) or {}
             entries = info.get("entries") or []
-            from ilbot.ui.simple_recorder.helpers.utils import clean_rs
             want_opt = clean_rs((step.get("option") or "")).lower()
             want_tgt = clean_rs((target.get("name") or "")).lower()
             if not want_opt and not want_tgt:
@@ -197,17 +203,13 @@ class ActionExecutor:
                 # First option - use simple left-click instead of context menu
                 click_result = self._click_canvas(ax, ay, button="left")
                 
-                # Get the last interaction data after the click
-                interaction_data = self._get_last_interaction()
-                
-                return {
-                    "click_result": click_result,
-                    "interaction": interaction_data
-                }
+                return click_result
+
             else:
                 # Menu not open after hover, need to right-click to open it
                 self._click_canvas(ax, ay, button="right")
-                time.sleep(int(click.get("open_delay_ms", 120)) / 1000.0)
+                delay_ms = int(click.get("open_delay_ms", 120))
+                sleep_exponential(delay_ms / 1000.0 * 0.8, delay_ms / 1000.0 * 1.2, 1.0)
                 # Re-read menu after opening
                 info = self.ipc._send({"cmd": "menu"}) or {}
                 entries = info.get("entries") or []
@@ -225,8 +227,8 @@ class ActionExecutor:
                 r = target_entry.get('rect')or {}
                 # rect.x / rect.y are ABSOLUTE canvas coords from the plugin logs:
                 # e.g. rect=(751,409 110x15)
-                cx = int(r["x"]) + int(r["w"]) // 2
-                cy = int(r["y"]) + int(r["h"]) // 2
+                cx, cy = rect_beta_xy((int(r["x"]), int(r["x"]) + int(r["w"]),
+                                      int(r["y"]), int(r["y"]) + int(r["h"])), alpha=2.0, beta=2.0)
 
                 # add canvas_offset once (same as you do for other clicks)
                 cx += int(self.canvas_offset[0])
@@ -235,18 +237,12 @@ class ActionExecutor:
                 # Perform the click and capture interaction data
                 click_result = self._click_canvas(cx, cy, button="left")
                 
-                # Get the last interaction data after the click
-                interaction_data = self._get_last_interaction()
-                
-                return {
-                    "click_result": click_result,
-                    "interaction": interaction_data
-                }
+                return click_result
 
         if ctype == "wait":
             ms = int(click.get("ms", 0))
             if ms > 0:
-                time.sleep(ms / 1000.0)
+                sleep_exponential(ms / 1000.0 * 0.8, ms / 1000.0 * 1.2, 1.0)
             return
 
         # Unknown type: log and ignore
@@ -288,17 +284,3 @@ class ActionExecutor:
         except Exception:
             return (None, None)
 
-    def _get_last_interaction(self):
-        """Get the last interaction data from the StateExporter2Plugin."""
-        try:
-            # Small delay to ensure the interaction is captured
-            time.sleep(0.1)
-            
-            # Get the last interaction data via IPC
-            result = self.ipc.get_last_interaction()
-            if result and result.get("ok"):
-                return result.get("interaction")
-            return None
-        except Exception as e:
-            self.debug(f"[IPC] get_last_interaction error: {e}")
-            return None

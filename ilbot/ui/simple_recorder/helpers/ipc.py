@@ -1,6 +1,9 @@
 import json, socket, time
 from typing import Optional
 
+# Global variable to store the last interaction
+_last_interaction = None
+
 
 class IPCClient:
     """
@@ -60,12 +63,20 @@ class IPCClient:
         """Click at canvas coordinates."""
         delay = self.pre_action_ms if pre_ms is None else pre_ms
         if delay > 0:
-            time.sleep(delay / 1000.0)
+            from .utils import sleep_exponential
+            sleep_exponential(delay / 1000.0 * 0.8, delay / 1000.0 * 1.2, 1.0)
         
         msg = {"cmd": "click", "x": int(x), "y": int(y), "button": int(button)}
         if hover_only:
             msg["hover_only"] = True
-        return self._send(msg)
+        
+        result = self._send(msg)
+        
+        # Capture the last interaction after clicking
+        if not hover_only and button == 1:
+            self._capture_last_interaction()
+        
+        return result
 
     def click_canvas(self, x: int, y: int, button: int = 1, pre_ms: int = None):
         """Alias for click method."""
@@ -77,7 +88,8 @@ class IPCClient:
         """Send a key press."""
         delay = self.pre_action_ms if pre_ms is None else pre_ms
         if delay > 0:
-            time.sleep(delay / 1000.0)
+            from .utils import sleep_exponential
+            sleep_exponential(delay / 1000.0 * 0.8, delay / 1000.0 * 1.2, 1.0)
         return self._send({"cmd": "key", "k": str(k)})
 
     def type(self, text: str, enter: bool = True, per_char_ms: int = 30):
@@ -254,9 +266,9 @@ class IPCClient:
         """Get closest objects."""
         return self._send({"cmd": "objects"}) or []
 
-    def find_object(self, name: str, types: list = None) -> dict:
+    def find_object(self, name: str, types: list = None, exact_match: bool = False) -> dict:
         """Find a specific object by name."""
-        msg = {"cmd": "find_object", "name": name}
+        msg = {"cmd": "find_object", "name": name, "exactMatch": exact_match}
         if types:
             msg["types"] = types
         return self._send(msg) or {}
@@ -553,3 +565,24 @@ class IPCClient:
     def open_world_hopper(self) -> dict:
         """Open the world hopper interface."""
         return self._send({"cmd": "openWorldHopper"}) or {}
+    
+    def _capture_last_interaction(self):
+        """Capture the last interaction data and store it globally."""
+        global _last_interaction
+        try:
+            # Small delay to ensure the interaction is captured
+            from .utils import sleep_exponential
+            time.sleep(0.1)
+            
+            # Get the last interaction data via IPC
+            result = self._send({"cmd": "get_last_interaction"})
+            if result and result.get("ok"):
+                _last_interaction = result.get("interaction")
+        except Exception as e:
+            print(f"[IPC] get_last_interaction error: {e}")
+
+
+def get_last_interaction():
+    """Get the last captured interaction data."""
+    global _last_interaction
+    return _last_interaction

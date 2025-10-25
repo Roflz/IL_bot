@@ -14,43 +14,25 @@ def inv_slots() -> list[dict]:
 
 def inv_has(name: str, min_qty: int = 1) -> bool:
     n = norm_name(name)
+    slots = inv_slots()
     if min_qty <= 1:
-        return any(norm_name(s.get("itemName")) == n for s in inv_slots())
+        return any(norm_name(s.get("itemName")) == n for s in slots)
     else:
         return inv_count(name) >= min_qty
 
 def inv_count(name: str) -> int:
     n = norm_name(name)
-    return sum(int(s.get("quantity") or 0) for s in inv_slots()
+    slots = inv_slots()
+    return sum(int(s.get("quantity") or 0) for s in slots
                if norm_name(s.get("itemName")) == n)
 
 def first_inv_slot(name: str) -> dict | None:
     n = norm_name(name)
-    for s in inv_slots():
+    slots = inv_slots()
+    for s in slots:
         if norm_name(s.get("itemName")) == n:
             return s
     return None
-
-def inventory_has_foreign_items() -> bool:
-    allowed = {"Ring mould", "Gold bar", "Sapphire", "Emerald"}
-    for slot in inv_slots():
-        if int(slot.get("quantity") or 0) > 0 and (slot.get("itemName") or "") not in allowed:
-            return True
-    return False
-
-def inventory_ring_slots() -> list[dict]:
-    out = []
-    for s in inv_slots():
-        nm = norm_name(s.get("itemName"))
-        if "ring" in nm and "mould" not in nm and int(s.get("quantity") or 0) > 0:
-            out.append(s)
-    return out
-
-def inv_slot_bounds(slot_id: int) -> dict | None:
-    from .runtime_utils import ipc
-    inventory_widgets_data = ipc_send({"cmd": "get_inventory_widgets"}) or {}
-    iw = inventory_widgets_data.get(str(slot_id)) or {}
-    return unwrap_rect(iw.get("bounds") if isinstance(iw, dict) else None)
 
 def coins() -> int:
     return inv_count("Coins")

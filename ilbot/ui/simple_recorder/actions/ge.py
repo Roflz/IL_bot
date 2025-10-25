@@ -2,20 +2,25 @@
 # Tiny, reusable GE action builders (return single-click/keypress steps).
 import logging
 import time
+import requests
+from typing import List, Dict
 
 from . import inventory
 from .widgets import get_widget_children_with_text, get_widget_children
 from ..helpers.runtime_utils import ui, dispatch, ipc
 from ..helpers.rects import rect_center_xy
-from ..helpers.utils import closest_object_by_names, sleep_exponential
+from ..helpers.utils import closest_object_by_names, sleep_exponential, exponential_number, rect_beta_xy, clean_rs
 from ..helpers.widgets import rect_center_from_widget
 from ..helpers.ge import (
     ge_open, ge_offer_open, ge_selected_item_is, ge_first_buy_slot_btn,
     widget_by_id_text_contains, ge_qty_button, ge_qty_matches, chat_qty_prompt_active, find_ge_plus5_bounds,
-    widget_by_id_text, ge_buy_confirm_widget
+    widget_by_id_text, ge_buy_confirm_widget, click_item_search, adjust_quantity, set_price_percentage,
+    adjust_price, set_market_price, confirm_offer, open_history, is_offer_screen_open,
+    get_offer_screen_data, is_offer_ready, get_current_quantity, get_current_price
 )
-from ..helpers.utils import press_enter
+from ..helpers.keyboard import press_enter
 from ..actions import travel as trav, bank, inventory as inv
+from ..helpers.bank import select_note, bank_note_selected
 from ..actions.timing import wait_until
 from ..constants import BANK_REGIONS
 
@@ -316,8 +321,8 @@ def click_chatbox_item_by_name(item: str, x: int = 5) -> dict | None:
             # Found the item, get its bounds and click
             bounds = child.get("bounds", {})
             if bounds:
-                cx = bounds.get("x", 0) + bounds.get("width", 0) // 2
-                cy = bounds.get("y", 0) + bounds.get("height", 0) // 2
+                cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                                       bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
                 step = {
                     "id": "ge-click-chatbox-item",
                     "action": "click",
@@ -332,51 +337,103 @@ def click_chatbox_item_by_name(item: str, x: int = 5) -> dict | None:
 
 # ---------- one-step actions ----------
 def open_ge() -> dict | None:
-    npc_data = ipc.get_npcs()
+    # Inner attempt loop with fresh coordinate recalculation
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        # Fresh coordinate recalculation
+        npc_data = ipc.get_npcs()
 
-    # --- Prefer the Clerk; use live context menu to pick "Exchange" ---
-    npc = None
-    for cand in (npc_data.get("closestNPCs") or []) + (npc_data.get("npcs") or []):
-        nm = (cand.get("name") or "").lower()
-        nid = int(cand.get("id") or -1)
-        if "grand exchange clerk" in nm or (2148 <= nid <= 2151):
-            npc = cand
-            break
+        # --- Prefer the Clerk; use live context menu to pick "Exchange" ---
+        npc = None
+        for cand in (npc_data.get("closestNPCs") or []) + (npc_data.get("npcs") or []):
+            nm = (cand.get("name") or "").lower()
+            nid = int(cand.get("id") or -1)
+            if "grand exchange clerk" in nm or (2148 <= nid <= 2151):
+                npc = cand
+                break
 
-    if npc and isinstance(npc['canvas'].get("x"), (int, float)) and isinstance(npc['canvas'].get("y"), (int, float)):
-        cx = npc['canvas'].get("x")
-        cy = npc['canvas'].get("y") - 8  # keep your slight lift
-        step = {
-            "id": "ge-open-clerk",
-            "action": "open-ge-context",
-            "description": "Open GE (clerk via context menu: Exchange)",
-            "option": "exchange",  # case-insensitive
-            "click": {
-                "type": "context-select",   # uses IPC 'menu' to match rows by text + rect
-                "target": "grand exchange clerk",  # substring match against target text
-                "x": cx,                    # right-click anchor (canvas)
-                "y": cy,
-                "open_delay_ms": 120
-            },
-            "target": {"domain": "npc", "name": npc.get("name"), "id": npc.get("id")},
-        }
-        return dispatch(step)
+        if npc and isinstance(npc['canvas'].get("x"), (int, float)) and isinstance(npc['canvas'].get("y"), (int, float)):
+            cx = npc['canvas'].get("x")
+            cy = npc['canvas'].get("y") - 8  # keep your slight lift
+            step = {
+                "id": "ge-open-clerk",
+                "action": "open-ge-context",
+                "description": "Open GE (clerk via context menu: Exchange)",
+                "option": "exchange",  # case-insensitive
+                "click": {
+                    "type": "context-select",   # uses IPC 'menu' to match rows by text + rect
+                    "target": "grand exchange clerk",  # substring match against target text
+                    "x": cx,                    # right-click anchor (canvas)
+                    "y": cy,
+                    "open_delay_ms": 120
+                },
+                "target": {"domain": "npc", "name": npc.get("name"), "id": npc.get("id")},
+            }
+            
+            result = dispatch(step)
+            
+            if result:
+                # Check if the correct interaction was performed
+                from ..helpers.ipc import get_last_interaction
+                last_interaction = get_last_interaction()
+                
+                expected_action = "Exchange"
+                expected_target = "grand exchange clerk"
+                
+                if (last_interaction and 
+                    last_interaction.get("action") == expected_action and 
+                    clean_rs(last_interaction.get("target", "")).lower() == expected_target.lower()):
+                    print(f"[CLICK] {expected_target} - interaction verified")
+                    return result
+                else:
+                    print(f"[CLICK] {expected_target} - incorrect interaction, retrying...")
+                    continue
 
-    # --- Fallback: booth simple left-click (unchanged) ---
-    booth = closest_object_by_names(["grand exchange booth"])
-    if booth and isinstance(booth.get("canvasX"), (int, float)) and isinstance(booth.get("canvasY"), (int, float)):
-        step = {
-            "id": "ge-open-booth",
-            "action": "click",
-            "description": "Open GE (booth)",
-            "click": {"type": "point", "x": int(booth["canvasX"]), "y": int(booth["canvasY"]) - 12},
-            "target": {"domain": "object", "name": booth.get("name"), "id": booth.get("id")},
-        }
-        return dispatch(step)
+        # --- Fallback: booth simple left-click (unchanged) ---
+        booth = closest_object_by_names(["grand exchange booth"])
+        if booth:
+            # Check bounds first, then fallback to canvas
+            bounds = booth.get("bounds", {})
+            if bounds and bounds.get("width", 0) > 0 and bounds.get("height", 0) > 0:
+                cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                                       bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
+            elif isinstance(booth.get("canvasX"), (int, float)) and isinstance(booth.get("canvasY"), (int, float)):
+                cx, cy = int(booth["canvasX"]), int(booth["canvasY"]) - 12
+            else:
+                continue
+                
+            step = {
+                "id": "ge-open-booth",
+                "action": "click",
+                "description": "Open GE (booth)",
+                "click": {"type": "point", "x": cx, "y": cy},
+                "target": {"domain": "object", "name": booth.get("name"), "id": booth.get("id")},
+            }
+            
+            result = dispatch(step)
+            
+            if result:
+                # Check if the correct interaction was performed
+                from ..helpers.ipc import get_last_interaction
+                last_interaction = get_last_interaction()
+                
+                expected_action = "Exchange"
+                expected_target = booth.get("name")
+                
+                if (last_interaction and 
+                    last_interaction.get("action") == expected_action and 
+                    clean_rs(last_interaction.get("target", "")).lower() == expected_target.lower()):
+                    print(f"[CLICK] {expected_target} - interaction verified")
+                    return result
+                else:
+                    print(f"[CLICK] {expected_target} - incorrect interaction, retrying...")
+                    continue
 
     return None
 
 def close_ge() -> dict | None:
+    if not ge_open():
+        return True
     while ge_open():
         step = {
             "id": "ge-close",
@@ -385,8 +442,8 @@ def close_ge() -> dict | None:
             "click": {"type": "key", "key": "escape"},
             "preconditions": [], "postconditions": []
         }
-        sleep_exponential(0.2, 0.6)
         result = dispatch(step)
+        sleep_exponential(0.2, 0.6)
         if not ge_open():
             break
         sleep_exponential(1, 2)
@@ -424,31 +481,40 @@ def get_offer_slots() -> dict:
     return result
 
 def begin_buy_offer() -> dict | None:
-    # Get offer slots organized by index
-    offer_slots = get_offer_slots()
+    # Inner attempt loop with fresh coordinate recalculation
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        # Fresh coordinate recalculation
+        # Get offer slots organized by index
+        offer_slots = get_offer_slots()
+        
+        # Find the first available offer slot (empty slot) across all indexes
+        for index_name in ['INDEX_0', 'INDEX_1', 'INDEX_2', 'INDEX_3', 'INDEX_4', 'INDEX_5', 'INDEX_6', 'INDEX_7']:
+            widgets = offer_slots.get(index_name, [])
+            for widget in widgets:
+                # Check if this is an empty slot (no item sprite or "Empty" text)
+                sprite_id = widget.get("spriteId", -1)
+                text = (widget.get("text") or "").strip()
+                
+                if sprite_id == 1108:  # Empty slot indicators
+                    bounds = widget.get("bounds", {})
+                    if bounds:
+                        cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                                              bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
+                        step = {
+                            "id": "ge-begin-buy",
+                            "action": "click",
+                            "description": "Open buy offer",
+                            "click": {"type": "point", "x": cx, "y": cy},
+                                            "target": {"domain": "widget", "name": "ge_offer_slot", "bounds": bounds},
+                            "preconditions": [], "postconditions": []
+                        }
+                        
+                        return dispatch(step)
+        
+        # If we get here, no empty slot found in this attempt
+        continue
     
-    # Find the first available offer slot (empty slot) across all indexes
-    for index_name in ['INDEX_0', 'INDEX_1', 'INDEX_2', 'INDEX_3', 'INDEX_4', 'INDEX_5', 'INDEX_6', 'INDEX_7']:
-        widgets = offer_slots.get(index_name, [])
-        for widget in widgets:
-            # Check if this is an empty slot (no item sprite or "Empty" text)
-            sprite_id = widget.get("spriteId", -1)
-            text = (widget.get("text") or "").strip()
-            
-            if sprite_id == 1108:  # Empty slot indicators
-                bounds = widget.get("bounds", {})
-                if bounds:
-                    cx = bounds.get("x", 0) + bounds.get("width", 0) // 2
-                    cy = bounds.get("y", 0) + bounds.get("height", 0) // 2
-                    step = {
-        "id": "ge-begin-buy",
-        "action": "click",
-        "description": "Open buy offer",
-        "click": {"type": "point", "x": cx, "y": cy},
-                        "target": {"domain": "widget", "name": "ge_offer_slot", "bounds": bounds},
-        "preconditions": [], "postconditions": []
-                    }
-                    return dispatch(step)
     return None
 
 
@@ -491,8 +557,8 @@ def begin_sell_offer(item_name: str) -> dict | None:
             logging.error(f"[begin_sell_offer] actions/ge.py: Item '{item_name}' has invalid bounds")
             return None
         
-        cx = bounds.get("x", 0) + bounds.get("width", 0) // 2
-        cy = bounds.get("y", 0) + bounds.get("height", 0) // 2
+        cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                               bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
         
         step = {
             "id": "ge-begin-sell",
@@ -539,7 +605,8 @@ def set_quantity(qty: int = 0) -> dict | None:
                 "preconditions": [], "postconditions": []
             }
             dispatch(step)
-            if not wait_until(lambda: chat_qty_prompt_active(), min_wait_ms=600, max_wait_ms=5000):
+            min_wait = int(exponential_number(400, 800, 1.0, "int"))
+            if not wait_until(lambda: chat_qty_prompt_active(), min_wait_ms=min_wait, max_wait_ms=5000):
                 return None
 
     if not buy_chatbox_text_input_contains(str(qty)):
@@ -551,7 +618,8 @@ def set_quantity(qty: int = 0) -> dict | None:
             "preconditions": [], "postconditions": []
         }
         dispatch(step)
-        if not wait_until(lambda: buy_chatbox_text_input_contains(str(qty)), min_wait_ms=600, max_wait_ms=5000):
+        min_wait = int(exponential_number(400, 800, 1.0, "int"))
+        if not wait_until(lambda: buy_chatbox_text_input_contains(str(qty)), min_wait_ms=min_wait, max_wait_ms=5000):
             return None
 
     return press_enter()
@@ -569,8 +637,8 @@ def click_plus5() -> dict | None:
         if text.lower() == "+5%":
             bounds = child.get("bounds", {})
             if bounds:
-                cx = bounds.get("x", 0) + bounds.get("width", 0) // 2
-                cy = bounds.get("y", 0) + bounds.get("height", 0) // 2
+                cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                                       bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
                 step = {
         "id": "ge-plus5",
         "action": "click",
@@ -594,8 +662,8 @@ def confirm_buy() -> dict | None:
         if "confirm" in text:
             bounds = child.get("bounds", {})
             if bounds:
-                cx = bounds.get("x", 0) + bounds.get("width", 0) // 2
-                cy = bounds.get("y", 0) + bounds.get("height", 0) // 2
+                cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                                       bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
                 step = {
         "id": "ge-confirm",
         "action": "click",
@@ -620,8 +688,8 @@ def confirm_sell() -> dict | None:
         if "confirm" in text:
             bounds = child.get("bounds", {})
             if bounds:
-                cx = bounds.get("x", 0) + bounds.get("width", 0) // 2
-                cy = bounds.get("y", 0) + bounds.get("height", 0) // 2
+                cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                                       bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
                 step = {
         "id": "ge-confirm-sell",
         "action": "click",
@@ -646,8 +714,8 @@ def collect_to_inventory() -> dict | None:
         if "collect" in text:
             bounds = child.get("bounds", {})
             if bounds:
-                cx = bounds.get("x", 0) + bounds.get("width", 0) // 2
-                cy = bounds.get("y", 0) + bounds.get("height", 0) // 2
+                cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                                       bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
                 step = {
         "id": "ge-collect",
         "action": "click",
@@ -734,8 +802,8 @@ def abort_ge_offer(item_name: str) -> dict | None:
     if not bounds:
         return None
     
-    cx = bounds.get("x", 0) + bounds.get("width", 0) // 2
-    cy = bounds.get("y", 0) + bounds.get("height", 0) // 2
+    cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                           bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
     
     step = {
         "id": "ge-abort-offer",
@@ -775,8 +843,8 @@ def modify_ge_offer(item_name: str) -> dict | None:
     if not bounds:
         return None
     
-    cx = bounds.get("x", 0) + bounds.get("width", 0) // 2
-    cy = bounds.get("y", 0) + bounds.get("height", 0) // 2
+    cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                           bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
     
     step = {
         "id": "ge-modify-offer",
@@ -831,8 +899,8 @@ def set_custom_price(price: int) -> dict | None:
     
     if price_widget:
         bounds = price_widget.get("bounds", {})
-        cx = bounds.get("x", 0) + bounds.get("width", 0) // 2
-        cy = bounds.get("y", 0) + bounds.get("height", 0) // 2
+        cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                               bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
         step = {
             "id": "ge-enter-price",
             "action": "click",
@@ -845,7 +913,7 @@ def set_custom_price(price: int) -> dict | None:
         if not wait_until(chat_qty_prompt_active):
             return None
 
-        time.sleep(0.2)
+        sleep_exponential(0.1, 0.3, 1.5)
         # Type the price
         price_step = {
             "id": "ge-type-price",
@@ -864,7 +932,7 @@ def set_custom_price(price: int) -> dict | None:
     return None
 
 
-def buy_item_from_ge(item, retry_items: dict = None) -> bool | None:
+def buy_item_from_ge(item) -> bool | None:
     """
     Returns True when all items are in inventory.
     Otherwise performs exactly one small step toward buying them and returns None.
@@ -906,7 +974,8 @@ def buy_item_from_ge(item, retry_items: dict = None) -> bool | None:
             # make space then withdraw all coins
             if not inv.is_empty(excepted_items=["Coins"]):
                 bank.deposit_inventory()
-                if not wait_until(inv.is_empty, max_wait_ms=4000, min_wait_ms=150):
+                min_wait = int(exponential_number(100, 200, 1.0, "int"))
+                if not wait_until(inv.is_empty, max_wait_ms=4000, min_wait_ms=min_wait):
                     return None
             bank.withdraw_item("coins", withdraw_all=True)
             if not wait_until(lambda: inv.has_item("coins"), max_wait_ms=3000):
@@ -924,6 +993,7 @@ def buy_item_from_ge(item, retry_items: dict = None) -> bool | None:
 
     # Buy each item one by one
     items_list = list(items_to_buy.items())
+    print(f"Buying items:{items_to_buy.items()}")
     items_to_process = [(name, data) for name, data in items_list if not inv.has_item(name)]
     
     for i, (item_name, (item_quantity, item_price_bumps, item_set_price)) in enumerate(items_to_process):
@@ -931,28 +1001,33 @@ def buy_item_from_ge(item, retry_items: dict = None) -> bool | None:
         if not is_offer_screen_open():
             if has_collect():
                 collect_to_inventory()
-                if not wait_until(lambda: not has_collect(), min_wait_ms=600, max_wait_ms=5000):
+                min_wait = int(exponential_number(400, 800, 1.0, "int"))
+                if not wait_until(lambda: not has_collect(), min_wait_ms=min_wait, max_wait_ms=5000):
                     return None
             begin_buy_offer()
-            if not wait_until(offer_open, min_wait_ms=600, max_wait_ms=5000):
+            min_wait = int(exponential_number(400, 800, 1.0, "int"))
+            if not wait_until(offer_open, min_wait_ms=min_wait, max_wait_ms=5000):
                 return None
 
         # Type item name and select first result
         if not buy_chatbox_item_in_first_x(item_name, 5) and not selected_item_is(item_name):
             type_item_name(item_name)
-            if not wait_until(lambda: buy_chatbox_first_item_is(item_name), min_wait_ms=600, max_wait_ms=3000):
+            min_wait = int(exponential_number(400, 800, 1.0, "int"))
+            if not wait_until(lambda: buy_chatbox_first_item_is(item_name), min_wait_ms=min_wait, max_wait_ms=3000):
                 return None
 
         if buy_chatbox_item_in_first_x(item_name, 1) and not selected_item_is(item_name):
             press_enter()
-            if not wait_until(lambda: selected_item_is(item_name), min_wait_ms=600, max_wait_ms=3000):
+            min_wait = int(exponential_number(400, 800, 1.0, "int"))
+            if not wait_until(lambda: selected_item_is(item_name), min_wait_ms=min_wait, max_wait_ms=3000):
                 return None
 
         if not buy_chatbox_item_in_first_x(item_name, 1) and not selected_item_is(item_name):
             # Search through the first 5 items to find and click the correct one
             result = click_chatbox_item_by_name(item_name, 5)
             if result:
-                if not wait_until(lambda: selected_item_is(item_name), min_wait_ms=600, max_wait_ms=3000):
+                min_wait = int(exponential_number(400, 800, 1.0, "int"))
+                if not wait_until(lambda: selected_item_is(item_name), min_wait_ms=min_wait, max_wait_ms=3000):
                     return None
 
         if selected_item_is(item_name):
@@ -960,7 +1035,8 @@ def buy_item_from_ge(item, retry_items: dict = None) -> bool | None:
             if item_quantity > 1:
                 if not qty_is(item_quantity):
                     set_quantity(item_quantity)
-                    if not wait_until(lambda: qty_is(item_quantity), min_wait_ms=600, max_wait_ms=3000):
+                    min_wait = int(exponential_number(400, 800, 1.0, "int"))
+                    if not wait_until(lambda: qty_is(item_quantity), min_wait_ms=min_wait, max_wait_ms=3000):
                         return None
 
             # Set price based on item_set_price from tuple
@@ -969,7 +1045,7 @@ def buy_item_from_ge(item, retry_items: dict = None) -> bool | None:
                 result = set_custom_price(item_set_price)
                 if not result:
                     return None
-                time.sleep(0.5)  # Wait for price to be set
+                sleep_exponential(0.3, 0.8, 1.2)  # Wait for price to be set
             else:
                 # Use +5% bumps when set_price is 0
                 for _ in range(max(0, int(item_price_bumps))):
@@ -1000,19 +1076,23 @@ def buy_item_from_ge(item, retry_items: dict = None) -> bool | None:
 
             # Confirm buy
             confirm_buy()
-            if not wait_until(lambda: ge_buy_confirm_widget() is None or popup_exists(), min_wait_ms=600, max_wait_ms=3000):
+            min_wait = int(exponential_number(400, 800, 1.0, "int"))
+            if not wait_until(lambda: ge_buy_confirm_widget() is None or popup_exists(), min_wait_ms=min_wait, max_wait_ms=3000):
                 return None
 
             if popup_exists():
                 select_yes_popup()
-                if not wait_until(lambda: not popup_exists(), min_wait_ms=600, max_wait_ms=3000):
+                min_wait = int(exponential_number(400, 800, 1.0, "int"))
+                if not wait_until(lambda: not popup_exists(), min_wait_ms=min_wait, max_wait_ms=3000):
                     return None
 
             # Wait for collect button to appear (offer filled)
-            if not wait_until(has_collect, min_wait_ms=600, max_wait_ms=10000):
+            min_wait = int(exponential_number(400, 800, 1.0, "int"))
+            if not wait_until(has_collect, min_wait_ms=min_wait, max_wait_ms=10000):
                 return None
             collect_to_inventory()
-            if not wait_until(lambda: inventory.inv_count(item_name) >= item_quantity, min_wait_ms=600, ):
+            min_wait = int(exponential_number(400, 800, 1.0, "int"))
+            if not wait_until(lambda: inventory.inv_count(item_name) >= item_quantity, min_wait_ms=min_wait, ):
                 return None
 
     # Close GE after all items are bought
@@ -1048,7 +1128,8 @@ def sell_item_from_ge(items_to_sell: dict) -> dict:
 
     if bank.is_open():
         bank.close_bank()
-        wait_until(bank.is_closed,min_wait_ms=600, max_wait_ms=5000)
+        min_wait = int(exponential_number(400, 800, 1.0, "int"))
+        wait_until(bank.is_closed,min_wait_ms=min_wait, max_wait_ms=5000)
         return {"status": "selling"}
 
     # Open GE
@@ -1186,7 +1267,7 @@ def create_buy_offer(item_name: str, quantity: int = 1, price_bumps: int = 0) ->
             if not result:
                 logging.error("[create_buy_offer] actions/ge.py: Failed to apply price bump")
                 return None
-            time.sleep(0.25)  # Small delay between price bumps
+            sleep_exponential(0.15, 0.35, 1.5)  # Small delay between price bumps
         
         # Confirm the offer
         result = confirm_offer()
@@ -1249,7 +1330,7 @@ def create_sell_offer(item_name: str, quantity: int = 1, price_bumps: int = 0) -
             if not result:
                 logging.error("[create_sell_offer] actions/ge.py: Failed to apply price bump")
                 return None
-            time.sleep(0.25)  # Small delay between price bumps
+            sleep_exponential(0.15, 0.35, 1.5)  # Small delay between price bumps
         
         # Confirm the offer
         result = confirm_offer()
@@ -1331,8 +1412,8 @@ def select_yes_popup() -> dict | None:
         return None
     
     # Click the Yes button
-    cx = bounds.get("x", 0) + bounds.get("width", 0) // 2
-    cy = bounds.get("y", 0) + bounds.get("height", 0) // 2
+    cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                           bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
     
     step = {
         "id": "ge-select-yes-popup",
@@ -1351,84 +1432,6 @@ def select_yes_popup() -> dict | None:
         return result
     
     return None
-
-def click_item_search() -> dict | None:
-    """Click the item search icon to open item selection."""
-    from ..helpers.ge import click_item_search as helper_click_item_search
-    return helper_click_item_search()
-
-
-def adjust_quantity(direction: str) -> dict | None:
-    """Adjust quantity using arrow buttons."""
-    from ..helpers.ge import adjust_quantity as helper_adjust_quantity
-    return helper_adjust_quantity(direction)
-
-
-def set_price_percentage(percentage: int) -> dict | None:
-    """Set price using percentage buttons."""
-    from ..helpers.ge import set_price_percentage as helper_set_price_percentage
-    return helper_set_price_percentage(percentage)
-
-
-def adjust_price(direction: str) -> dict | None:
-    """Adjust price using arrow buttons."""
-    from ..helpers.ge import adjust_price as helper_adjust_price
-    return helper_adjust_price(direction)
-
-
-def set_market_price() -> dict | None:
-    """Set price to current market price."""
-    from ..helpers.ge import set_market_price as helper_set_market_price
-    return helper_set_market_price()
-
-
-def confirm_offer() -> dict | None:
-    """Confirm and place the offer."""
-    from ..helpers.ge import confirm_offer as helper_confirm_offer
-    return helper_confirm_offer()
-
-
-def close_offer_screen() -> dict | None:
-    """Close the GE offer setup screen."""
-    from ..helpers.ge import close_offer_screen as helper_close_offer_screen
-    return helper_close_offer_screen()
-
-
-def open_history() -> dict | None:
-    """Open the GE history screen."""
-    from ..helpers.ge import open_history as helper_open_history
-    return helper_open_history()
-
-
-def is_offer_screen_open() -> bool:
-    """Check if the GE offer setup screen is open."""
-    from ..helpers.ge import is_offer_screen_open as helper_is_offer_screen_open
-    return helper_is_offer_screen_open()
-
-
-def get_offer_screen_data() -> dict | None:
-    """Get all offer screen widget data for analysis."""
-    from ..helpers.ge import get_offer_screen_data as helper_get_offer_screen_data
-    return helper_get_offer_screen_data()
-
-
-def is_offer_ready() -> bool:
-    """Check if the offer is ready to be confirmed (has item, quantity, and price)."""
-    from ..helpers.ge import is_offer_ready as helper_is_offer_ready
-    return helper_is_offer_ready()
-
-
-def get_current_quantity() -> str | None:
-    """Get the current quantity value from the offer screen."""
-    from ..helpers.ge import get_current_quantity as helper_get_current_quantity
-    return helper_get_current_quantity()
-
-
-def get_current_price() -> str | None:
-    """Get the current price value from the offer screen."""
-    from ..helpers.ge import get_current_price as helper_get_current_price
-    return helper_get_current_price()
-
 
 def withdraw_items_to_sell(required_items: list, item_requirements: dict, plan_id: str = "GE") -> dict | None:
     """
@@ -1488,7 +1491,7 @@ def withdraw_items_to_sell(required_items: list, item_requirements: dict, plan_i
                 if inventory.has_unnoted_item(item) or (bank.has_item(item) and inventory.has_item(item)):
                     bank.deposit_item(item)
                     if not wait_until(lambda: not inv.has_item(item)):
-                        return False
+                        return {"status": "error", "error": f"Could not withdraw {item}"}
                 try:
                     # Check if bank has the item
                     if bank.has_item(item):
@@ -1568,7 +1571,6 @@ def check_and_sell_required_items(required_items: list, item_requirements: dict,
                     return {"status": "error", "error": "Could not open bank"}
             
             # Ensure we're in NOTE mode for selling items
-            from ..helpers.bank import select_note, bank_note_selected
             select_note()
             # Wait until note mode is actually enabled
             if not wait_until(bank_note_selected, max_wait_ms=3000):
@@ -1735,3 +1737,129 @@ def check_and_buy_required_items(required_items: list, item_requirements: dict, 
     except Exception as e:
         logging.error(f"[{plan_id}] Error in check_and_buy_required_items: {e}")
         return {"status": "error", "error": str(e)}
+
+
+# ---------- Generic GE Price Calculation Methods ----------
+
+def get_current_ge_prices(items: List[str]) -> Dict[str, int]:
+    """
+    Get current GE prices for items via Weird Gloop API.
+    
+    Args:
+        items: List of item names to get prices for
+        
+    Returns:
+        Dict mapping item names to their current GE prices
+    """
+    try:
+        # Weird Gloop API endpoint for latest prices
+        base_url = "https://api.weirdgloop.org/exchange/history/osrs/latest"
+        
+        # Build query string with item names
+        item_names = "|".join(items)
+        url = f"{base_url}?name={item_names}"
+        
+        logging.info(f"[GE] Fetching GE prices from Weird Gloop API: {url}")
+        
+        # Make API request
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Check if API returned an error
+            if not data.get("success", True):
+                error_msg = data.get("error", "Unknown error")
+                logging.warning(f"[GE] API error: {error_msg}")
+                return get_fallback_prices(items)
+            
+            # Extract prices from API response
+            prices = {}
+            for item in items:
+                # Look for item in API response
+                found = False
+                for name, item_data in data.items():
+                    if isinstance(item_data, dict):
+                        if item.lower() == name.lower():
+                            price = item_data.get("price", 0)
+                            if price > 0:
+                                prices[item] = price
+                                found = True
+                                logging.info(f"[GE] Found {item} price from API: {price}")
+                                break
+
+                if not found:
+                    # Use fallback price
+                    fallback_prices = get_fallback_prices([item])
+                    prices[item] = fallback_prices[item]
+                    logging.warning(f"[GE] Using fallback price for {item}: {prices[item]}")
+            
+            logging.info(f"[GE] Final prices from Weird Gloop API: {prices}")
+            return prices
+        else:
+            logging.warning(f"[GE] API request failed with status {response.status_code}")
+            return get_fallback_prices(items)
+        
+    except Exception as e:
+        logging.error(f"[GE] Error getting GE prices from Weird Gloop API: {e}")
+        return get_fallback_prices(items)
+
+
+def get_fallback_prices(items: List[str]) -> Dict[str, int]:
+    """
+    Get fallback prices for items when API is unavailable.
+    
+    Args:
+        items: List of item names to get fallback prices for
+        
+    Returns:
+        Dict mapping item names to their fallback prices
+    """
+    # Fallback prices for common items
+    fallback_prices = {
+        "Logs": 50,
+        "Bronze axe": 1000,
+        "Iron axe": 1000,
+        "Steel axe": 1000,
+        "Black axe": 2000,
+        "Mithril axe": 2000,
+        "Adamant axe": 5000,
+        "Rune axe": 10000,
+        "Dragon axe": 50000,
+        "Coins": 1,
+    }
+    
+    prices = {}
+    for item in items:
+        prices[item] = fallback_prices.get(item, 1000)  # Default fallback price
+    
+    logging.info(f"[GE] Using fallback prices: {prices}")
+    return prices
+
+
+def calculate_sell_price(base_price: int, bumps: int) -> int:
+    """
+    Calculate sell price with -5% per bump (compounding).
+    
+    Args:
+        base_price: Base market price of the item
+        bumps: Number of 5% bumps to apply (negative for selling)
+        
+    Returns:
+        Calculated sell price
+    """
+    return int(base_price * (0.95 ** bumps))
+
+
+def calculate_buy_price(base_price: int, bumps: int) -> int:
+    """
+    Calculate buy price with +5% per bump (compounding).
+    
+    Args:
+        base_price: Base market price of the item
+        bumps: Number of 5% bumps to apply (positive for buying)
+        
+    Returns:
+        Calculated buy price
+    """
+    return int(base_price * (1.05 ** bumps))

@@ -133,6 +133,10 @@ class BankPlanSimple(Plan):
             self.set_phase("CHECK_ITEMS")
             phase = "CHECK_ITEMS"
 
+        if not bank.is_open() and not phase == "SETUP_COMPLETE" and not phase == "TRAVEL_TO_BANK" and not phase == "OPEN_BANK":
+            bank.open_bank()
+            return self.loop_interval_ms
+
 
         match(phase):
             case "TRAVEL_TO_BANK":
@@ -202,6 +206,8 @@ class BankPlanSimple(Plan):
             if isinstance(item, dict):
                 item_name = item.get("name")
                 required_quantity = item.get("quantity", 1)
+                if required_quantity == -1:
+                    required_quantity = 1
                 
                 # Check how many we have total across bank, inventory, and equipped
                 total_quantity = 0
@@ -263,6 +269,11 @@ class BankPlanSimple(Plan):
     def _handle_withdraw_items(self) -> int:
         """Handle withdrawing required items."""
         logging.info(f"[{self.id}] Withdrawing required items...")
+
+        if not inventory.is_empty():
+            bank.deposit_inventory()
+            if not wait_until(lambda: inventory.is_empty, min_wait_ms=exponential_number(0.3,0.6,1)):
+                return self.ERROR
         
         for item in self.required_items:
             if isinstance(item, dict):
@@ -311,7 +322,7 @@ class BankPlanSimple(Plan):
         
         logging.info(f"[{self.id}] Inventory verification successful - all required items present")
         self.set_phase("SETUP_COMPLETE")
-        return self.loop_interval_ms
+        return self.SUCCESS
     
     def _handle_equip_items(self) -> int:
         """Handle equipping items."""

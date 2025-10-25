@@ -1,5 +1,5 @@
 import logging
-from .utils import norm_name
+from .utils import norm_name, rect_beta_xy
 from .widgets import click_listener_on, get_widget_info
 from ..actions.travel import in_area
 from ..constants import BANK_REGIONS, BANK_WIDGETS
@@ -34,22 +34,16 @@ def bank_slots_matching(names: list[str]) -> list[dict]:
 def first_bank_slot(name: str) -> dict | None:
     try:
         n = norm_name(name)
-        best = None
-        for s in bank_slots():
+        slots = bank_slots()
+        for s in slots:
             # Clean item name by removing item ID (e.g., "Leather|14" -> "Leather")
             item_name = s.get("name") or ""
             if "|" in item_name:
                 item_name = item_name.split("|")[0]
             
             if norm_name(item_name) == n:
-                if best is None:
-                    best = s
-                else:
-                    q1 = int(s.get("quantity") or 0)
-                    q2 = int(best.get("quantity") or 0)
-                    if q1 > q2 or (q1 == q2 and int(s.get("slotId") or 9_999) < int(best.get("slotId") or 9_999)):
-                        best = s
-        return best
+                return s
+        return {'quantity': 0}
     except Exception as e:
         logging.error(f"[first_bank_slot] helpers/bank.py: {e}")
         return None
@@ -149,7 +143,7 @@ def nearest_banker() -> dict | None:
         logging.error(f"[nearest_banker] helpers/bank.py: {e}")
         return None
 
-def near_any_bank(destination_area: str = None) -> bool:
+def near_any_bank(destination_area: str) -> bool:
     """
     Check if there is a bank booth or banker within 20 tiles of the player.
     Uses find_object_in_area() for bank booths and npc_in_area() for bankers when destination_area is provided.
@@ -164,57 +158,32 @@ def near_any_bank(destination_area: str = None) -> bool:
         - False if no bank facilities found nearby
     """
     try:
-        if destination_area:
-            # Handle special case for CLOSEST_BANK
-            if destination_area == "CLOSEST_BANK":
-                from ..helpers.navigation import closest_bank_key
-                actual_bank_area = closest_bank_key()
-                destination_area = actual_bank_area
+        # Handle special case for CLOSEST_BANK
+        if destination_area == "CLOSEST_BANK" or not destination_area:
+            from ..helpers.navigation import closest_bank_key
+            actual_bank_area = closest_bank_key()
+            destination_area = actual_bank_area
 
-            if in_area(destination_area):
+        if in_area(destination_area):
+            return True
+
+        # Check for bank booths in the specific area
+        from ..actions.objects import _find_closest_object_in_area
+        bank_booth = _find_closest_object_in_area("bank booth", destination_area)
+        if bank_booth:
+            distance = bank_booth.get("distance", 999)
+            if distance <= 20:
                 return True
 
-            # Check for bank booths in the specific area
-            from ..actions.objects import _find_closest_object_in_area
-            bank_booth = _find_closest_object_in_area("bank booth", destination_area)
-            if bank_booth:
-                distance = bank_booth.get("distance", 999)
-                if distance <= 20:
-                    return True
-            
-            # Check for bankers in the specific area
-            from ..actions.npc import _find_closest_npc_in_area
-            banker = _find_closest_npc_in_area("banker", destination_area)
-            if banker:
-                distance = banker.get("distance", 999)
-                if distance <= 20:
-                    return True
-            
-            return False
-        else:
-            # Check for bank booths using find_object
-            bank_booth = ipc.find_object("bank booth")
-            if bank_booth and bank_booth.get("ok") and bank_booth.get("found"):
-                booth_data = bank_booth.get("object", {})
-                distance = booth_data.get("distance", 999)
-                if distance <= 20:
-                    return True
-            
-            # Check for bankers using NPC methods
-            bankers = ipc.get_npcs_in_radius(20)
-            if bankers:
-                # Look for NPCs with "banker" in their name or actions
-                for npc in bankers:
-                    npc_name = (npc.get("name") or "").lower()
-                    npc_actions = npc.get("actions", [])
-                    
-                    # Check if it's a banker by name or actions
-                    if ("banker" in npc_name or 
-                        "bank" in npc_name or 
-                        any("bank" in action.lower() for action in npc_actions if action)):
-                        return True
-            
-            return False
+        # Check for bankers in the specific area
+        from ..actions.npc import _find_closest_npc_in_area
+        banker = _find_closest_npc_in_area("banker", destination_area)
+        if banker:
+            distance = banker.get("distance", 999)
+            if distance <= 20:
+                return True
+
+        return False
         
     except Exception as e:
         logging.error(f"[near_any_bank] helpers/bank.py: {e}")
@@ -278,7 +247,6 @@ def get_bank_quantity_mode() -> dict:
             return {"ok": False, "mode": None, "x": None, "err": "Bank is not open"}
         
         xvalue_data = ipc.get_bank_xvalue()
-        logging.info(f"[get_bank_quantity_mode] Raw response: {xvalue_data}")
         
         if not xvalue_data or not xvalue_data.get("ok"):
             error_msg = xvalue_data.get("err", "Unknown error") if xvalue_data else "No response"
@@ -294,8 +262,6 @@ def get_bank_quantity_mode() -> dict:
         # 2 = "10" (withdraw 10)
         # 3 = "X" (withdraw custom amount)
         # 4 = "All" (withdraw all)
-        
-        logging.info(f"[get_bank_quantity_mode] Mode: {mode}, X: {x_value}")
         
         return {
             "ok": True,
@@ -679,9 +645,9 @@ def select_quantityx_custom() -> dict | None:
             logging.error("[select_quantityx_context] helpers/bank.py: QUANTITYX button has invalid bounds")
             return None
         
-        # Calculate center point for context menu
-        center_x = bounds.get("x", 0) + bounds.get("width", 0) // 2
-        center_y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+        # Calculate randomized point for context menu
+        center_x, center_y = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                                          bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
         
         step = {
             "action": "bank-select-quantityx-context",

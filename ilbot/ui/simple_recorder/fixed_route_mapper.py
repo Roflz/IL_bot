@@ -87,12 +87,14 @@ def is_player_in_scene(player_x, player_y, player_p, scene_base_x, scene_base_y,
 
 def save_collision_data(data, cache_dir=""):
     """Save collision data to cache."""
-    cache_path = Path(cache_dir)
-    cache_path.mkdir(parents=True, exist_ok=True)
+    cache_path = Path(cache_dir) if cache_dir else Path(".")
+    cache_dir_path = cache_path / "collision_cache"
+    cache_dir_path.mkdir(parents=True, exist_ok=True)
     
-    cache_file = cache_path / "collision_cache/collision_map_debug.json"
+    # Use main cache file
+    cache_file = cache_dir_path / "collision_map_debug.json"
     
-    # Load existing data
+    # Load existing data from the cache file
     existing_data = {}
     if cache_file.exists():
         try:

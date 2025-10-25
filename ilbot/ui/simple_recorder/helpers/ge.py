@@ -1,6 +1,6 @@
 import logging
 from .runtime_utils import ipc, dispatch
-from .utils import norm_name
+from .utils import norm_name, clean_rs
 from .widgets import unwrap_rect, widget_exists
 from ..actions import widgets
 
@@ -241,7 +241,8 @@ def ge_qty_value_widget() -> dict | None:
     
     children = setup_data.get("children", [])
     for child in children:
-        text = (child.get("text") or "")
+        text = (clean_rs(child.get("text")) or "")
+        text = text.replace(',', '')
         id =  (child.get("id") or "")
         if text.isdigit() and id == 30474266:
             return child
@@ -249,7 +250,7 @@ def ge_qty_value_widget() -> dict | None:
 
 def ge_qty_matches(want_qty: int) -> bool:
     w = ge_qty_value_widget() or {}
-    t = int(w.get("text"))
+    t = int(w.get("text").replace(',', ''))
     return want_qty == t  # GE usually shows exact number; `in` is robust to formatting
 
 def chatbox_qty_prompt_visible() -> bool:
@@ -477,45 +478,6 @@ def find_ge_confirm_widget_by_text(text: str) -> dict | None:
 def is_offer_screen_open() -> bool:
     """Check if the GE offer setup screen is open."""
     return widget_exists(30474266)
-
-
-def close_offer_screen() -> dict | None:
-    """Close the GE offer setup screen."""
-    try:
-        # Get the close button widget using get_widget_children to find the X button
-        main_data = ipc.get_widget_children(30474242)  # Main container
-        if not main_data.get("ok"):
-            logging.error("[close_offer_screen] helpers/ge.py: Failed to get main container widget data")
-            return None
-        
-        children = main_data.get("children", [])
-        close_button = None
-        
-        # Find the close button by looking for the X button (index 12 from widget analysis)
-        for i, child in enumerate(children):
-            if i == 12:  # Close button is at index 12
-                close_button = child
-                break
-        
-        if not close_button:
-            logging.error("[close_offer_screen] helpers/ge.py: Close button not found")
-            return None
-        
-        bounds = close_button.get("bounds")
-        if not bounds or int(bounds.get("width", 0)) <= 0 or int(bounds.get("height", 0)) <= 0:
-            logging.error("[close_offer_screen] helpers/ge.py: Close button has invalid bounds")
-            return None
-        
-        step = {
-            "action": "ge-close-offer-screen",
-            "click": {"type": "rect-center"},
-            "target": {"domain": "ge-widget", "name": "Close Offer Screen", "bounds": bounds},
-            "postconditions": [],
-        }
-        return dispatch(step)
-    except Exception as e:
-        logging.error(f"[close_offer_screen] helpers/ge.py: {e}")
-        return None
 
 
 def open_history() -> dict | None:

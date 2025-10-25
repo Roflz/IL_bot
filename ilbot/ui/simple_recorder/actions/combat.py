@@ -2,8 +2,12 @@ from __future__ import annotations
 from typing import Optional
 import time
 
+from .combat_interface import current_combat_style, select_combat_style
+from .player import get_skill_level
 from .travel import _first_blocking_door_from_waypoints
 from ..helpers.runtime_utils import ipc
+from ..helpers.utils import sleep_exponential
+
 
 def attack_closest(npc_name: str | list) -> Optional[dict]:
     """
@@ -70,7 +74,7 @@ def attack_closest(npc_name: str | list) -> Optional[dict]:
         
         # If we get here, no NPCs were successfully attacked in this attempt
         print(f"[COMBAT] No attackable NPCs found in attempt {attempt + 1}, retrying...")
-        time.sleep(0.5)  # Brief delay before retry
+        sleep_exponential(0.3, 0.8, 1.2)  # Brief delay before retry
     
     print(f"[COMBAT] Failed to attack any NPC from list {npc_names} after {max_retries} attempts")
     return None
@@ -155,83 +159,80 @@ def _attack_npc(npc: dict) -> Optional[dict]:
     
     if result:
         # Wait briefly to verify the attack was successful
-        time.sleep(0.2)
+        sleep_exponential(0.1, 0.3, 1.5)
         print(f"[COMBAT] Attack command executed successfully")
     
     return result
 
+def select_combat_style_for_training():
+    """
+    Uses:
+        attack_level   = get_skill_level("attack")
+        defence_level  = get_skill_level("defence")
+        strength_level = get_skill_level("strength")
+        current_style  = current_combat_style()
+        select_combat_style(idx)
 
-# Global state to track last known skill levels
-_last_skill_levels = {"attack": 0, "defence": 0, "strength": 0}
-
-def select_combat_style_for_training() -> None:
-    """Select combat style based on current skill levels and training goals."""
-    from .combat_interface import select_combat_style, current_combat_style
-    from .player import get_skill_level
-    global _last_skill_levels
-
-    # Get current skill levels
-    attack_level = get_skill_level("attack")
-    defence_level = get_skill_level("defence")
+    Style mapping assumed from your notes:
+        0 = Attack
+        1 = Strength
+        3 = Defence
+    """
+    # --- read current levels ---
+    attack_level   = get_skill_level("attack")
+    defence_level  = get_skill_level("defence")
     strength_level = get_skill_level("strength")
 
-    # Get current combat style
-    current_style = current_combat_style()
+    # --- constants/rules ---
+    # priority: strength > attack > defence
+    CAPS = {"strength": None, "attack": 20, "defence": 5}
+    STYLE = {"attack": 0, "strength": 1, "defence": 3}
 
-    if attack_level == defence_level == strength_level and not current_style == 1:
-        print(f"[COMBAT] Strength ({strength_level}) is not highest, switching to Strength training")
-        select_combat_style(1)  # Switch to Strength
-        _last_skill_levels = {"attack": attack_level, "defence": defence_level, "strength": strength_level}
-        return
-    elif attack_level == defence_level == strength_level:
-        _last_skill_levels = {"attack": attack_level, "defence": defence_level, "strength": strength_level}
-        return
+    def ceil5(x: int) -> int:
+        return ((x + 4) // 5) * 5
 
-    # Check if strength is not the highest or equal to the highest
-    max_level = max(attack_level, defence_level, strength_level)
-    if strength_level < max_level and not current_style == 1:
-        print(f"[COMBAT] Strength ({strength_level}) is not highest, switching to Strength training")
-        select_combat_style(1)  # Switch to Strength
-        _last_skill_levels = {"attack": attack_level, "defence": defence_level, "strength": strength_level}
-        return
+    def next_block_target(x: int) -> int:
+        return x + 5 if x % 5 == 0 else ceil5(x)
 
-    # Check if current skill just reached a 5-level increment (leveled up)
-    should_switch = False
-    if current_style == 0:  # Attack
-        # Only switch if attack just leveled up to a 5-level increment
-        should_switch = (attack_level > _last_skill_levels["attack"] and 
-                        attack_level % 5 == 0 and 
-                        attack_level < 40)
-    elif current_style == 1:  # Strength
-        # Only switch if strength just leveled up to a 5-level increment
-        should_switch = (strength_level > _last_skill_levels["strength"] and 
-                        strength_level % 5 == 0)
-    elif current_style == 3:  # Defence
-        # Only switch if defence just leveled up to a 5-level increment
-        should_switch = (defence_level > _last_skill_levels["defence"] and 
-                        defence_level % 5 == 0 and 
-                        defence_level < 10)
+    levels = {
+        "attack": attack_level,
+        "defence": defence_level,
+        "strength": strength_level,
+    }
 
-    # If we should switch, determine next skill in priority order
-    if should_switch:
-        # Priority order: Strength → Attack → Defence → back to Strength
-        if current_style == 1:  # Currently Strength, go to Attack
-            target_style = 0
-            skill_name = "Attack"
-        elif current_style == 0:  # Currently Attack, go to Defence
-            target_style = 3
-            skill_name = "Defence"
-        elif current_style == 3:  # Currently Defence, go back to Strength
-            target_style = 1
-            skill_name = "Strength"
-        else:
-            target_style = 1
-            skill_name = "Strength"
+    # 1) finish any mid-block (not multiple of 5) in priority order, within caps
+    for skill in ("strength", "attack", "defence"):
+        lvl = levels[skill]
+        cap = CAPS[skill]
+        if cap is not None and lvl >= cap:
+            continue
+        if lvl % 5 != 0:
+            target = ceil5(lvl)
+            if cap is not None:
+                target = min(target, cap)
+            if target > lvl:
+                desired_style = STYLE[skill]
+                if current_combat_style() != desired_style:
+                    select_combat_style(desired_style)
+                return skill, target
 
-        print(f"[COMBAT] Switching to {skill_name} training")
-        select_combat_style(target_style)
-    else:
-        print(f"[COMBAT] Continuing current training (no switch needed)")
+    # 2) start a new 5-level block in priority order, within caps
+    for skill in ("strength", "attack", "defence"):
+        lvl = levels[skill]
+        cap = CAPS[skill]
+        if cap is not None and lvl >= cap:
+            continue
+        target = next_block_target(lvl)
+        if cap is not None:
+            target = min(target, cap)
+        if target > lvl:
+            desired_style = STYLE[skill]
+            if current_combat_style() != desired_style:
+                select_combat_style(desired_style)
+            return skill, target
 
-    # Update the last known skill levels
-    _last_skill_levels = {"attack": attack_level, "defence": defence_level, "strength": strength_level}
+    # 3) everything that can be capped is capped; keep Strength selected (no-op target)
+    desired_style = STYLE["strength"]
+    if current_combat_style() != desired_style:
+        select_combat_style(desired_style)
+    return "strength", strength_level

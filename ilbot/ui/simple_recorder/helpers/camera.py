@@ -155,7 +155,8 @@ def hold_until_condition(condition_func, key, max_duration=5.0):
         while time.time() - start_time < max_duration:
             if condition_func():
                 return True
-            time.sleep(check_interval)
+            from .utils import sleep_exponential
+            sleep_exponential(check_interval * 0.8, check_interval * 1.2, 1.0)
     finally:
         # Always release the key when done
         ipc.key_release(key)
@@ -245,7 +246,8 @@ def move_camera_random() -> bool:
                     ipc.scroll(1)  # Scroll in
                 else:
                     ipc.scroll(-1)  # Scroll out
-                time.sleep(0.1)
+                from .utils import sleep_exponential
+                sleep_exponential(0.05, 0.15, 1.5)
             
             print(f"[CAMERA] Completed {abs(scroll_amount)} scroll steps")
         

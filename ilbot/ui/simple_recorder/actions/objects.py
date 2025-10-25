@@ -4,6 +4,7 @@ from ilbot.ui.simple_recorder.actions.travel import _first_blocking_door_from_wa
 from ilbot.ui.simple_recorder.constants import BANK_REGIONS, REGIONS
 from ilbot.ui.simple_recorder.helpers.rects import unwrap_rect, rect_center_xy
 from ilbot.ui.simple_recorder.helpers.runtime_utils import ipc
+from ilbot.ui.simple_recorder.helpers.utils import rect_beta_xy
 from ilbot.ui.simple_recorder.services.click_with_camera import click_object_with_camera
 
 
@@ -65,7 +66,7 @@ def _get_distance_to_object(obj: Dict[str, Any]) -> float:
         return 999.0
 
 
-def _find_closest_object_by_distance(name: str, types: List[str] | None = None, max_distance: float = None, max_objects: int = None) -> Dict[str, Any] | None:
+def _find_closest_object_by_distance(name: str, types: List[str] | None = None, max_distance: float = None, max_objects: int = None, exact_match: bool = False) -> Dict[str, Any] | None:
     """
     Find the closest object by straight-line distance.
     Uses the efficient find_object command which already calculates distance and returns the closest match.
@@ -75,6 +76,7 @@ def _find_closest_object_by_distance(name: str, types: List[str] | None = None, 
         types: Object types to search for
         max_distance: If specified, return first object found under this distance
         max_objects: Maximum number of objects to check for distance (for performance)
+        exact_match: If True, only matches objects with exact name match
         
     Returns:
         Closest object by straight-line distance, or None if not found
@@ -84,9 +86,7 @@ def _find_closest_object_by_distance(name: str, types: List[str] | None = None, 
     if types is None:
         types = ["GAME"]  # Default to GAME objects
 
-    # Use find_object which already returns the closest object by distance
-    # This is much faster than get_objects + distance calculation
-    obj_resp = ipc.find_object(name, types=types)
+    obj_resp = ipc.find_object(name, types=types, exact_match=exact_match)
     
     if not obj_resp or not obj_resp.get("ok") or not obj_resp.get("found"):
         return None
@@ -257,13 +257,17 @@ def object_exists(
         return obj_resp['object'].get('distance') < radius
 
 
-def click_object_closest_by_path_distance(name: str, action: str) -> Optional[dict]:
+def click_object_closest_by_path_distance(name: str, action: str, exact_match_object: bool = False, exact_match_target_and_action: bool = False) -> Optional[dict]:
     """
     Click a specific action on an object by auto-selecting:
       - Left-click if the desired action is the default (index 0).
       - Right-click + context-select if the desired action is at index > 0.
     Uses path-based distance calculation to select the closest object.
     If a CLOSED door lies on the path to the object, click the earliest blocking door first.
+    
+    Args:
+        exact_match_object: If True, only matches objects with exact name match
+        exact_match_target_and_action: If True, uses exact matching for target and action verification
     """
     max_retries = 3
     
@@ -319,7 +323,8 @@ def click_object_closest_by_path_distance(name: str, action: str) -> Optional[di
         # Get click coordinates and rectangle from target object
         rect = unwrap_rect(fresh_obj.get("clickbox")) or unwrap_rect(fresh_obj.get("bounds"))
         if rect:
-            cx, cy = rect_center_xy(rect)
+            cx, cy = rect_beta_xy((rect.get("x", 0), rect.get("x", 0) + rect.get("width", 0), 
+                                   rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)), alpha=2.0, beta=2.0)
             click_coords = {"x": cx, "y": cy}
             click_rect = rect
         elif isinstance(fresh_obj.get("canvas", {}).get("x"), (int, float)) and isinstance(fresh_obj.get("canvas", {}).get("y"), (int, float)):
@@ -338,7 +343,8 @@ def click_object_closest_by_path_distance(name: str, action: str) -> Optional[di
                 world_coords=world_coords,
                 click_coords=click_coords,
                 click_rect=click_rect,
-                aim_ms=420
+                aim_ms=420,
+                exact_match=exact_match_target_and_action
             )
         else:
             # Need context menu → use click_object_with_camera with action and index
@@ -349,7 +355,8 @@ def click_object_closest_by_path_distance(name: str, action: str) -> Optional[di
                 world_coords=world_coords,
                 click_coords=click_coords,
                 click_rect=click_rect,
-                aim_ms=420
+                aim_ms=420,
+                exact_match=exact_match_target_and_action
             )
         
         print(f"[OBJECT_ACTION] Click result: {result}")
@@ -360,19 +367,25 @@ def click_object_closest_by_path_distance(name: str, action: str) -> Optional[di
     return None
 
 
-def click_object_closest_by_distance(name: str, action: str) -> Optional[dict]:
+def click_object_closest_by_distance(name: str, action: str, exact_match_object: bool = False, exact_match_target_and_action: bool = False) -> Optional[dict]:
     """
     Click a specific action on an object by auto-selecting:
       - Left-click if the desired action is the default (index 0).
       - Right-click + context-select if the desired action is at index > 0.
-    Uses path-based distance calculation to select the closest object.
+    Uses straight-line distance calculation to select the closest object.
     If a CLOSED door lies on the path to the object, click the earliest blocking door first.
+    
+    Args:
+        name: Name of the object to search for
+        action: Action to perform on the object
+        exact_match_object: If True, only matches objects with exact name match
+        exact_match_target_and_action: If True, uses exact matching for target and action verification
     """
     max_retries = 3
 
     for attempt in range(max_retries):
-        # Find closest object by path distance
-        fresh_obj = _find_closest_object_by_distance(name, types=["GAME"])
+        # Find closest object by distance
+        fresh_obj = _find_closest_object_by_distance(name, types=["GAME"], exact_match=exact_match_object)
 
         if not fresh_obj:
             print(f"[OBJECT_ACTION] Object '{name}' not found")
@@ -386,12 +399,6 @@ def click_object_closest_by_distance(name: str, action: str) -> Optional[dict]:
                 return acts.index(needle) if needle in acts else None
             except Exception:
                 return None
-
-        idx = action_index(fresh_obj.get("actions"), action.lower())
-        print(f"[OBJECT_ACTION] Action '{action}' found at index: {idx}")
-        if idx is None:
-            print(f"[OBJECT_ACTION] Action '{action}' not found in object actions")
-            continue  # Try next attempt
 
         # 1) Check for doors on the path to the object
         gx, gy = fresh_obj.get("world", {}).get("x"), fresh_obj.get("world", {}).get("y")
@@ -417,7 +424,8 @@ def click_object_closest_by_distance(name: str, action: str) -> Optional[dict]:
         # Get click coordinates and rectangle from target object
         rect = unwrap_rect(fresh_obj.get("clickbox")) or unwrap_rect(fresh_obj.get("bounds"))
         if rect:
-            cx, cy = rect_center_xy(rect)
+            cx, cy = rect_beta_xy((rect.get("x", 0), rect.get("x", 0) + rect.get("width", 0), 
+                                   rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)), alpha=2.0, beta=2.0)
             click_coords = {"x": cx, "y": cy}
             click_rect = rect
         elif isinstance(fresh_obj.get("canvas", {}).get("x"), (int, float)) and isinstance(
@@ -434,7 +442,8 @@ def click_object_closest_by_distance(name: str, action: str) -> Optional[dict]:
             world_coords=world_coords,
             click_coords=click_coords,
             click_rect=click_rect,
-            aim_ms=420
+            aim_ms=420,
+            exact_match=exact_match_target_and_action
         )
 
         print(f"[OBJECT_ACTION] Click result: {result}")
@@ -445,11 +454,15 @@ def click_object_closest_by_distance(name: str, action: str) -> Optional[dict]:
     return None
 
 
-def click_object_closest_by_path_simple(name: str, prefer_action: str | None = None) -> dict | None:
+def click_object_closest_by_path_simple(name: str, prefer_action: str | None = None, exact_match_object: bool = False, exact_match_target_and_action: bool = False) -> dict | None:
     """
     Click a game object by (partial) name using path-based distance calculation.
     Simplified version without door handling.
     Selects the closest object by path distance (number of waypoints) rather than absolute distance.
+    
+    Args:
+        exact_match_object: If True, only matches objects with exact name match
+        exact_match_target_and_action: If True, uses exact matching for target and action verification
     """
     if not name or not str(name).strip():
         return None
@@ -486,7 +499,8 @@ def click_object_closest_by_path_simple(name: str, prefer_action: str | None = N
         # Get click coordinates and rectangle from target object
         rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
         if rect:
-            cx, cy = rect_center_xy(rect)
+            cx, cy = rect_beta_xy((rect.get("x", 0), rect.get("x", 0) + rect.get("width", 0), 
+                                   rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)), alpha=2.0, beta=2.0)
             click_coords = {"x": cx, "y": cy}
             click_rect = rect
         elif isinstance(target.get("canvas", {}).get("x"), (int, float)) and isinstance(target.get("canvas", {}).get("y"), (int, float)):
@@ -503,13 +517,14 @@ def click_object_closest_by_path_simple(name: str, prefer_action: str | None = N
             world_coords=world_coords,
             click_coords=click_coords,
             click_rect=click_rect,
-            aim_ms=420
+            aim_ms=420,
+            exact_match=exact_match_target_and_action
         )
 
     return None
 
 
-def click_object_in_area_simple(name: str, area: str | tuple, action: str = None) -> dict | None:
+def click_object_in_area_simple(name: str, area: str | tuple, action: str = None, exact_match_object: bool = False, exact_match_target_and_action: bool = False) -> dict | None:
     """
     Click an object within a specific area (simple version without door handling).
     Uses the efficient find_object_in_area command.
@@ -518,6 +533,8 @@ def click_object_in_area_simple(name: str, area: str | tuple, action: str = None
         name: Name of the object to search for
         area: Area name from constants.py (e.g., "FALADOR_BANK") or tuple (min_x, max_x, min_y, max_y)
         action: Action to perform on the object (optional)
+        exact_match_object: If True, only matches objects with exact name match
+        exact_match_target_and_action: If True, uses exact matching for target and action verification
         
     Returns:
         Click result or None if not found
@@ -558,7 +575,8 @@ def click_object_in_area_simple(name: str, area: str | tuple, action: str = None
     # Get click coordinates and rectangle from target object
     rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
     if rect:
-        cx, cy = rect_center_xy(rect)
+        cx, cy = rect_beta_xy((rect.get("x", 0), rect.get("x", 0) + rect.get("width", 0), 
+                               rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)), alpha=2.0, beta=2.0)
         click_coords = {"x": cx, "y": cy}
         click_rect = rect
     elif isinstance(target.get("canvas", {}).get("x"), (int, float)) and isinstance(target.get("canvas", {}).get("y"), (int, float)):
@@ -576,11 +594,12 @@ def click_object_in_area_simple(name: str, area: str | tuple, action: str = None
         world_coords=world_coords,
         click_coords=click_coords,
         click_rect=click_rect,
-        aim_ms=420
+        aim_ms=420,
+        exact_match=exact_match_target_and_action
     )
 
 
-def click_object_in_area(name: str, area: str | tuple, action: str = None) -> dict | None:
+def click_object_in_area(name: str, area: str | tuple, action: str = None, exact_match_object: bool = False, exact_match_target_and_action: bool = False) -> dict | None:
     """
     Click an object within a specific area with door detection logic.
     Uses the efficient find_object_in_area command.
@@ -589,6 +608,8 @@ def click_object_in_area(name: str, area: str | tuple, action: str = None) -> di
         name: Name of the object to search for
         area: Area name from constants.py (e.g., "FALADOR_BANK") or tuple (min_x, max_x, min_y, max_y)
         action: Action to perform on the object (optional)
+        exact_match_object: If True, only matches objects with exact name match
+        exact_match_target_and_action: If True, uses exact matching for target and action verification
         
     Returns:
         Click result or None if not found
@@ -663,7 +684,8 @@ def click_object_in_area(name: str, area: str | tuple, action: str = None) -> di
         # Get click coordinates and rectangle from target object
         rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
         if rect:
-            cx, cy = rect_center_xy(rect)
+            cx, cy = rect_beta_xy((rect.get("x", 0), rect.get("x", 0) + rect.get("width", 0), 
+                                   rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)), alpha=2.0, beta=2.0)
             click_coords = {"x": cx, "y": cy}
             click_rect = rect
         elif isinstance(target.get("canvas", {}).get("x"), (int, float)) and isinstance(target.get("canvas", {}).get("y"), (int, float)):
@@ -679,7 +701,8 @@ def click_object_in_area(name: str, area: str | tuple, action: str = None) -> di
             world_coords=world_coords,
             click_coords=click_coords,
             click_rect=click_rect,
-            aim_ms=420
+            aim_ms=420,
+            exact_match=exact_match_target_and_action
         )
         
         print(f"[OBJECT_ACTION] Click result: {result}")
@@ -690,11 +713,15 @@ def click_object_in_area(name: str, area: str | tuple, action: str = None) -> di
     return None
 
 
-def click_object_closest_by_distance_simple(name: str, prefer_action: str | None = None) -> dict | None:
+def click_object_closest_by_distance_simple(name: str, prefer_action: str | None = None, exact_match_object: bool = False, exact_match_target_and_action: bool = False) -> dict | None:
     """
     Click a game object by (partial) name using straight-line distance calculation.
     Simplified version without door handling.
     Selects the closest object by straight-line distance rather than path distance.
+    
+    Args:
+        exact_match_object: If True, only matches objects with exact name match
+        exact_match_target_and_action: If True, uses exact matching for target and action verification
     """
     if not name or not str(name).strip():
         return None
@@ -706,7 +733,7 @@ def click_object_closest_by_distance_simple(name: str, prefer_action: str | None
     
     for attempt in range(max_retries):
         # Find closest object by distance
-        target = _find_closest_object_by_distance(want, types=["GAME"])
+        target = _find_closest_object_by_distance(want, types=["GAME"], exact_match=exact_match_object)
         
         if not target:
             print(f"[DEBUG] Object '{want}' not found")
@@ -718,7 +745,8 @@ def click_object_closest_by_distance_simple(name: str, prefer_action: str | None
         # Get click coordinates and rectangle from target object
         rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
         if rect:
-            cx, cy = rect_center_xy(rect)
+            cx, cy = rect_beta_xy((rect.get("x", 0), rect.get("x", 0) + rect.get("width", 0), 
+                                   rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)), alpha=2.0, beta=2.0)
             click_coords = {"x": cx, "y": cy}
             click_rect = rect
         elif isinstance(target.get("canvas", {}).get("x"), (int, float)) and isinstance(target.get("canvas", {}).get("y"), (int, float)):
@@ -735,7 +763,8 @@ def click_object_closest_by_distance_simple(name: str, prefer_action: str | None
             world_coords=world_coords,
             click_coords=click_coords,
             click_rect=click_rect,
-            aim_ms=420
+            aim_ms=420,
+            exact_match=exact_match_target_and_action
         )
 
     return None

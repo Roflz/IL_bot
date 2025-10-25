@@ -6,6 +6,7 @@ from datetime import datetime
 
 from ilbot.ui.simple_recorder.actions import player
 from ilbot.ui.simple_recorder.helpers.runtime_utils import ipc, dispatch
+from ilbot.ui.simple_recorder.helpers.utils import sleep_exponential
 
 # Timing instrumentation
 _TIMING_ENABLED = True
@@ -94,7 +95,7 @@ def aim_midtop_at_world(wx: int, wy: int, *, max_ms: int = 600):
                 timing_data["counts"]["projections"] += 1
                 
                 if not proj.get("ok"):
-                    time.sleep(check_interval)
+                    sleep_exponential(check_interval * 0.8, check_interval * 1.2, 1.0)
                     continue
 
                 # Get current camera state

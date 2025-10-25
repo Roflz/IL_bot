@@ -261,6 +261,8 @@ ipcinput.mode=AWT
 ipcinput.hoverDelayMs=10
 defaultworld.lastWorld=$worldForInstance
 defaultworld.useLastWorld=true
+runelite.logouttimerplugin=true
+logouttimer.idleTimeout=25
 "@
   Write-Host "Writing settings to: $instanceSettingsFile"
   $settingsContent | Out-File -FilePath $instanceSettingsFile -Encoding UTF8
@@ -269,6 +271,7 @@ defaultworld.useLastWorld=true
   Write-Host "  IpcInput: port=$port, enabled=true"
   Write-Host "  StateExporter2: dir=$exp, enabled=true"
   Write-Host "  World Selection: world=$worldForInstance, auto-select=true"
+  Write-Host "  Logout Timer: time=25 mins, enabled=true"
 
   Write-Host "Waiting 5 seconds for files to be fully written..."
   Start-Sleep -Seconds 5

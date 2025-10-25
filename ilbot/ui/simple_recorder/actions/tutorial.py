@@ -6,6 +6,7 @@ import time
 
 from ..helpers.runtime_utils import dispatch, ipc
 from ..helpers.widgets import get_widget_text, rect_center_from_widget
+from ..helpers.utils import sleep_exponential
 
 
 def type_tutorial_name(name: str) -> bool:
@@ -37,7 +38,7 @@ def type_tutorial_name(name: str) -> bool:
     dispatch(step)
     
     # Wait a moment for the field to be focused
-    time.sleep(0.5)
+    sleep_exponential(0.3, 0.8, 1.2)
     
     # Type the character name
     step = {
@@ -49,7 +50,7 @@ def type_tutorial_name(name: str) -> bool:
     dispatch(step)
     
     # Wait a moment then press enter
-    time.sleep(1.0)
+    sleep_exponential(0.8, 1.5, 1.0)
     
     # Press enter to confirm
     step = {

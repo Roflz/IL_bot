@@ -54,6 +54,7 @@ from pathlib import Path
 import sys
 
 from ...actions.ge import close_ge
+from ...helpers.utils import sleep_exponential
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -62,6 +63,8 @@ from ...actions.equipment import get_best_weapon_for_level, get_best_armor_for_l
 from ...actions.timing import wait_until
 from ...helpers.bank import near_any_bank
 from ...helpers.inventory import inv_slots
+from ...helpers.camera import setup_camera_optimal
+from ...helpers.phase_utils import set_phase_with_camera
 from ..base import Plan
 
 
@@ -136,7 +139,6 @@ class BankPlan(Plan):
         
         # Set up camera immediately during initialization
         try:
-            from ...helpers.camera import setup_camera_optimal
             setup_camera_optimal()
         except Exception as e:
             logging.warning(f"[{self.id}] Could not setup camera: {e}")
@@ -147,7 +149,6 @@ class BankPlan(Plan):
     
     def set_phase(self, phase: str, camera_setup: bool = True):
         """Set the current phase."""
-        from ...helpers.phase_utils import set_phase_with_camera
         return set_phase_with_camera(self, phase, camera_setup)
     
     def loop(self, ui) -> int:
@@ -590,7 +591,7 @@ class BankPlan(Plan):
         if self.inventory_config.get("deposit_all", True):
             logging.info(f"[{self.id}] Depositing all inventory items...")
             bank.deposit_inventory()
-            time.sleep(0.5)
+            sleep_exponential(0.3, 0.8, 1.2)
         
         # Deposit equipped items that aren't in our loadout
         logging.info(f"[{self.id}] Checking for unwanted equipped items...")
@@ -636,7 +637,7 @@ class BankPlan(Plan):
             if has_unwanted_equipment:
                 logging.info(f"[{self.id}] Found unwanted equipment, depositing all equipment")
                 bank.deposit_equipment()
-                time.sleep(0.5)  # Give time for equipment to be deposited
+                sleep_exponential(0.3, 0.8, 1.2)  # Give time for equipment to be deposited
         except Exception as e:
             logging.warning(f"[{self.id}] Could not check/deposit equipped items: {e}")
         
@@ -694,7 +695,7 @@ class BankPlan(Plan):
                 if has_different_tool:
                     logging.info(f"[{self.id}] Found different tool equipped, depositing all equipment to clear it")
                     bank.deposit_equipment()
-                    time.sleep(0.5)  # Give time for equipment to be deposited
+                    sleep_exponential(0.3, 0.8, 1.2)  # Give time for equipment to be deposited
             except Exception as e:
                 logging.warning(f"[{self.id}] Could not check/unequip existing tools: {e}")
             
@@ -804,7 +805,7 @@ class BankPlan(Plan):
                 logging.info(f"[{self.id}] Withdrawing all {self.food_item}")
             else:
                 bank.withdraw_item(self.food_item, self.food_quantity)
-            time.sleep(0.5)
+            sleep_exponential(0.3, 0.8, 1.2)
         
         # Withdraw required inventory items
         for item in self.inventory_config.get("required_items", []):
@@ -818,7 +819,7 @@ class BankPlan(Plan):
                     if required_quantity == -1:
                         bank.withdraw_item(item_name, withdraw_all=True)
                         logging.info(f"[{self.id}] Withdrawing all {item_name}")
-                        time.sleep(0.5)
+                        sleep_exponential(0.3, 0.8, 1.2)
                     else:
                         # Check how many we already have in inventory/equipment
                         already_have = 0
@@ -835,12 +836,12 @@ class BankPlan(Plan):
                         if withdraw_quantity > 0:
                             logging.info(f"[{self.id}] Withdrawing {withdraw_quantity} {item_name} (need {required_quantity}, already have {already_have})")
                             bank.withdraw_item(item_name, withdraw_quantity)
-                            time.sleep(0.5)
+                            sleep_exponential(0.3, 0.8, 1.2)
             else:
                 # Simple string item (default quantity 1)
                 if bank.has_item(item):
                     bank.withdraw_item(item)
-                    time.sleep(0.5)
+                    sleep_exponential(0.3, 0.8, 1.2)
         
         # Withdraw tools that should stay in inventory (not equipped)
         if "tool_tiers" in self.equipment_config and self.equipment_config["tool_tiers"]:
@@ -865,7 +866,7 @@ class BankPlan(Plan):
                     if bank.has_item(target_tool):
                         logging.info(f"[{self.id}] Withdrawing {target_tool} to keep in inventory (can't equip due to attack level)")
                         bank.withdraw_item(target_tool)
-                        time.sleep(0.5)
+                        sleep_exponential(0.3, 0.8, 1.2)
             except Exception as e:
                 logging.warning(f"[{self.id}] Could not handle tool inventory setup: {e}")
         
@@ -873,13 +874,13 @@ class BankPlan(Plan):
         for item in self.inventory_config.get("optional_items", []):
             if not inventory.is_full() and bank.has_item(item):
                 bank.withdraw_item(item)
-                time.sleep(0.5)
+                sleep_exponential(0.3, 0.8, 1.2)
         
         # Check for sellable items before closing bank
         self._check_sellable_items()
         
         # Verify inventory is correct before proceeding
-        time.sleep(0.5)
+        sleep_exponential(0.3, 0.8, 1.2)
         inventory_correct = self._verify_inventory()
         if not inventory_correct:
             logging.warning(f"[{self.id}] Inventory verification failed - staying in WITHDRAW_ITEMS phase")

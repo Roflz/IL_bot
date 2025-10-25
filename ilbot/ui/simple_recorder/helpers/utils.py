@@ -1,6 +1,6 @@
-import re, time, csv, random, math
+import re, time, csv, random
 from pathlib import Path
-from ilbot.ui.simple_recorder.helpers.runtime_utils import dispatch
+# from ilbot.ui.simple_recorder.helpers.runtime_utils import dispatch
 
 _STEP_HITS: dict[str, int] = {}
 _RS_TAG_RE = re.compile(r'</?col(?:=[0-9a-fA-F]+)?>')
@@ -28,56 +28,6 @@ def closest_object_by_names(names: list[str]) -> dict | None:
             return obj
 
     return None
-
-def press_enter() -> dict | None:
-    step = {
-        "id": "key-enter",
-        "action": "key",
-        "description": "Press Enter",
-        "click": {"type": "key", "key": "ENTER"},
-        "preconditions": [], "postconditions": []
-    }
-    return dispatch(step)
-
-def press_esc() -> dict | None:
-    step = {
-        "id": "key-esc",
-        "action": "key",
-        "description": "Press Escape",
-        "click": {"type": "key", "key": "ESC"},
-        "preconditions": [], "postconditions": []
-    }
-    return dispatch(step)
-
-def press_backspace() -> dict | None:
-    step = {
-        "id": "key-backspace",
-        "action": "key",
-        "description": "Press Backspace",
-        "click": {"type": "key", "key": "BACKSPACE"},
-        "preconditions": [], "postconditions": []
-    }
-    return dispatch(step)
-
-def press_spacebar() -> dict | None:
-    step = {
-        "id": "key-spacebar",
-        "action": "key",
-        "description": "Press Spacebar",
-        "click": {"type": "key", "key": "SPACE"},
-        "preconditions": [], "postconditions": []
-    }
-    return dispatch(step)
-
-def type_text(text: str) -> dict | None:
-    step = {
-        "id": "type-text",
-        "action": "type",
-        "description": f"Type text: {text}",
-        "click": {"type": "type", "text": text, "per_char_ms": 20},
-    }
-    return dispatch(step)
-
 
 def get_world_from_csv(username: str) -> int | None:
     """
@@ -226,6 +176,7 @@ def sleep_random(min_seconds: float, max_seconds: float) -> None:
         max_seconds: Maximum sleep time in seconds
     """
     sleep_time = random_number(min_seconds, max_seconds, "float")
+    print(f"Sleeping for {sleep_time} seconds")
     time.sleep(sleep_time)
 
 
@@ -240,6 +191,7 @@ def sleep_normal(min_seconds: float, max_seconds: float, center_bias: float = 0.
         center_bias: How much to bias toward center (0.0 = uniform, 1.0 = very centered)
     """
     sleep_time = normal_number(min_seconds, max_seconds, center_bias, "float")
+    print(f"Sleeping for {sleep_time} seconds")
     time.sleep(sleep_time)
 
 
@@ -253,6 +205,7 @@ def sleep_exponential(min_seconds: float, max_seconds: float, lambda_param: floa
         lambda_param: Rate parameter (higher = more likely to be shorter)
     """
     sleep_time = exponential_number(min_seconds, max_seconds, lambda_param, "float")
+    print(f"Sleeping for {sleep_time} seconds")
     time.sleep(sleep_time)
 
 
@@ -267,6 +220,7 @@ def sleep_beta(min_seconds: float, max_seconds: float, alpha: float = 2.0, beta:
         beta: Shape parameter (higher = more weight toward min)
     """
     sleep_time = beta_number(min_seconds, max_seconds, alpha, beta, "float")
+    print(f"Sleeping for {sleep_time} seconds")
     time.sleep(sleep_time)
 
 

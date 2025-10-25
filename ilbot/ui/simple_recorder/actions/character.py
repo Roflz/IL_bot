@@ -4,6 +4,8 @@ Character creation and customization actions.
 
 import time
 import random
+
+from ..helpers.utils import sleep_exponential
 from ..helpers.widgets import rect_center_from_widget
 from ..helpers.runtime_utils import dispatch
 import logging
@@ -17,18 +19,20 @@ def customize_character_appearance(design_buttons: dict, plan_id: str = "CHARACT
     body_parts = ["HEAD", "JAW", "TORSO", "ARMS", "HANDS", "LEGS", "FEET"]
     for part in body_parts:
         # Randomly click LEFT or RIGHT 1-10 times for each body part
-        num_clicks = random.randint(1, 10)
-        direction = random.choice(["LEFT", "RIGHT"])
+        if part == 'HEAD':
+            num_clicks = random.randint(1, 20)
+        else:
+            num_clicks = random.randint(1, 10)
+        direction = "LEFT"
         button_name = f"{part}_{direction}"
         
         if button_name in design_buttons:
             widget = design_buttons[button_name]
-            logging.info(f"[{plan_id}] Clicking {button_name} {num_clicks} times")
+            # logging.info(f"[{plan_id}] Clicking {button_name} {num_clicks} times")
             
             for click_num in range(num_clicks):
                 if click_character_design_button(widget, button_name, plan_id):
-                    logging.info(f"[{plan_id}] Click {click_num + 1}/{num_clicks} on {part} {direction}")
-                    time.sleep(0.2)  # Wait between clicks
+                    sleep_exponential(0.1, 0.3, 1.5)  # Wait between clicks
                 else:
                     logging.info(f"[{plan_id}] Failed to click {part} {direction}")
                     break
@@ -45,12 +49,12 @@ def customize_character_appearance(design_buttons: dict, plan_id: str = "CHARACT
         
         if button_name in design_buttons:
             widget = design_buttons[button_name]
-            logging.info(f"[{plan_id}] Clicking {button_name} {num_clicks} times")
+            # logging.info(f"[{plan_id}] Clicking {button_name} {num_clicks} times")
             
             for click_num in range(num_clicks):
                 if click_character_design_button(widget, button_name, plan_id):
-                    logging.info(f"[{plan_id}] Click {click_num + 1}/{num_clicks} on {part} color {direction}")
-                    time.sleep(0.2)  # Wait between clicks
+                    # logging.info(f"[{plan_id}] Click {click_num + 1}/{num_clicks} on {part} color {direction}")
+                    sleep_exponential(0.1, 0.3, 1.5)  # Wait between clicks
                 else:
                     logging.info(f"[{plan_id}] Failed to click {part} color {direction}")
                     break
@@ -65,7 +69,7 @@ def customize_character_appearance(design_buttons: dict, plan_id: str = "CHARACT
         logging.info(f"[{plan_id}] Clicking CONFIRM button...")
         if click_character_design_button(confirm_widget, "CONFIRM", plan_id):
             logging.info(f"[{plan_id}] Successfully clicked CONFIRM button")
-            time.sleep(1.0)  # Wait for the interface to close
+            sleep_exponential(0.8, 1.5, 1.0)  # Wait for the interface to close
         else:
             logging.info(f"[{plan_id}] Failed to click CONFIRM button")
     else:
@@ -95,8 +99,7 @@ def click_character_design_button(widget: dict, button_name: str, plan_id: str =
     if result is None:
         logging.info(f"[{plan_id}] Failed to click {button_name}")
         return False
-    
-    logging.info(f"[{plan_id}] Successfully clicked {button_name}")
+
     return True
 
 

@@ -51,7 +51,8 @@ def check_door_traversal(door_x: int, door_y: int, door_p: int, max_time: float 
                 print(f"  {tile_name} ({coords[0]}, {coords[1]}): No wall object")
         
         # Check every 100ms
-        time.sleep(0.1)
+        from .utils import sleep_exponential
+        sleep_exponential(0.05, 0.15, 1.5)
     
     return {
         "completed": True,

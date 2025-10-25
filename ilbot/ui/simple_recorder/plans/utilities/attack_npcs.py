@@ -33,6 +33,11 @@ from typing import List, Optional
 
 # Add the parent directory to the path for imports
 import sys
+
+from ...helpers.camera import setup_camera_optimal
+from ...helpers.phase_utils import set_phase_with_camera
+from ...helpers.utils import sleep_exponential
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from ..base import Plan
@@ -84,7 +89,6 @@ class AttackNpcsPlan(Plan):
         
         # Set up camera immediately during initialization
         try:
-            from ...helpers.camera import setup_camera_optimal
             setup_camera_optimal()
         except Exception as e:
             logging.warning(f"[{self.id}] Could not setup camera: {e}")
@@ -101,7 +105,6 @@ class AttackNpcsPlan(Plan):
     
     def set_phase(self, phase: str, camera_setup: bool = True):
         """Set the current phase."""
-        from ...helpers.phase_utils import set_phase_with_camera
         return set_phase_with_camera(self, phase, camera_setup)
     
     def loop(self, ui) -> int:
@@ -199,7 +202,7 @@ class AttackNpcsPlan(Plan):
             return self.ATTACKING
         
         # Small delay to prevent excessive CPU usage
-        time.sleep(1)
+        sleep_exponential(0.8, 1.5, 1.0)
         return self.ATTACKING
     
     

@@ -21,6 +21,9 @@ from pathlib import Path
 import psutil
 from typing import Dict, List, Any, Optional, TypedDict
 
+from ilbot.ui.simple_recorder.helpers.ipc import IPCClient
+from ilbot.ui.simple_recorder.stats_monitor import StatsMonitor
+
 # Add the parent directory to the path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -161,6 +164,10 @@ class PlanEditor:
             self.create_ge_parameters_tab(parent)
         elif plan_name == 'ge_trade':
             self.create_ge_trade_parameters_tab(parent)
+        elif plan_name == 'wait_plan':
+            self.create_wait_parameters_tab(parent)
+        elif plan_name == 'tutorial_island':
+            self.create_tutorial_island_parameters_tab(parent)
         else:
             self.create_generic_parameters_tab(parent)
             
@@ -240,6 +247,44 @@ class PlanEditor:
         
         # Help text
         help_text = "Worker: Initiates trades and offers coins. Mule: Accepts trades and waits for coins."
+        ttk.Label(parent, text=help_text, style='Info.TLabel').grid(row=1, column=0, columnspan=2, pady=5)
+            
+    def create_wait_parameters_tab(self, parent):
+        """Create wait-specific parameters tab."""
+        # Wait Time
+        ttk.Label(parent, text="Wait Time (minutes):", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W, pady=5)
+        
+        # Get existing wait_minutes or default to 1.0
+        existing_wait = self.plan_entry['params'].get('generic', {}).get('wait_minutes', 1.0)
+        self.wait_minutes_var = tk.StringVar(value=str(existing_wait))
+        
+        wait_frame = ttk.Frame(parent)
+        wait_frame.grid(row=0, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        wait_spinbox = ttk.Spinbox(wait_frame, from_=0.1, to=1440.0, increment=0.1, 
+                                  textvariable=self.wait_minutes_var, width=10)
+        wait_spinbox.pack(side=tk.LEFT)
+        
+        ttk.Label(wait_frame, text="minutes").pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Help text
+        help_text = "How many minutes to wait before completing the plan (0.1 to 1440 minutes = 24 hours max)"
+        ttk.Label(parent, text=help_text, style='Info.TLabel').grid(row=1, column=0, columnspan=2, pady=5)
+    
+    def create_tutorial_island_parameters_tab(self, parent):
+        """Create tutorial island-specific parameters tab."""
+        # Credentials File
+        ttk.Label(parent, text="Credentials File:", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W, pady=5)
+        
+        # Get existing credentials_file or default to empty
+        existing_cred = self.plan_entry['params'].get('generic', {}).get('credentials_file', '')
+        self.credentials_file_var = tk.StringVar(value=str(existing_cred))
+        
+        cred_entry = ttk.Entry(parent, textvariable=self.credentials_file_var, width=30)
+        cred_entry.grid(row=0, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Help text
+        help_text = "Enter the filename (without .properties) to rename credentials file to match character name"
         ttk.Label(parent, text=help_text, style='Info.TLabel').grid(row=1, column=0, columnspan=2, pady=5)
             
     def create_generic_parameters_tab(self, parent):
@@ -606,6 +651,29 @@ class PlanEditor:
                     params = {'role': role.get()}
                 else:
                     params = {'role': 'worker'}  # Default
+            elif self.plan_entry['name'] == 'wait_plan':
+                # Collect wait_minutes parameter for wait plan
+                wait_minutes = getattr(self, 'wait_minutes_var', None)
+                if wait_minutes:
+                    try:
+                        wait_value = float(wait_minutes.get())
+                        if wait_value < 0.1:
+                            wait_value = 0.1
+                        elif wait_value > 1440.0:
+                            wait_value = 1440.0
+                        params = {'generic': {'wait_minutes': wait_value}}
+                    except ValueError:
+                        params = {'generic': {'wait_minutes': 1.0}}  # Default
+                else:
+                    params = {'generic': {'wait_minutes': 1.0}}  # Default
+            elif self.plan_entry['name'] == 'tutorial_island':
+                # Collect credentials_file parameter for tutorial island
+                credentials_file = getattr(self, 'credentials_file_var', None)
+                if credentials_file:
+                    cred_value = credentials_file.get().strip()
+                    params = {'generic': {'credentials_file': cred_value}}
+                else:
+                    params = {'generic': {'credentials_file': ''}}  # Default
             else:
                 # Collect generic parameters
                 generic = {}
@@ -678,8 +746,14 @@ class SimpleRecorderGUI:
             'task completed', 'mission accomplished', 'objective complete'
         ]
         
+        # Initialize skill icons dict
+        self.skill_icons = {}
+        
         # Create GUI
         self.create_widgets()
+        
+        # Load skill icons once at startup
+        self._load_skill_icons()
         
         # Center window
     
@@ -720,6 +794,8 @@ class SimpleRecorderGUI:
         self.notebook = ttk.Notebook(main_frame)
         self.notebook.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
         main_frame.rowconfigure(1, weight=1)
+        # Focus the corresponding RuneLite window when switching instance tabs
+        self.notebook.bind("<<NotebookTabChanged>>", self.on_instance_tab_changed)
         
         # RuneLite Launcher tab
         runelite_tab = ttk.Frame(self.notebook, padding="10")
@@ -978,6 +1054,657 @@ class SimpleRecorderGUI:
         log_text.config(state=tk.DISABLED)
         log_text.see(tk.END)
     
+    def update_instance_phase(self, instance_name, phase):
+        """Update the current phase display for an instance."""
+        if instance_name not in self.instance_tabs:
+            return
+        
+        instance_tab = self.instance_tabs[instance_name]
+        if hasattr(instance_tab, 'current_phase_label'):
+            instance_tab.current_phase_label.config(text=phase)
+            instance_tab.current_phase = phase
+    
+    
+    
+    
+    
+    
+    
+    
+    def load_character_stats(self, username):
+        """Load character stats from CSV file and return the data."""
+        try:
+            # Use absolute path matching stats_monitor
+            csv_path = Path(__file__).parent / "character_data" / "character_stats.csv"
+            if not csv_path.exists():
+                return None
+            
+            import csv
+            with open(csv_path, 'r', newline='', encoding='utf-8') as file:
+                reader = csv.DictReader(file)
+                
+                # Find the most recent entry for this username
+                latest_entry = None
+                for row in reader:
+                    if row.get('username') == username:
+                        latest_entry = row
+                
+                return latest_entry
+                    
+        except Exception as e:
+            logging.error(f"Error loading character stats: {e}")
+            return None
+    
+    def _load_skill_icons(self):
+        """Load skill icon images from files."""
+        if not hasattr(self, 'skill_icons'):
+            self.skill_icons = {}
+        
+        try:
+            from PIL import Image, ImageTk
+            
+            # Skill name to icon filename mapping (using actual filenames from skill_icons folder)
+            skill_icon_map = {
+                'attack': 'attack.png',
+                'strength': 'strength.png',
+                'defence': 'defence.png',
+                'hitpoints': 'hitpoints.png',
+                'ranged': 'ranged.png',
+                'prayer': 'prayer.png',
+                'magic': 'magic.png',
+                'cooking': 'cooking.png',
+                'woodcutting': 'woodcutting.png',
+                'fletching': 'fletching.png',
+                'fishing': 'fishing.png',
+                'firemaking': 'firemaking.png',
+                'crafting': 'crafting.png',
+                'smithing': 'smithing.png',
+                'mining': 'mining.png',
+                'herblore': 'herblore.png',
+                'agility': 'agility.png',
+                'thieving': 'thieving.png',
+                'slayer': 'slayer.png',
+                'farming': 'farming.png',
+                'runecraft': 'runecrafting.png',  # Note: filename is "runecrafting" not "runecraft"
+                'hunter': 'hunter.png',
+                'construction': 'construction.png'
+            }
+            
+            # Use absolute path relative to gui.py location
+            icons_dir = Path(__file__).parent / "skill_icons"
+            logging.info(f"[GUI] Loading skill icons from: {icons_dir}")
+            if icons_dir.exists():
+                for skill_name, icon_file in skill_icon_map.items():
+                    icon_path = icons_dir / icon_file
+                    if icon_path.exists():
+                        try:
+                            # Load and resize icon (assuming icons are ~20-30px, resize to 20x20)
+                            img = Image.open(icon_path)
+                            img = img.resize((20, 20), Image.Resampling.LANCZOS)
+                            # Store as PhotoImage - keep reference in instance to prevent garbage collection
+                            photo = ImageTk.PhotoImage(img)
+                            self.skill_icons[skill_name] = photo
+                            logging.debug(f"[GUI] Loaded icon: {icon_file}")
+                        except Exception as e:
+                            logging.warning(f"Could not load icon {icon_file}: {e}")
+                            self.skill_icons[skill_name] = None
+                    else:
+                        logging.warning(f"Icon file not found: {icon_path}")
+                        self.skill_icons[skill_name] = None
+            else:
+                logging.warning(f"Skill icons directory does not exist: {icons_dir}")
+        except ImportError as e:
+            logging.error(f"PIL/Pillow not available, skill icons will not be displayed. Error: {e}")
+            logging.error("Please install Pillow: pip install Pillow")
+            self.skill_icons = {}
+        except Exception as e:
+            logging.error(f"Error loading skill icons: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
+            self.skill_icons = {}
+        
+        # Log summary of loaded icons
+        loaded_count = sum(1 for icon in self.skill_icons.values() if icon is not None)
+        logging.info(f"[GUI] Loaded {loaded_count}/{len(skill_icon_map)} skill icons")
+    
+    def estimate_item_value(self, item_key, quantity):
+        """Estimate the value of an item (simplified pricing)."""
+        # Basic pricing estimates (you can expand this)
+        prices = {
+            'coins': 1,
+            'cowhides': 100,
+            'logs': 25,
+            'leather': 200,
+            'bow_string': 50,
+            'iron_bar': 150,
+            'steel_bar': 300,
+            'coal': 30,
+            'iron_ore': 50,
+            'raw_fish': 20,
+            'cooked_fish': 40,
+            'bronze_bar': 100,
+            'silver_bar': 250,
+            'gold_bar': 500,
+            'mithril_bar': 600,
+            'adamant_bar': 1200,
+            'rune_bar': 3000,
+            'bronze_ore': 25,
+            'silver_ore': 100,
+            'gold_ore': 200,
+            'mithril_ore': 300,
+            'adamant_ore': 600,
+            'rune_ore': 1500,
+            'willow_logs': 50,
+            'oak_logs': 100,
+            'maple_logs': 200,
+            'yew_logs': 500,
+            'magic_logs': 1000,
+            'redwood_logs': 2000
+        }
+        
+        price_per_item = prices.get(item_key, 0)
+        return price_per_item * quantity
+    
+    def update_stats_text(self, username):
+        """Update the stats display for an instance with icons."""
+        try:
+            instance_tab = self.instance_tabs.get(username)
+            if not instance_tab or not hasattr(instance_tab, 'skills_scrollable_frame'):
+                return
+            
+            # Load current stats
+            stats_data = self.load_character_stats(username)
+            
+            # Update logged-in time label
+            if hasattr(instance_tab, 'logged_in_time_label'):
+                logged_in_time = stats_data.get('logged_in_time', 0) if stats_data else 0
+                try:
+                    logged_in_seconds = float(logged_in_time)
+                    hours = int(logged_in_seconds // 3600)
+                    minutes = int((logged_in_seconds % 3600) // 60)
+                    seconds = int(logged_in_seconds % 60)
+                    time_str = f"{hours}:{minutes:02d}:{seconds:02d}"
+                except (ValueError, TypeError):
+                    time_str = "0:00:00"
+                instance_tab.logged_in_time_label.config(text=time_str)
+            
+            if not stats_data:
+                # Clear all sections and show no data message
+                for widget in instance_tab.skills_scrollable_frame.winfo_children():
+                    widget.destroy()
+                for widget in instance_tab.inventory_scrollable_frame.winfo_children():
+                    widget.destroy()
+                for widget in instance_tab.equipment_scrollable_frame.winfo_children():
+                    widget.destroy()
+                
+                no_data_label = ttk.Label(instance_tab.skills_scrollable_frame, text="No stats data available")
+                no_data_label.grid(row=0, column=0, padx=5, pady=5)
+                return
+            
+            # Clear existing widgets in all three sections
+            for widget in instance_tab.skills_scrollable_frame.winfo_children():
+                widget.destroy()
+            for widget in instance_tab.inventory_scrollable_frame.winfo_children():
+                widget.destroy()
+            for widget in instance_tab.equipment_scrollable_frame.winfo_children():
+                widget.destroy()
+            
+            # ========== SKILLS SECTION ==========
+            skills_header = ttk.Label(instance_tab.skills_scrollable_frame, text="SKILLS", font=("Arial", 10, "bold"))
+            skills_header.grid(row=0, column=0, columnspan=3, sticky=tk.W, padx=5, pady=(5, 2))
+            
+            # Configure grid columns (3 columns)
+            for col in range(3):
+                instance_tab.skills_scrollable_frame.columnconfigure(col, weight=1, minsize=80)
+            
+            # Skills in exact game order (3 columns, top to bottom in each column)
+            # Column 1: attack, strength, defence, ranged, prayer, magic, runecraft, construction
+            # Column 2: hitpoints, agility, herblore, thieving, crafting, fletching, slayer, hunter
+            # Column 3: mining, smithing, fishing, cooking, firemaking, woodcutting, farming
+            skills_columns = [
+                # Column 1 (8 skills)
+                [
+                    ("attack", "Attack", stats_data.get('attack_level', 1), stats_data.get('attack_xp', 0)),
+                    ("strength", "Strength", stats_data.get('strength_level', 1), stats_data.get('strength_xp', 0)),
+                    ("defence", "Defence", stats_data.get('defence_level', 1), stats_data.get('defence_xp', 0)),
+                    ("ranged", "Ranged", stats_data.get('ranged_level', 1), stats_data.get('ranged_xp', 0)),
+                    ("prayer", "Prayer", stats_data.get('prayer_level', 1), stats_data.get('prayer_xp', 0)),
+                    ("magic", "Magic", stats_data.get('magic_level', 1), stats_data.get('magic_xp', 0)),
+                    ("runecraft", "Runecraft", stats_data.get('runecraft_level', 1), stats_data.get('runecraft_xp', 0)),
+                    ("construction", "Construction", stats_data.get('construction_level', 1), stats_data.get('construction_xp', 0))
+                ],
+                # Column 2 (8 skills)
+                [
+                    ("hitpoints", "Hitpoints", stats_data.get('hitpoints_level', 10), stats_data.get('hitpoints_xp', 1154)),
+                    ("agility", "Agility", stats_data.get('agility_level', 1), stats_data.get('agility_xp', 0)),
+                    ("herblore", "Herblore", stats_data.get('herblore_level', 1), stats_data.get('herblore_xp', 0)),
+                    ("thieving", "Thieving", stats_data.get('thieving_level', 1), stats_data.get('thieving_xp', 0)),
+                    ("crafting", "Crafting", stats_data.get('crafting_level', 1), stats_data.get('crafting_xp', 0)),
+                    ("fletching", "Fletching", stats_data.get('fletching_level', 1), stats_data.get('fletching_xp', 0)),
+                    ("slayer", "Slayer", stats_data.get('slayer_level', 1), stats_data.get('slayer_xp', 0)),
+                    ("hunter", "Hunter", stats_data.get('hunter_level', 1), stats_data.get('hunter_xp', 0))
+                ],
+                # Column 3 (7 skills + total level)
+                [
+                    ("mining", "Mining", stats_data.get('mining_level', 1), stats_data.get('mining_xp', 0)),
+                    ("smithing", "Smithing", stats_data.get('smithing_level', 1), stats_data.get('smithing_xp', 0)),
+                    ("fishing", "Fishing", stats_data.get('fishing_level', 1), stats_data.get('fishing_xp', 0)),
+                    ("cooking", "Cooking", stats_data.get('cooking_level', 1), stats_data.get('cooking_xp', 0)),
+                    ("firemaking", "Firemaking", stats_data.get('firemaking_level', 1), stats_data.get('firemaking_xp', 0)),
+                    ("woodcutting", "Woodcutting", stats_data.get('woodcutting_level', 1), stats_data.get('woodcutting_xp', 0)),
+                    ("farming", "Farming", stats_data.get('farming_level', 1), stats_data.get('farming_xp', 0))
+                ]
+            ]
+            
+            # Display skills column by column
+            for col_idx, column_skills in enumerate(skills_columns):
+                for row_idx, (skill_key, skill_name, level, xp) in enumerate(column_skills):
+                    # Convert to int if they're strings
+                    try:
+                        level_int = int(level) if level else 0
+                        xp_int = int(xp) if xp else 0
+                    except (ValueError, TypeError):
+                        level_int = 0
+                        xp_int = 0
+                    
+                    # Create skill row frame (no border, no background box)
+                    skill_frame = tk.Frame(instance_tab.skills_scrollable_frame, bg="#f0f0f0")
+                    skill_frame.grid(row=row_idx + 1, column=col_idx, sticky=(tk.W, tk.E), padx=2, pady=1)
+                    
+                    # Icon on the left
+                    skill_icon = self.skill_icons.get(skill_key)
+                    if skill_icon and skill_icon is not None:
+                        icon_label = tk.Label(skill_frame, image=skill_icon, bg="#f0f0f0")
+                        icon_label.image = skill_icon  # Keep reference
+                    else:
+                        icon_label = tk.Label(skill_frame, text=skill_name[0].upper(), font=("Arial", 10, "bold"), 
+                                             width=2, bg="#f0f0f0", fg="#333333")
+                    icon_label.pack(side=tk.LEFT, padx=(0, 0))
+                    
+                    # Stats numbers on the right - right-aligned
+                    stats_text = f"{level_int} / {level_int}"
+                    stats_label = tk.Label(skill_frame, text=stats_text, font=("Arial", 8), bg="#f0f0f0", 
+                                          fg="#000000", anchor=tk.E, width=6)
+                    stats_label.pack(side=tk.LEFT)
+                
+                # Add total level at bottom of column 3
+                if col_idx == 2:
+                    # Calculate total level
+                    total_level = sum(
+                        int(stats_data.get(f'{skill[0]}_level', 0) or 0)
+                        for column in skills_columns
+                        for skill in column
+                        if skill[0] != 'total'  # Skip any 'total' entries
+                    )
+                    
+                    total_frame = tk.Frame(instance_tab.skills_scrollable_frame, bg="#f0f0f0")
+                    total_frame.grid(row=8, column=2, sticky=(tk.W, tk.E), padx=2, pady=1)
+                    
+                    total_label = tk.Label(total_frame, text=f"Total level:\n{total_level}", 
+                                          font=("Arial", 9, "bold"), bg="#f0f0f0", fg="#000000", anchor=tk.E)
+                    total_label.pack()
+            
+            # Update skills canvas scroll region
+            instance_tab.skills_scrollable_frame.update_idletasks()
+            instance_tab.skills_canvas.configure(scrollregion=instance_tab.skills_canvas.bbox("all"))
+            
+            # ========== INVENTORY SECTION ==========
+            inventory_header = ttk.Label(instance_tab.inventory_scrollable_frame, text="INVENTORY", font=("Arial", 10, "bold"))
+            inventory_header.grid(row=0, column=0, sticky=tk.W, padx=5, pady=(5, 2))
+            row = 1
+            
+            # Inventory items - show ALL items currently in inventory (anything starting with 'inventory_')
+            for key in sorted(stats_data.keys()):
+                if key.startswith('inventory_'):
+                    try:
+                        qty = int(stats_data.get(key, 0) or 0)
+                    except (ValueError, TypeError):
+                        qty = 0
+                    if qty > 0:
+                        # Extract item name from key (inventory_itemname -> "Itemname")
+                        item_name = key.replace('inventory_', '').replace('_', ' ').title()
+                        item_label = ttk.Label(instance_tab.inventory_scrollable_frame, text=f"{item_name}: {qty:,}", font=("Arial", 8))
+                        item_label.grid(row=row, column=0, sticky=tk.W, padx=5, pady=1)
+                        row += 1
+            
+            # Update inventory canvas scroll region
+            instance_tab.inventory_scrollable_frame.update_idletasks()
+            instance_tab.inventory_canvas.configure(scrollregion=instance_tab.inventory_canvas.bbox("all"))
+            
+            # ========== EQUIPMENT SECTION ==========
+            equipped_header = ttk.Label(instance_tab.equipment_scrollable_frame, text="EQUIPPED", font=("Arial", 10, "bold"))
+            equipped_header.grid(row=0, column=0, sticky=tk.W, padx=5, pady=(5, 2))
+            row = 1
+            
+            equipped_items = [
+                ("Helmet", stats_data.get('equipped_helmet', '')),
+                ("Cape", stats_data.get('equipped_cape', '')),
+                ("Amulet", stats_data.get('equipped_amulet', '')),
+                ("Weapon", stats_data.get('equipped_weapon', '')),
+                ("Body", stats_data.get('equipped_body', '')),
+                ("Shield", stats_data.get('equipped_shield', '')),
+                ("Legs", stats_data.get('equipped_legs', '')),
+                ("Gloves", stats_data.get('equipped_gloves', '')),
+                ("Boots", stats_data.get('equipped_boots', '')),
+                ("Ring", stats_data.get('equipped_ring', ''))
+            ]
+            
+            for slot_name, item in equipped_items:
+                if item:
+                    eq_label = ttk.Label(instance_tab.equipment_scrollable_frame, text=f"{slot_name}: {item}", font=("Arial", 8))
+                    eq_label.grid(row=row, column=0, sticky=tk.W, padx=5, pady=1)
+                    row += 1
+            
+            # Update equipment canvas scroll region
+            instance_tab.equipment_scrollable_frame.update_idletasks()
+            instance_tab.equipment_canvas.configure(scrollregion=instance_tab.equipment_canvas.bbox("all"))
+            
+            # ========== KEY ITEMS TOTALS (when bank is open) ==========
+            # Check if key_items_frame exists
+            if not hasattr(instance_tab, 'key_items_frame'):
+                logging.warning(f"key_items_frame not found for {username}")
+            else:
+                # Clear existing key items display
+                for widget in instance_tab.key_items_frame.winfo_children():
+                    widget.destroy()
+                
+                # Check if bank is open by checking IPC
+                bank_is_open = False
+                try:
+                    port = self.instance_ports.get(username)
+                    if port:
+                        ipc = IPCClient(host="127.0.0.1", port=port, timeout_s=0.5)
+                        bank_data = ipc.get_bank()
+                        bank_is_open = bank_data and bank_data.get("ok", False)
+                        if bank_is_open:
+                            logging.info(f"[GUI] Bank is open for {username} - showing key items totals")
+                        else:
+                            logging.debug(f"[GUI] Bank is not open for {username}")
+                except Exception as e:
+                    # If we can't check, don't show totals
+                    logging.warning(f"[GUI] Could not check bank status for {username}: {e}")
+                    import traceback
+                    logging.debug(traceback.format_exc())
+                    bank_is_open = False
+                
+                if bank_is_open:
+                    # Key items to show totals for (bank + inventory)
+                    key_items_list = [
+                        ('coins', 'Coins'),
+                        ('cowhides', 'Cowhides'),
+                        ('logs', 'Logs'),
+                        ('leather', 'Leather'),
+                        ('bow_string', 'Bow String'),
+                        ('iron_bar', 'Iron Bar'),
+                        ('steel_bar', 'Steel Bar'),
+                        ('coal', 'Coal'),
+                        ('iron_ore', 'Iron Ore'),
+                        ('raw_fish', 'Raw Fish'),
+                        ('cooked_fish', 'Cooked Fish')
+                    ]
+                    
+                    # Header
+                    key_items_header = ttk.Label(instance_tab.key_items_frame, text="Key Items (Bank + Inventory):", 
+                                               font=("Arial", 9, "bold"))
+                    key_items_header.grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 5))
+                    
+                    row = 1
+                    items_shown = 0
+                    for item_key, item_name in key_items_list:
+                        try:
+                            bank_count = int(stats_data.get(f'{item_key}_bank', 0) or 0)
+                            inv_count = int(stats_data.get(f'{item_key}_inventory', 0) or 0)
+                            total = bank_count + inv_count
+                        except (ValueError, TypeError):
+                            bank_count = 0
+                            inv_count = 0
+                            total = 0
+                        
+                        if total > 0:
+                            item_label = ttk.Label(instance_tab.key_items_frame, 
+                                                 text=f"{item_name}: {total:,}", 
+                                                 font=("Arial", 8))
+                            item_label.grid(row=row, column=0, sticky=tk.W, padx=(0, 10), pady=1)
+                            row += 1
+                            items_shown += 1
+                            logging.debug(f"[GUI] Showing {item_name}: bank={bank_count}, inventory={inv_count}, total={total}")
+                    
+                    if items_shown == 0:
+                        # Show a message if no items found
+                        no_items_label = ttk.Label(instance_tab.key_items_frame, 
+                                                  text="No key items found", 
+                                                  font=("Arial", 8), 
+                                                  foreground="gray")
+                        no_items_label.grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=1)
+                        logging.debug(f"[GUI] Bank is open but no key items found for {username}")
+                else:
+                    # Show a message when bank is not open
+                    no_bank_label = ttk.Label(instance_tab.key_items_frame, 
+                                              text="Open bank to see totals", 
+                                              font=("Arial", 8), 
+                                              foreground="gray")
+                    no_bank_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=1)
+            
+        except Exception as e:
+            logging.error(f"Error updating stats text for {username}: {e}")
+    
+    def start_stats_monitor(self, username, port):
+        """Start the stats monitor for an instance."""
+        logging.info(f"[GUI] Starting stats monitor for {username} on port {port}")
+        try:
+            # Check if monitor already exists
+            if hasattr(self, 'stats_monitors') and username in self.stats_monitors:
+                existing_monitor = self.stats_monitors[username]
+                # Check if it's still running
+                if existing_monitor.running:
+                    logging.debug(f"[GUI] Stats monitor already running for {username}, skipping")
+                    return
+                else:
+                    # Monitor exists but isn't running, remove it
+                    logging.debug(f"[GUI] Removing non-running monitor for {username}")
+                    del self.stats_monitors[username]
+            
+            # Create callback to update GUI when CSV is updated
+            def on_csv_update(updated_username):
+                """Callback to update GUI stats display when CSV is updated."""
+                # Schedule GUI update on main thread
+                self.root.after(0, lambda: self.update_stats_text(updated_username))
+            
+            # Create callback for username changes
+            def on_username_changed(old_username, new_username):
+                """Callback when username changes (e.g., unnamed_character -> actual name)."""
+                # Schedule on main thread
+                self.root.after(0, lambda: self._handle_username_change(old_username, new_username))
+            
+            monitor = StatsMonitor(port, username, on_csv_update=on_csv_update, 
+                                 on_username_changed=on_username_changed)
+            logging.info(f"[GUI] Created StatsMonitor for {username}, starting...")
+            monitor.start()
+            logging.info(f"[GUI] StatsMonitor.start() called for {username}")
+            
+            # Store monitor reference
+            if not hasattr(self, 'stats_monitors'):
+                self.stats_monitors = {}
+            self.stats_monitors[username] = monitor
+            
+            logging.info(f"[GUI] Started stats monitor for {username} on port {port}")
+            
+        except Exception as e:
+            logging.error(f"[GUI] Error starting stats monitor for {username}: {e}")
+    
+    def _write_rule_params_to_file(self, username):
+        """Write rule parameters to JSON file for StatsMonitor to read."""
+        try:
+            instance_tab = self.instance_tabs.get(username)
+            if not instance_tab:
+                return
+            
+            # Collect all rules from all plan entries
+            all_rules = {}
+            for plan_entry in instance_tab.plan_entries:
+                rules = plan_entry.get('rules', {})
+                for key, value in rules.items():
+                    if value:  # Only include non-empty values
+                        all_rules[key] = value
+            
+            # Add start_time if not present
+            if 'start_time' not in all_rules:
+                from datetime import datetime
+                all_rules['start_time'] = datetime.now().isoformat()
+            
+            # Write to JSON file
+            rule_params_file = Path(__file__).parent / "character_data" / f"rule_params_{username}.json"
+            rule_params_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            import json
+            with open(rule_params_file, 'w', encoding='utf-8') as f:
+                json.dump(all_rules, f, indent=2)
+            
+            logging.info(f"[GUI] Wrote rule parameters to {rule_params_file}: {all_rules}")
+            
+        except Exception as e:
+            logging.error(f"[GUI] Error writing rule parameters for {username}: {e}")
+    
+    def stop_stats_monitor(self, username):
+        """Stop the stats monitor for an instance."""
+        if hasattr(self, 'stats_monitors') and username in self.stats_monitors:
+            self.stats_monitors[username].stop()
+            del self.stats_monitors[username]
+            logging.info(f"[GUI] Stopped stats monitor for {username}")
+    
+    def _handle_username_change(self, old_username, new_username):
+        """Handle username change (e.g., unnamed_character -> actual name)."""
+        try:
+            logging.info(f"[GUI] Handling username change: {old_username} -> {new_username}")
+            
+            # Update instance_tabs dictionary key
+            if old_username in self.instance_tabs:
+                # Store the tab reference
+                instance_tab = self.instance_tabs[old_username]
+                
+                # Remove old key
+                del self.instance_tabs[old_username]
+                
+                # Add with new key
+                self.instance_tabs[new_username] = instance_tab
+                
+                # Update instance_ports
+                if old_username in self.instance_ports:
+                    port = self.instance_ports[old_username]
+                    del self.instance_ports[old_username]
+                    self.instance_ports[new_username] = port
+                
+                # Update stats_monitors
+                if hasattr(self, 'stats_monitors') and old_username in self.stats_monitors:
+                    monitor = self.stats_monitors[old_username]
+                    del self.stats_monitors[old_username]
+                    self.stats_monitors[new_username] = monitor
+                
+                # Update notebook tab text
+                self.notebook.forget(instance_tab)
+                self.notebook.add(instance_tab, text=new_username)
+                
+                logging.info(f"[GUI] Updated instance tab from {old_username} to {new_username}")
+            
+            # Update selected_credentials list if it contains the old credential
+            old_cred_name = f"{old_username}.properties"
+            new_cred_name = f"{new_username}.properties"
+            if old_cred_name in self.selected_credentials:
+                index = self.selected_credentials.index(old_cred_name)
+                self.selected_credentials[index] = new_cred_name
+                self.update_selected_credentials_display()
+                logging.info(f"[GUI] Updated selected credentials: {old_cred_name} -> {new_cred_name}")
+                
+        except Exception as e:
+            logging.error(f"[GUI] Error handling username change: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
+    
+    def refresh_stats_for_instance(self, instance_name):
+        """Refresh stats display for a specific instance."""
+        if instance_name in self.instance_tabs:
+            self.update_stats_text(instance_name)
+
+    def on_instance_tab_changed(self, event):
+        """When switching tabs, focus that instance's RuneLite window."""
+        try:
+            selected_tab_id = event.widget.select()
+            selected_frame = event.widget.nametowidget(selected_tab_id)
+            # Find which username maps to this frame
+            for username, tab_frame in self.instance_tabs.items():
+                if tab_frame is selected_frame:
+                    self.focus_runelite_window(username)
+                    break
+        except Exception:
+            pass
+
+    def focus_runelite_window(self, username: str) -> None:
+        """Attempt to focus the RuneLite window for this username using port matching."""
+        try:
+            import win32gui
+            import win32con
+            import psutil
+        except Exception:
+            return
+
+        # Get the port for this instance
+        port = self.instance_ports.get(username)
+        if not port:
+            return
+
+        # Collect all top-level window info
+        window_info = []
+        
+        def enum_handler(hwnd, _):
+            if win32gui.IsWindowVisible(hwnd):
+                title = win32gui.GetWindowText(hwnd)
+                if title and "runelite" in title.lower():
+                    try:
+                        # Get process ID from window
+                        _, pid = win32gui.GetWindowThreadProcessId(hwnd)
+                        window_info.append((hwnd, title, pid))
+                    except Exception:
+                        pass
+        
+        try:
+            win32gui.EnumWindows(enum_handler, None)
+        except Exception:
+            return
+
+        if not window_info:
+            return
+
+        # Try to find the window by matching the process port
+        target_hwnd = None
+        for hwnd, title, pid in window_info:
+            try:
+                # Check if this process is listening on our target port
+                process = psutil.Process(pid)
+                connections = process.connections()
+                for conn in connections:
+                    # Check if this process is listening on the target port
+                    if conn.laddr.port == port:
+                        target_hwnd = hwnd
+                        break
+                if target_hwnd:
+                    break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+
+        if target_hwnd is None:
+            return
+
+        try:
+            if win32gui.IsIconic(target_hwnd):
+                win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
+            else:
+                win32gui.ShowWindow(target_hwnd, win32con.SW_SHOW)
+            win32gui.SetForegroundWindow(target_hwnd)
+        except Exception:
+            # Best-effort; ignore focus errors
+            pass
+    
+    
     def populate_credentials(self):
         """Populate the credentials listbox with available credential files."""
         credentials_dir = Path("D:/repos/bot_runelite_IL/credentials")
@@ -1074,7 +1801,7 @@ class SimpleRecorderGUI:
         self.log_message(f"Instance tab created and stored: {username}", 'info')
         
         # Create Plan Runner sub-tab
-        plan_runner_tab = ttk.Frame(sub_notebook, padding="10")
+        plan_runner_tab = ttk.Frame(sub_notebook, padding="0")
         sub_notebook.add(plan_runner_tab, text="Plan Runner")
         plan_runner_tab.columnconfigure(0, weight=1)
         plan_runner_tab.columnconfigure(1, weight=1)
@@ -1098,15 +1825,17 @@ class SimpleRecorderGUI:
         instance_tab.sub_notebook = sub_notebook
         
         # Plan Runner sub-tab content - Redesigned with structured widgets
-        # Top row: Config + Controls + Save/Load
-        top_row = ttk.Frame(plan_runner_tab)
-        top_row.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
-        top_row.columnconfigure(0, weight=1)
-        top_row.columnconfigure(1, weight=1)
+        # Top row: Config + Skills + Inventory + Equipment
+        top_row = ttk.Frame(plan_runner_tab, padding="10")
+        top_row.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N), pady=(0, 10))
+        top_row.columnconfigure(0, weight=0)  # Config - no expansion
+        top_row.columnconfigure(1, weight=1)  # Skills
+        top_row.columnconfigure(2, weight=1)   # Inventory
+        top_row.columnconfigure(3, weight=1)  # Equipment
         
         # Left side: Session config
         config_frame = ttk.Frame(top_row)
-        config_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 10))
+        config_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N), padx=(0, 10))
         
         # Session Directory
         ttk.Label(config_frame, text="Session Dir:", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -1124,44 +1853,155 @@ class SimpleRecorderGUI:
         port_label = ttk.Label(config_frame, text=str(port), style='Info.TLabel')
         port_label.grid(row=1, column=1, sticky=tk.W, pady=2, padx=(5, 0))
         
-        # Right side: Controls + Save/Load
-        controls_frame = ttk.Frame(top_row)
-        controls_frame.grid(row=0, column=1, sticky=(tk.W, tk.E))
+        # Credential file (read-only for instances)
+        ttk.Label(config_frame, text="Credential:", style='Header.TLabel').grid(row=2, column=0, sticky=tk.W, pady=2)
+        # Find the credential file for this instance
+        cred_file_name = None
+        for selected_cred in self.selected_credentials:
+            # Extract username from credential filename (remove .properties)
+            cred_username = selected_cred.replace('.properties', '')
+            if cred_username == username:
+                cred_file_name = selected_cred
+                break
         
-        # Control buttons
-        ttk.Button(controls_frame, text="Start Plans", command=lambda: self.start_plans_for_instance(username, session_dir.get(), port)).grid(row=0, column=0, padx=(0, 3))
-        ttk.Button(controls_frame, text="Stop", command=lambda: self.stop_plans_for_instance(username)).grid(row=0, column=1, padx=3)
+        if cred_file_name:
+            cred_label = ttk.Label(config_frame, text=cred_file_name, style='Info.TLabel')
+            cred_label.grid(row=2, column=1, sticky=tk.W, pady=2, padx=(5, 0))
+        else:
+            cred_label = ttk.Label(config_frame, text="Not found", style='Warning.TLabel')
+            cred_label.grid(row=2, column=1, sticky=tk.W, pady=2, padx=(5, 0))
+        
+        # Current Plan (read-only, updates during execution)
+        ttk.Label(config_frame, text="Current Plan:", style='Header.TLabel').grid(row=3, column=0, sticky=tk.W, pady=2)
+        current_plan_label = ttk.Label(config_frame, text="None", style='Info.TLabel')
+        current_plan_label.grid(row=3, column=1, sticky=tk.W, pady=2, padx=(5, 0))
+        
+        # Current Phase (read-only, updates during execution)
+        ttk.Label(config_frame, text="Current Phase:", style='Header.TLabel').grid(row=4, column=0, sticky=tk.W, pady=2)
+        current_phase_label = ttk.Label(config_frame, text="Idle", style='Info.TLabel')
+        current_phase_label.grid(row=4, column=1, sticky=tk.W, pady=2, padx=(5, 0))
+        
+        # Logged In Time (read-only, updates from CSV)
+        ttk.Label(config_frame, text="Logged In Time:", style='Header.TLabel').grid(row=5, column=0, sticky=tk.W, pady=2)
+        logged_in_time_label = ttk.Label(config_frame, text="0:00:00", style='Info.TLabel')
+        logged_in_time_label.grid(row=5, column=1, sticky=tk.W, pady=2, padx=(5, 0))
+        
+        # Control buttons below Logged In Time
+        control_buttons_frame = ttk.Frame(config_frame)
+        control_buttons_frame.grid(row=6, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0))
+        
+        # Start button with green triangle symbol
+        start_button = tk.Button(control_buttons_frame, text="▶", bg="#4CAF50", fg="white", 
+                                font=("Arial", 10, "bold"), width=2, height=1,
+                                command=lambda: self.start_plans_for_instance(username, session_dir.get(), port))
+        start_button.grid(row=0, column=0, padx=(0, 5))
+        
+        # Stop button with red square symbol
+        stop_button = tk.Button(control_buttons_frame, text="■", bg="#F44336", fg="white",
+                               font=("Arial", 10, "bold"), width=2, height=1,
+                               command=lambda: self.stop_plans_for_instance(username))
+        stop_button.grid(row=0, column=1, padx=(0, 10))
         
         # Pause between plans checkbox
         pause_var = tk.BooleanVar(value=False)
-        pause_checkbox = ttk.Checkbutton(controls_frame, text="Pause between plans", variable=pause_var)
+        pause_checkbox = ttk.Checkbutton(control_buttons_frame, text="Pause between plans", variable=pause_var)
         pause_checkbox.grid(row=0, column=2, padx=(10, 0))
         
         # Store pause variable in instance tab
         instance_tab.pause_var = pause_var
         
-        # Save/Load buttons
-        ttk.Button(controls_frame, text="Save Sequence...", command=lambda: self.save_sequence_for_instance(username)).grid(row=1, column=0, padx=(0, 3), pady=(5, 0))
-        ttk.Button(controls_frame, text="Load Sequence...", command=lambda: self.load_sequence_for_instance(username)).grid(row=1, column=1, padx=3, pady=(5, 0))
+        # Key Items Totals section (shown when bank is open)
+        key_items_frame = ttk.Frame(config_frame)
+        key_items_frame.grid(row=7, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0))
         
-        # Main content: Split into left (plans) and right (details)
+        # Store reference for updating
+        instance_tab.key_items_frame = key_items_frame
+        
+        # Store references for updating during execution
+        instance_tab.current_plan_label = current_plan_label
+        instance_tab.current_phase_label = current_phase_label
+        instance_tab.logged_in_time_label = logged_in_time_label
+        
+        # Helper function to create a scrollable stats section
+        def create_stats_section(parent, col):
+            container = ttk.Frame(parent)
+            container.grid(row=0, column=col, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(5, 5))
+            container.columnconfigure(0, weight=1)
+            container.rowconfigure(0, weight=1)
+            
+            canvas = tk.Canvas(container, bg="#f0f0f0", highlightthickness=0)
+            scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+            scrollable_frame = ttk.Frame(canvas)
+            
+            scrollable_frame.bind(
+                "<Configure>",
+                lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            )
+            
+            def _on_mousewheel(event):
+                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            
+            canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            
+            canvas.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+            scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+            
+            return container, scrollable_frame, canvas
+        
+        # Skills section (column 1)
+        skills_container, skills_scrollable_frame, skills_canvas = create_stats_section(top_row, 1)
+        
+        # Inventory section (column 2)
+        inventory_container, inventory_scrollable_frame, inventory_canvas = create_stats_section(top_row, 2)
+        
+        # Equipment section (column 3)
+        equipment_container, equipment_scrollable_frame, equipment_canvas = create_stats_section(top_row, 3)
+        
+        # Store references for updates
+        instance_tab.skills_container = skills_container
+        instance_tab.skills_scrollable_frame = skills_scrollable_frame
+        instance_tab.skills_canvas = skills_canvas
+        instance_tab.inventory_container = inventory_container
+        instance_tab.inventory_scrollable_frame = inventory_scrollable_frame
+        instance_tab.inventory_canvas = inventory_canvas
+        instance_tab.equipment_container = equipment_container
+        instance_tab.equipment_scrollable_frame = equipment_scrollable_frame
+        instance_tab.equipment_canvas = equipment_canvas
+        
+        # Start stats monitor for this instance
+        self.start_stats_monitor(username, port)
+        
+        # Initial stats update
+        self.update_stats_text(username)
+        
+        # Main content: Left column (plans + details), Right column (stats)
         main_content = ttk.Frame(plan_runner_tab)
         main_content.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(10, 0))
-        main_content.columnconfigure(0, weight=1)
-        main_content.columnconfigure(1, weight=1)
+        main_content.columnconfigure(0, weight=1)  # Left column - expandable
+        main_content.columnconfigure(1, weight=1)  # Right column - expandable
         plan_runner_tab.rowconfigure(1, weight=1)
         
+        # Left column: Plan selection (top) and saved sequences (bottom)
+        left_column = ttk.Frame(main_content)
+        left_column.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 5))
+        left_column.columnconfigure(0, weight=1)
+        left_column.rowconfigure(0, weight=1)  # Plan selection - expandable
+        left_column.rowconfigure(1, weight=0)  # Saved sequences - fixed
+        
         # Left side: Plan selection
-        left_frame = ttk.LabelFrame(main_content, text="Plan Selection", padding="5")
-        left_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 5))
-        left_frame.columnconfigure(0, weight=1)
-        left_frame.rowconfigure(1, weight=1)
-        left_frame.rowconfigure(3, weight=1)
+        left_frame = ttk.LabelFrame(left_column, text="Plan Selection", padding="5")
+        left_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 5))
+        left_frame.columnconfigure(0, weight=1)  # Available plans column
+        left_frame.columnconfigure(1, weight=0)  # Control buttons column
+        left_frame.columnconfigure(2, weight=1)  # Selected plans column
+        left_frame.rowconfigure(1, weight=1)     # Plans row
         
         # Available plans
         ttk.Label(left_frame, text="Available Plans:", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
         available_listbox = tk.Listbox(left_frame, height=6)
-        available_listbox.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        available_listbox.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10), padx=(0, 5))
         
         # Populate available plans
         for plan_id, plan_class in AVAILABLE_PLANS.items():
@@ -1169,23 +2009,42 @@ class SimpleRecorderGUI:
             label = getattr(plan_class, 'label', plan_id.replace('_', ' ').title())
             available_listbox.insert(tk.END, f"{label} ({plan_id})")
         
-        # Selected plans
-        ttk.Label(left_frame, text="Selected Plans:", style='Header.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(0, 5))
-        selected_listbox = tk.Listbox(left_frame, height=6)
-        selected_listbox.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
-        
-        # Plan controls
+        # Control buttons (middle column)
         plan_controls = ttk.Frame(left_frame)
-        plan_controls.grid(row=4, column=0, pady=(0, 5))
+        plan_controls.grid(row=1, column=1, sticky=(tk.N, tk.S), padx=5)
         
-        ttk.Button(plan_controls, text="Add →", command=lambda: self.add_plan_to_selection(username, available_listbox, selected_listbox)).grid(row=0, column=0, padx=(0, 3))
-        ttk.Button(plan_controls, text="Remove ←", command=lambda: self.remove_plan_from_selection(username, selected_listbox)).grid(row=0, column=1, padx=3)
-        ttk.Button(plan_controls, text="Move Up", command=lambda: self.move_plan_up(username, selected_listbox)).grid(row=0, column=2, padx=3)
-        ttk.Button(plan_controls, text="Move Down", command=lambda: self.move_plan_down(username, selected_listbox)).grid(row=0, column=3, padx=3)
+        ttk.Button(plan_controls, text="→", command=lambda: self.add_plan_to_selection(username, available_listbox, selected_listbox)).grid(row=0, column=0, pady=(0, 3))
+        ttk.Button(plan_controls, text="←", command=lambda: self.remove_plan_from_selection(username, selected_listbox)).grid(row=1, column=0, pady=3)
+        ttk.Button(plan_controls, text="↑", command=lambda: self.move_plan_up(username, selected_listbox)).grid(row=2, column=0, pady=3)
+        ttk.Button(plan_controls, text="↓", command=lambda: self.move_plan_down(username, selected_listbox)).grid(row=3, column=0, pady=3)
+        ttk.Button(plan_controls, text="✕", command=lambda: self.clear_selected_plans(username, selected_listbox)).grid(row=4, column=0, pady=(10, 0))
         
-        # Right side: Details panel
+        # Selected plans
+        ttk.Label(left_frame, text="Selected Plans:", style='Header.TLabel').grid(row=0, column=2, sticky=tk.W, pady=(0, 5))
+        selected_listbox = tk.Listbox(left_frame, height=6)
+        selected_listbox.grid(row=1, column=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10), padx=(5, 0))
+        
+        # Saved Sequences (moved under Plan Selection)
+        sequences_frame = ttk.LabelFrame(left_column, text="Saved Sequences", padding="5")
+        sequences_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(5, 0))
+        sequences_frame.columnconfigure(0, weight=1)
+        sequences_frame.rowconfigure(1, weight=1)
+
+        sequences_listbox = tk.Listbox(sequences_frame, height=4)
+        sequences_listbox.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(5, 0))
+
+        seq_controls = ttk.Frame(sequences_frame)
+        seq_controls.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(5, 0))
+        ttk.Button(seq_controls, text="Save", command=lambda: self.save_sequence_for_instance(username)).grid(row=0, column=0, padx=(0, 3))
+        ttk.Button(seq_controls, text="Load", command=lambda: self.load_sequence_from_list(username, sequences_listbox)).grid(row=0, column=1, padx=3)
+        ttk.Button(seq_controls, text="Delete", command=lambda: self.delete_sequence_from_list(username, sequences_listbox)).grid(row=0, column=2, padx=3)
+
+        self.populate_sequences_list(username, sequences_listbox)
+        instance_tab.sequences_listbox = sequences_listbox
+
+        # Plan Details moved to right column (where stats used to be)
         right_frame = ttk.LabelFrame(main_content, text="Plan Details", padding="5")
-        right_frame.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(5, 0))
+        right_frame.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S))
         right_frame.columnconfigure(0, weight=1)
         right_frame.rowconfigure(1, weight=1)
         
@@ -1193,29 +2052,164 @@ class SimpleRecorderGUI:
         details_controls = ttk.Frame(right_frame)
         details_controls.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
         
-        ttk.Button(details_controls, text="Edit Parameters...", command=lambda: self.edit_plan_parameters(username, selected_listbox)).grid(row=0, column=0, padx=(0, 3))
-        ttk.Button(details_controls, text="Clear Parameters", command=lambda: self.clear_plan_parameters(username, selected_listbox)).grid(row=0, column=1, padx=3)
-        ttk.Button(details_controls, text="Clear Rules", command=lambda: self.clear_plan_rules(username, selected_listbox)).grid(row=0, column=2, padx=3)
+        ttk.Button(details_controls, text="Clear Parameters", command=lambda: self.clear_plan_parameters(username, selected_listbox)).grid(row=0, column=0, padx=3)
+        ttk.Button(details_controls, text="Clear Rules", command=lambda: self.clear_plan_rules(username, selected_listbox)).grid(row=0, column=1, padx=3)
         
-        # Details display
+        # Editing section - inline editing for rules and parameters (moved to top)
+        editing_frame = ttk.LabelFrame(right_frame, text="Edit", padding="5")
+        editing_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        editing_frame.columnconfigure(1, weight=1)
+        
+        # Rules editing - with user-friendly widgets
+        ttk.Label(editing_frame, text="Add Rule:", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W, pady=2)
+        rules_edit_frame = ttk.Frame(editing_frame)
+        rules_edit_frame.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(5, 0), pady=2)
+        
+        # Rule type dropdown
+        rule_type_var = tk.StringVar(value="Time")
+        rule_type_combo = ttk.Combobox(rules_edit_frame, textvariable=rule_type_var, width=12, 
+                                       values=["Time", "Skill", "Item", "Total Level"], state="readonly")
+        rule_type_combo.grid(row=0, column=0, padx=(0, 5))
+        
+        # Dynamic rule input frame (will be populated based on rule type)
+        rule_input_frame = ttk.Frame(rules_edit_frame)
+        rule_input_frame.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 5))
+        
+        # Time rule widget
+        time_spinbox = ttk.Spinbox(rule_input_frame, from_=0, to=10000, width=10)
+        time_spinbox.set("0")
+        time_label = ttk.Label(rule_input_frame, text="minutes")
+        
+        # Skill rule widgets
+        skill_list = ["Attack", "Strength", "Defence", "Ranged", "Magic", "Woodcutting", "Fishing", 
+                     "Cooking", "Mining", "Smithing", "Firemaking", "Crafting", "Fletching", "Runecraft", 
+                     "Herblore", "Agility", "Thieving", "Slayer", "Farming", "Construction", "Hunter", "Prayer"]
+        skill_var = tk.StringVar(value="")
+        skill_combo = ttk.Combobox(rule_input_frame, textvariable=skill_var, values=skill_list, width=12, state="readonly")
+        skill_level_spinbox = ttk.Spinbox(rule_input_frame, from_=1, to=99, width=5)
+        skill_level_spinbox.set("1")
+        skill_label = ttk.Label(rule_input_frame, text="level")
+        
+        # Item rule widgets
+        item_name_entry = ttk.Entry(rule_input_frame, width=15)
+        item_name_entry.insert(0, "item name")
+        item_qty_spinbox = ttk.Spinbox(rule_input_frame, from_=1, to=99999, width=8)
+        item_qty_spinbox.set("1")
+        item_x_label = ttk.Label(rule_input_frame, text="x")
+        
+        # Total Level rule widget
+        total_level_spinbox = ttk.Spinbox(rule_input_frame, from_=0, to=2277, width=10)
+        total_level_spinbox.set("0")
+        total_level_label = ttk.Label(rule_input_frame, text="level")
+        
+        def show_rule_input(*args):
+            """Show appropriate input widgets based on selected rule type."""
+            # Clear all widgets
+            for widget in rule_input_frame.winfo_children():
+                widget.grid_remove()
+            
+            rule_type = rule_type_var.get()
+            if rule_type == "Time":
+                time_spinbox.grid(row=0, column=0, padx=(0, 5))
+                time_label.grid(row=0, column=1)
+            elif rule_type == "Skill":
+                skill_combo.grid(row=0, column=0, padx=(0, 5))
+                skill_level_spinbox.grid(row=0, column=1, padx=(0, 5))
+                skill_label.grid(row=0, column=2)
+            elif rule_type == "Item":
+                item_name_entry.grid(row=0, column=0, padx=(0, 5))
+                item_x_label.grid(row=0, column=1, padx=(0, 5))
+                item_qty_spinbox.grid(row=0, column=2)
+            elif rule_type == "Total Level":
+                total_level_spinbox.grid(row=0, column=0, padx=(0, 5))
+                total_level_label.grid(row=0, column=1)
+        
+        rule_type_var.trace('w', show_rule_input)
+        show_rule_input()  # Initial display
+        
+        # Add rule button
+        def add_rule_cmd():
+            rule_data = {
+                'Time': (time_spinbox, None),
+                'Skill': (skill_combo, skill_level_spinbox),
+                'Item': (item_name_entry, item_qty_spinbox),
+                'Total Level': (total_level_spinbox, None)
+            }
+            self.add_rule_inline_advanced(username, selected_listbox, rule_type_var, rule_data,
+                                          rules_scrollable_frame, rules_canvas)
+        
+        ttk.Button(rules_edit_frame, text="Add", width=8, command=add_rule_cmd).grid(row=0, column=2)
+        
+        # Parameters editing - dynamic based on plan type
+        ttk.Label(editing_frame, text="Add Parameter:", style='Header.TLabel').grid(row=1, column=0, sticky=tk.W, pady=2)
+        params_edit_container = ttk.Frame(editing_frame)
+        params_edit_container.grid(row=1, column=1, sticky=(tk.W, tk.E), padx=(5, 0), pady=2)
+        params_edit_container.columnconfigure(0, weight=1)
+        
+        # This will be populated when plan selection changes
+        params_edit_frame = ttk.Frame(params_edit_container)
+        params_edit_frame.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        
+        # Store references for dynamic updates
+        instance_tab.params_edit_container = params_edit_container
+        instance_tab.params_edit_frame = params_edit_frame
+        
+        # Details display - create scrollable sections like Inventory/Equipped (below Edit section)
         details_frame = ttk.Frame(right_frame)
-        details_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        details_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         details_frame.columnconfigure(0, weight=1)
-        details_frame.rowconfigure(0, weight=1)
-        details_frame.rowconfigure(1, weight=1)
         
-        # Rules treeview
-        ttk.Label(details_frame, text="Rules:", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 2))
-        rules_tree = ttk.Treeview(details_frame, show='tree', height=4)
-        rules_tree.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        # Rules section with scrollable frame (auto-sizing, starts at 0 height)
+        ttk.Label(details_frame, text="Rules", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky=tk.W, padx=5, pady=(5, 2))
         
-        # Parameters treeview
-        ttk.Label(details_frame, text="Parameters:", style='Header.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(0, 2))
-        params_tree = ttk.Treeview(details_frame, show='tree', height=4)
-        params_tree.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        # Create scrollable frame for rules (auto-sized based on content)
+        rules_container = ttk.Frame(details_frame)
+        rules_container.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        rules_container.columnconfigure(0, weight=1)
         
-        # Bind selection change to update details
-        selected_listbox.bind('<<ListboxSelect>>', lambda e: self.update_plan_details(username, selected_listbox, rules_tree, params_tree))
+        rules_canvas = tk.Canvas(rules_container, height=0)
+        rules_scrollbar = ttk.Scrollbar(rules_container, orient=tk.VERTICAL, command=rules_canvas.yview)
+        rules_scrollable_frame = ttk.Frame(rules_canvas)
+        
+        rules_canvas.configure(yscrollcommand=rules_scrollbar.set)
+        rules_canvas.create_window((0, 0), window=rules_scrollable_frame, anchor=tk.NW)
+        
+        rules_canvas.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        rules_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        
+        # Parameters section with scrollable frame (auto-sizing, starts at 0 height)
+        ttk.Label(details_frame, text="Parameters", font=("Arial", 10, "bold")).grid(row=2, column=0, sticky=tk.W, padx=5, pady=(5, 2))
+        
+        params_container = ttk.Frame(details_frame)
+        params_container.grid(row=3, column=0, sticky=(tk.W, tk.E))
+        params_container.columnconfigure(0, weight=1)
+        
+        params_canvas = tk.Canvas(params_container, height=0)
+        params_scrollbar = ttk.Scrollbar(params_container, orient=tk.VERTICAL, command=params_canvas.yview)
+        params_scrollable_frame = ttk.Frame(params_canvas)
+        
+        params_canvas.configure(yscrollcommand=params_scrollbar.set)
+        params_canvas.create_window((0, 0), window=params_scrollable_frame, anchor=tk.NW)
+        
+        params_canvas.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        params_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        
+        # Store references for updates
+        instance_tab.rules_scrollable_frame = rules_scrollable_frame
+        instance_tab.rules_canvas = rules_canvas
+        instance_tab.params_scrollable_frame = params_scrollable_frame
+        instance_tab.params_canvas = params_canvas
+        instance_tab.selected_listbox = selected_listbox
+        
+        # Initialize parameter widgets
+        self.update_parameter_widgets(username, selected_listbox)
+        
+        # Bind selection change to update details and parameter widgets
+        def on_plan_selection(e):
+            self.update_plan_details_inline(username, selected_listbox)
+            self.update_parameter_widgets(username, selected_listbox)
+        
+        selected_listbox.bind('<<ListboxSelect>>', on_plan_selection)
         
         # Status display
         status_frame = ttk.Frame(plan_runner_tab)
@@ -1230,12 +2224,15 @@ class SimpleRecorderGUI:
         instance_tab.progress = ttk.Progressbar(status_frame, mode='determinate')
         instance_tab.progress.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(5, 0))
         
+        # Configure grid weights properly
+        plan_runner_tab.rowconfigure(0, weight=0)  # Top row (config/controls) - fixed height
+        plan_runner_tab.rowconfigure(1, weight=1)  # Main content - expandable
+        plan_runner_tab.rowconfigure(5, weight=0)  # Status frame - fixed height
+        
         # Store references for this instance
         instance_tab.available_listbox = available_listbox
         instance_tab.selected_listbox = selected_listbox
         instance_tab.session_dir = session_dir
-        instance_tab.rules_tree = rules_tree
-        instance_tab.params_tree = params_tree
         instance_tab.plan_entries = []  # List of PlanEntry objects
         instance_tab.is_running = False
         instance_tab.current_plan_index = 0
@@ -1430,6 +2427,9 @@ class SimpleRecorderGUI:
             messagebox.showwarning("No Plans Selected", f"Please select at least one plan for {instance_name}.")
             return
         
+        # Write rule parameters to file before starting plans
+        self._write_rule_params_to_file(instance_name)
+        
         # Start plans in a separate thread
         def run_plans():
             try:
@@ -1453,6 +2453,10 @@ class SimpleRecorderGUI:
                     instance_tab.current_plan_index = i
                     instance_tab.current_plan_name = plan_name
                     instance_tab.current_phase = "Starting"
+                    
+                    # Update the display labels
+                    instance_tab.current_plan_label.config(text=plan_name)
+                    instance_tab.current_phase_label.config(text="Starting")
                     
                     instance_tab.status_label.config(text=f"Running: {plan_name}", style='Info.TLabel')
                     instance_tab.progress['value'] = i
@@ -1509,6 +2513,32 @@ class SimpleRecorderGUI:
                         # GE Trade role parameter
                         if plan_id == "ge_trade" and 'role' in params:
                             param_args.extend(["--role", params['role']])
+                        
+                        # Wait plan parameters
+                        if plan_id == "wait_plan" and 'generic' in params and 'wait_minutes' in params['generic']:
+                            param_args.extend(["--wait-minutes", str(params['generic']['wait_minutes'])])
+                        
+                        # Tutorial island parameters
+                        if plan_id == "tutorial_island":
+                            # Check if we have a credentials_file parameter
+                            if 'generic' in params and 'credentials_file' in params['generic']:
+                                param_args.extend(["--credentials-file", str(params['generic']['credentials_file'])])
+                            # Auto-detect unnamed credentials for this instance
+                            else:
+                                # Find the credential name for this instance
+                                cred_name = None
+                                for i, selected_cred in enumerate(self.selected_credentials):
+                                    # Extract username from credential filename (remove .properties)
+                                    username = selected_cred.replace('.properties', '')
+                                    if username == instance_name:
+                                        cred_name = selected_cred
+                                        break
+                                
+                                if cred_name and cred_name.startswith("unnamed_character_"):
+                                    # Extract the credential name without .properties extension
+                                    cred_name_without_ext = cred_name.replace('.properties', '')
+                                    param_args.extend(["--credentials-file", cred_name_without_ext])
+                                    self.log_message_to_instance(instance_name, f"Auto-detected unnamed credential: {cred_name_without_ext}", 'info')
                     
                     # Run the plan
                     success = self.execute_plan_for_instance(instance_name, plan_id, session_dir, port, rules_args, param_args)
@@ -1538,10 +2568,16 @@ class SimpleRecorderGUI:
                 if instance_tab.is_running:
                     instance_tab.status_label.config(text="All plans completed", style='Success.TLabel')
                     instance_tab.progress['value'] = len(selected_plans)
+                    # Reset phase display
+                    instance_tab.current_plan_label.config(text="None")
+                    instance_tab.current_phase_label.config(text="Idle")
                     self.log_message_to_instance(instance_name, "All plans completed successfully", 'success')
                 
             except Exception as e:
                 instance_tab.status_label.config(text=f"Error: {str(e)}", style='Error.TLabel')
+                # Reset phase display on error
+                instance_tab.current_plan_label.config(text="Error")
+                instance_tab.current_phase_label.config(text="Failed")
                 self.log_message_to_instance(instance_name, f"Execution error: {str(e)}", 'error')
             finally:
                 instance_tab.is_running = False
@@ -1602,7 +2638,7 @@ class SimpleRecorderGUI:
                 text=True,
                 encoding='utf-8',
                 env=env,
-                cwd=os.getcwd(),
+                cwd=Path(__file__).parent,  # Run from simple_recorder directory
                 bufsize=1,
                 universal_newlines=True
             )
@@ -1657,6 +2693,11 @@ class SimpleRecorderGUI:
                     line = output.strip()
                     if line:
                         self.log_message_to_instance(instance_name, line, 'info')
+                        
+                        # Check for phase updates
+                        if line.startswith("phase: "):
+                            phase = line[7:].strip()  # Extract phase after "phase: "
+                            self.update_instance_phase(instance_name, phase)
                         
                         # Check for plan completion indicators
                         line_lower = line.lower()
@@ -2000,6 +3041,10 @@ class SimpleRecorderGUI:
             self.configure_ge_parameters(instance_tab, plan_name)
         elif plan_name == "ge_trade":
             self.configure_ge_trade_parameters(instance_tab, plan_name)
+        elif plan_name == "wait_plan":
+            self.configure_wait_parameters(instance_tab, plan_name)
+        elif plan_name == "tutorial_island":
+            self.configure_tutorial_island_parameters(instance_tab, plan_name)
         else:
             instance_tab.params_display.config(text=f"No parameters needed for {plan_name}")
     
@@ -2051,6 +3096,47 @@ class SimpleRecorderGUI:
             'role_var': role_var
         }
     
+    def configure_wait_parameters(self, instance_tab, plan_name):
+        """Configure wait plan parameters."""
+        instance_tab.params_display.config(text=f"Configure {plan_name} parameters:")
+        
+        # Wait time
+        ttk.Label(instance_tab.params_frame, text="Wait Time (minutes):", style='Header.TLabel').grid(row=1, column=0, sticky=tk.W, pady=2)
+        wait_var = tk.StringVar(value="1.0")
+        wait_spinbox = ttk.Spinbox(instance_tab.params_frame, from_=0.1, to=1440.0, increment=0.1, 
+                                  textvariable=wait_var, width=10)
+        wait_spinbox.grid(row=1, column=1, sticky=tk.W, pady=2, padx=(5, 0))
+        
+        ttk.Label(instance_tab.params_frame, text="minutes").grid(row=1, column=2, sticky=tk.W, pady=2, padx=(5, 0))
+        
+        # Help text
+        help_text = "How many minutes to wait before completing the plan (0.1 to 1440 minutes = 24 hours max)"
+        ttk.Label(instance_tab.params_frame, text=help_text, style='Info.TLabel').grid(row=2, column=0, columnspan=3, pady=2)
+        
+        # Store references
+        instance_tab.plan_params[plan_name] = {
+            'wait_var': wait_var
+        }
+    
+    def configure_tutorial_island_parameters(self, instance_tab, plan_name):
+        """Configure tutorial island parameters."""
+        instance_tab.params_display.config(text=f"Configure {plan_name} parameters:")
+        
+        # Credentials file parameter
+        ttk.Label(instance_tab.params_frame, text="Credentials File:", style='Header.TLabel').grid(row=1, column=0, sticky=tk.W, pady=2)
+        cred_var = tk.StringVar(value="")
+        cred_entry = ttk.Entry(instance_tab.params_frame, textvariable=cred_var, width=30)
+        cred_entry.grid(row=1, column=1, sticky=tk.W, pady=2, padx=(5, 0))
+        
+        # Help text
+        help_text = "Enter the filename (without .properties) to rename credentials file to match character name"
+        ttk.Label(instance_tab.params_frame, text=help_text, style='Info.TLabel').grid(row=2, column=0, columnspan=2, pady=2)
+        
+        # Store references
+        instance_tab.plan_params[plan_name] = {
+            'cred_var': cred_var
+        }
+    
     def on_closing(self):
         """Handle window closing."""
         # Check if any instances are running
@@ -2073,15 +3159,7 @@ class SimpleRecorderGUI:
         plan_text = available_listbox.get(selection[0])
         plan_id = plan_text.split(' (')[-1].rstrip(')')
         
-        # Check if already selected
-        for i in range(selected_listbox.size()):
-            selected_text = selected_listbox.get(i)
-            selected_plan_id = selected_text.split(' (')[-1].rstrip(')')
-            if plan_id == selected_plan_id:
-                messagebox.showwarning("Already Selected", f"Plan {plan_id} is already in the selection.")
-                return
-        
-        # Add to selected list
+        # Add to selected list (allow duplicates)
         selected_listbox.insert(tk.END, plan_text)
         
         # Create PlanEntry for this plan
@@ -2115,9 +3193,7 @@ class SimpleRecorderGUI:
             del instance_tab.plan_entries[selection[0]]
         
         # Update details display
-        self.update_plan_details(username, selected_listbox, 
-                               getattr(instance_tab, 'rules_tree', None), 
-                               getattr(instance_tab, 'params_tree', None))
+        self.update_plan_details_inline(username, selected_listbox)
     
     def move_plan_up(self, username, selected_listbox):
         """Move selected plan up in the list."""
@@ -2155,11 +3231,117 @@ class SimpleRecorderGUI:
         if instance_tab and index < len(instance_tab.plan_entries) - 1:
             instance_tab.plan_entries[index], instance_tab.plan_entries[index + 1] = instance_tab.plan_entries[index + 1], instance_tab.plan_entries[index]
     
-    def edit_plan_parameters(self, username, selected_listbox):
-        """Edit parameters for the selected plan."""
+    def clear_selected_plans(self, username, selected_listbox):
+        """Clear all selected plans."""
+        selected_listbox.delete(0, tk.END)
+        
+        # Clear plan_entries
+        instance_tab = self.instance_tabs.get(username)
+        if instance_tab:
+            instance_tab.plan_entries.clear()
+    
+    def populate_sequences_list(self, username, sequences_listbox):
+        """Populate the sequences listbox with saved sequences."""
+        try:
+            # Use absolute path based on script location
+            sequences_dir = Path(__file__).parent / "plan_sequences"
+            if sequences_dir.exists():
+                sequences_listbox.delete(0, tk.END)
+                for seq_file in sorted(sequences_dir.glob("*.json")):
+                    # Extract sequence name from filename
+                    seq_name = seq_file.stem
+                    sequences_listbox.insert(tk.END, seq_name)
+        except Exception as e:
+            logging.error(f"Error populating sequences list: {e}")
+    
+    def load_sequence_from_list(self, username, sequences_listbox):
+        """Load a sequence from the sequences listbox."""
+        selection = sequences_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select a sequence to load.")
+            return
+        
+        seq_name = sequences_listbox.get(selection[0])
+        try:
+            # Load the sequence file (use absolute path)
+            seq_file = Path(__file__).parent / "plan_sequences" / f"{seq_name}.json"
+            if seq_file.exists():
+                import json
+                with open(seq_file, 'r') as f:
+                    sequence_data = json.load(f)
+                
+                # Clear current selection
+                instance_tab = self.instance_tabs.get(username)
+                if instance_tab and hasattr(instance_tab, 'selected_listbox'):
+                    instance_tab.selected_listbox.delete(0, tk.END)
+                    instance_tab.plan_entries.clear()
+                
+                # Load the sequence data
+                # Validate version
+                if sequence_data.get('version') != 1:
+                    messagebox.showerror("Error", "Unsupported sequence file version.")
+                    return
+                
+                # Update session directory and port
+                if 'session_dir' in sequence_data:
+                    instance_tab.session_dir.set(sequence_data['session_dir'])
+                if 'port' in sequence_data:
+                    self.instance_ports[username] = sequence_data['port']
+                
+                # Load plans
+                if 'plans' in sequence_data:
+                    for plan_data in sequence_data['plans']:
+                        # Add to listbox
+                        plan_text = f"{plan_data['label']} ({plan_data['name']})"
+                        instance_tab.selected_listbox.insert(tk.END, plan_text)
+                        
+                        # Add to plan_entries
+                        instance_tab.plan_entries.append(plan_data)
+                
+                # Update details
+                self.update_plan_details(username, instance_tab.selected_listbox, 
+                                       getattr(instance_tab, 'rules_tree', None), 
+                                       getattr(instance_tab, 'params_tree', None))
+                
+                # Refresh sequences list
+                self.populate_sequences_list(username, sequences_listbox)
+                
+                messagebox.showinfo("Success", f"Loaded sequence: {seq_name}")
+            else:
+                messagebox.showerror("Error", f"Sequence file not found: {seq_file}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load sequence: {e}")
+    
+    def delete_sequence_from_list(self, username, sequences_listbox):
+        """Delete a sequence from the sequences listbox."""
+        selection = sequences_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select a sequence to delete.")
+            return
+        
+        seq_name = sequences_listbox.get(selection[0])
+        
+        # Confirm deletion
+        if messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete the sequence '{seq_name}'?"):
+            try:
+                seq_file = Path(__file__).parent / "plan_sequences" / f"{seq_name}.json"
+                if seq_file.exists():
+                    seq_file.unlink()  # Delete the file
+                    
+                    # Refresh sequences list
+                    self.populate_sequences_list(username, sequences_listbox)
+                    
+                    messagebox.showinfo("Success", f"Deleted sequence: {seq_name}")
+                else:
+                    messagebox.showerror("Error", f"Sequence file not found: {seq_file}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to delete sequence: {e}")
+    
+    def add_rule_inline_advanced(self, username, selected_listbox, rule_type_var, rule_data, rules_scrollable_frame, rules_canvas):
+        """Add a rule inline using advanced widgets (spinbox, combobox, etc.)."""
         selection = selected_listbox.curselection()
         if not selection:
-            messagebox.showwarning("No Selection", "Please select a plan to edit.")
+            messagebox.showwarning("No Selection", "Please select a plan to add a rule to.")
             return
         
         instance_tab = self.instance_tabs.get(username)
@@ -2172,17 +3354,171 @@ class SimpleRecorderGUI:
             return
         
         plan_entry = instance_tab.plan_entries[index]
+        rules = plan_entry.get('rules', {})
+        rule_type = rule_type_var.get()
         
-        # Open editor
-        editor = PlanEditor(self.root, plan_entry, AVAILABLE_PLANS)
-        self.root.wait_window(editor.window)
+        try:
+            if rule_type == "Time":
+                widget1, _ = rule_data['Time']
+                minutes = int(widget1.get())
+                if minutes > 0:
+                    rules['max_minutes'] = minutes
+                    widget1.set("0")
+            elif rule_type == "Skill":
+                widget1, widget2 = rule_data['Skill']
+                skill_name = widget1.get().strip()
+                if skill_name:
+                    level = int(widget2.get())
+                    rules['stop_skill'] = skill_name
+                    rules['stop_skill_level'] = level
+                    widget1.set("")
+                    widget2.set("1")
+            elif rule_type == "Item":
+                widget1, widget2 = rule_data['Item']
+                item_name = widget1.get().strip()
+                if item_name and item_name != "item name":
+                    quantity = int(widget2.get())
+                    if 'stop_items' not in rules:
+                        rules['stop_items'] = []
+                    rules['stop_items'].append({'name': item_name, 'qty': quantity})
+                    widget1.delete(0, tk.END)
+                    widget1.insert(0, "item name")
+                    widget2.set("1")
+            elif rule_type == "Total Level":
+                widget1, _ = rule_data['Total Level']
+                level = int(widget1.get())
+                if level > 0:
+                    rules['total_level'] = level
+                    widget1.set("0")
+            
+            plan_entry['rules'] = rules
+            self.update_plan_details_inline(username, selected_listbox)
+            
+            # Write rule parameters to file for StatsMonitor to read
+            self._write_rule_params_to_file(username)
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid value: {e}")
+    
+    def add_rule_inline(self, username, selected_listbox, rule_type_var, rule_value_entry, rules_scrollable_frame, rules_canvas):
+        """Add a rule inline (without popup)."""
+        selection = selected_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select a plan to add a rule to.")
+            return
         
-        if editor.result:
-            # Update the plan entry
-            instance_tab.plan_entries[index] = editor.result
-            self.update_plan_details(username, selected_listbox, 
-                                   getattr(instance_tab, 'rules_tree', None), 
-                                   getattr(instance_tab, 'params_tree', None))
+        instance_tab = self.instance_tabs.get(username)
+        if not instance_tab:
+            return
+        
+        index = selection[0]
+        if index >= len(instance_tab.plan_entries):
+            messagebox.showerror("Error", "Plan entry not found.")
+            return
+        
+        plan_entry = instance_tab.plan_entries[index]
+        rules = plan_entry.get('rules', {})
+        rule_type = rule_type_var.get()
+        rule_value = rule_value_entry.get().strip()
+        
+        try:
+            if rule_type == "Time":
+                minutes = int(rule_value)
+                rules['max_minutes'] = minutes
+                rule_value_entry.delete(0, tk.END)
+                rule_value_entry.insert(0, "minutes")
+            elif rule_type == "Skill":
+                # Format: "skill_name level"
+                parts = rule_value.split()
+                if len(parts) >= 2:
+                    skill_name = parts[0]
+                    level = int(parts[-1])
+                    rules['stop_skill'] = skill_name
+                    rules['stop_skill_level'] = level
+                    rule_value_entry.delete(0, tk.END)
+                    rule_value_entry.insert(0, "skill_name level")
+            elif rule_type == "Item":
+                # Format: "item_name quantity"
+                parts = rule_value.split()
+                if len(parts) >= 2:
+                    item_name = ' '.join(parts[:-1])
+                    quantity = int(parts[-1])
+                    if 'stop_items' not in rules:
+                        rules['stop_items'] = []
+                    rules['stop_items'].append({'name': item_name, 'qty': quantity})
+                    rule_value_entry.delete(0, tk.END)
+                    rule_value_entry.insert(0, "item_name quantity")
+            elif rule_type == "Total Level":
+                level = int(rule_value)
+                rules['total_level'] = level
+                rule_value_entry.delete(0, tk.END)
+                rule_value_entry.insert(0, "level")
+            
+            plan_entry['rules'] = rules
+            self.update_plan_details_inline(username, selected_listbox)
+        except (ValueError, IndexError) as e:
+            messagebox.showerror("Error", f"Invalid {rule_type.lower()} value: {rule_value}")
+    
+    def add_parameter_inline(self, username, selected_listbox, param_key_entry, param_value_entry, params_scrollable_frame, params_canvas):
+        """Add a parameter inline (without popup)."""
+        selection = selected_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select a plan to add a parameter to.")
+            return
+        
+        instance_tab = self.instance_tabs.get(username)
+        if not instance_tab:
+            return
+        
+        index = selection[0]
+        if index >= len(instance_tab.plan_entries):
+            messagebox.showerror("Error", "Plan entry not found.")
+            return
+        
+        plan_entry = instance_tab.plan_entries[index]
+        params = plan_entry.get('params', {})
+        param_key = param_key_entry.get().strip()
+        param_value = param_value_entry.get().strip()
+        
+        if not param_key or not param_value:
+            messagebox.showwarning("Invalid Input", "Both key and value are required.")
+            return
+        
+        # Handle GE plans differently
+        if 'ge' == plan_entry['name'].lower():
+            messagebox.showinfo("Info", "GE plans require specialized parameter editing. Use the full editor for GE plans.")
+            return
+        
+        # For generic plans, add to generic params
+        if 'generic' not in params:
+            params['generic'] = {}
+        
+        # Try to convert value to appropriate type
+        try:
+            # Try integer first
+            param_value = int(param_value)
+        except ValueError:
+            try:
+                # Try float
+                param_value = float(param_value)
+            except ValueError:
+                # Keep as string
+                pass
+        
+        params['generic'][param_key] = param_value
+        plan_entry['params'] = params
+        
+        # Clear entry fields
+        param_key_entry.delete(0, tk.END)
+        param_key_entry.insert(0, "key")
+        param_value_entry.delete(0, tk.END)
+        param_value_entry.insert(0, "value")
+        
+        self.update_plan_details_inline(username, selected_listbox)
+    
+    def edit_plan_parameters(self, username, selected_listbox):
+        """Edit parameters for the selected plan (legacy - kept for compatibility)."""
+        # For now, show info that inline editing is preferred
+        messagebox.showinfo("Info", "Please use the inline editing controls in the Plan Details section.")
     
     def clear_plan_parameters(self, username, selected_listbox):
         """Clear parameters for the selected plan."""
@@ -2196,9 +3532,7 @@ class SimpleRecorderGUI:
             index = selection[0]
             if index < len(instance_tab.plan_entries):
                 instance_tab.plan_entries[index]['params'] = {'generic': {}}
-                self.update_plan_details(username, selected_listbox, 
-                                       getattr(instance_tab, 'rules_tree', None), 
-                                       getattr(instance_tab, 'params_tree', None))
+                self.update_plan_details_inline(username, selected_listbox)
     
     def clear_plan_rules(self, username, selected_listbox):
         """Clear rules for the selected plan."""
@@ -2212,26 +3546,31 @@ class SimpleRecorderGUI:
             index = selection[0]
             if index < len(instance_tab.plan_entries):
                 instance_tab.plan_entries[index]['rules'] = {'max_minutes': None, 'stop_skill': None, 'stop_items': []}
-                self.update_plan_details(username, selected_listbox, 
-                                       getattr(instance_tab, 'rules_tree', None), 
-                                       getattr(instance_tab, 'params_tree', None))
+                self.update_plan_details_inline(username, selected_listbox)
+                
+                # Write rule parameters to file for StatsMonitor to read
+                self._write_rule_params_to_file(username)
     
-    def update_plan_details(self, username, selected_listbox, rules_tree, params_tree):
-        """Update the details panel for the selected plan."""
-        if not rules_tree or not params_tree:
+    def update_plan_details_inline(self, username, selected_listbox):
+        """Update the details panel for the selected plan (inline display with labels)."""
+        instance_tab = self.instance_tabs.get(username)
+        if not instance_tab or not hasattr(instance_tab, 'rules_scrollable_frame'):
             return
             
         selection = selected_listbox.curselection()
-        if not selection:
-            # Clear details
-            for item in rules_tree.get_children():
-                rules_tree.delete(item)
-            for item in params_tree.get_children():
-                params_tree.delete(item)
-            return
         
-        instance_tab = self.instance_tabs.get(username)
-        if not instance_tab:
+        # Clear existing details
+        for widget in instance_tab.rules_scrollable_frame.winfo_children():
+            widget.destroy()
+        for widget in instance_tab.params_scrollable_frame.winfo_children():
+            widget.destroy()
+        
+        if not selection:
+            # Keep sections at 0 height when no plan selected
+            instance_tab.rules_scrollable_frame.update_idletasks()
+            instance_tab.rules_canvas.configure(scrollregion="0 0 0 0", height=0)
+            instance_tab.params_scrollable_frame.update_idletasks()
+            instance_tab.params_canvas.configure(scrollregion="0 0 0 0", height=0)
             return
         
         index = selection[0]
@@ -2240,41 +3579,349 @@ class SimpleRecorderGUI:
         
         plan_entry = instance_tab.plan_entries[index]
         
-        # Clear existing details
-        for item in rules_tree.get_children():
-            rules_tree.delete(item)
-        for item in params_tree.get_children():
-            params_tree.delete(item)
-        
-        # Update rules
-        rules = plan_entry['rules']
+        # Display rules as simple labels
+        row = 0
+        rules = plan_entry.get('rules', {})
         if rules.get('max_minutes'):
-            rules_tree.insert('', 'end', text=f"Max Time: {rules['max_minutes']} minutes")
-        if rules.get('stop_skill'):
-            rules_tree.insert('', 'end', text=f"Stop at Skill: {rules['stop_skill']}")
-        if rules.get('total_level'):
-            rules_tree.insert('', 'end', text=f"Total Level: {rules['total_level']}")
-        if rules.get('stop_items'):
-            items_node = rules_tree.insert('', 'end', text="Stop with Items:")
-            for item in rules['stop_items']:
-                rules_tree.insert(items_node, 'end', text=f"{item['name']} x{item['qty']}")
+            rule_label = ttk.Label(instance_tab.rules_scrollable_frame, 
+                                   text=f"Max Time: {rules['max_minutes']} minutes", font=("Arial", 8))
+            rule_label.grid(row=row, column=0, sticky=tk.W, padx=5, pady=1)
+            row += 1
         
-        # Update parameters
-        params = plan_entry['params']
+        if rules.get('stop_skill'):
+            skill_name = rules.get('stop_skill', '')
+            skill_level = rules.get('stop_skill_level', 0)
+            rule_label = ttk.Label(instance_tab.rules_scrollable_frame, 
+                                   text=f"Stop at Skill: {skill_name} level {skill_level}", font=("Arial", 8))
+            rule_label.grid(row=row, column=0, sticky=tk.W, padx=5, pady=1)
+            row += 1
+        
+        if rules.get('total_level'):
+            rule_label = ttk.Label(instance_tab.rules_scrollable_frame, 
+                                   text=f"Total Level: {rules['total_level']}", font=("Arial", 8))
+            rule_label.grid(row=row, column=0, sticky=tk.W, padx=5, pady=1)
+            row += 1
+        
+        if rules.get('stop_items'):
+            for item in rules['stop_items']:
+                rule_label = ttk.Label(instance_tab.rules_scrollable_frame, 
+                                      text=f"Stop with Item: {item['name']} x{item['qty']}", font=("Arial", 8))
+                rule_label.grid(row=row, column=0, sticky=tk.W, padx=5, pady=1)
+                row += 1
+        
+        if row == 0:
+            # Don't show "No rules set" - keep section at 0 height when empty
+            pass
+        
+        # Update rules canvas scroll region and resize based on content
+        instance_tab.rules_scrollable_frame.update_idletasks()
+        bbox = instance_tab.rules_canvas.bbox("all")
+        if bbox and bbox[3] > bbox[1]:
+            # Has content - calculate height based on content
+            content_height = bbox[3] - bbox[1] + 4
+            instance_tab.rules_canvas.configure(scrollregion=bbox, height=min(content_height, 150))
+        else:
+            # No content - set to 0 height
+            instance_tab.rules_canvas.configure(scrollregion="0 0 0 0", height=0)
+        
+        # Display parameters as simple labels
+        row = 0
+        params = plan_entry.get('params', {})
+        plan_index = index  # Capture for closure
+        
         if 'ge' == plan_entry['name'].lower():
             if params.get('buy_items'):
-                buy_node = params_tree.insert('', 'end', text="Buy Items:")
-                for item in params['buy_items']:
-                    params_tree.insert(buy_node, 'end', text=f"{item['name']} x{item['quantity']} (bumps: {item['bumps']}, price: {item['set_price']})")
+                for idx, item in enumerate(params['buy_items']):
+                    # Create frame for each item with delete button
+                    item_frame = ttk.Frame(instance_tab.params_scrollable_frame)
+                    item_frame.grid(row=row, column=0, sticky=(tk.W, tk.E), padx=5, pady=1)
+                    
+                    param_label = ttk.Label(item_frame, 
+                                           text=f"Buy: {item['name']} x{item['quantity']} (bumps: {item['bumps']}, price: {item['set_price']})", 
+                                           font=("Arial", 8))
+                    param_label.grid(row=0, column=0, sticky=tk.W)
+                    
+                    # Delete button for this item
+                    def delete_buy_item(item_idx=idx, plan_idx=plan_index):
+                        if plan_idx < len(instance_tab.plan_entries):
+                            params = instance_tab.plan_entries[plan_idx].get('params', {})
+                            if 'buy_items' in params and item_idx < len(params['buy_items']):
+                                params['buy_items'].pop(item_idx)
+                                instance_tab.plan_entries[plan_idx]['params'] = params
+                                self.update_plan_details_inline(username, selected_listbox)
+                    
+                    ttk.Button(item_frame, text="✕", width=2, command=delete_buy_item).grid(row=0, column=1, padx=(5, 0))
+                    row += 1
             
             if params.get('sell_items'):
-                sell_node = params_tree.insert('', 'end', text="Sell Items:")
-                for item in params['sell_items']:
-                    params_tree.insert(sell_node, 'end', text=f"{item['name']} x{item['quantity']} (bumps: {item['bumps']}, price: {item['set_price']})")
+                for idx, item in enumerate(params['sell_items']):
+                    # Create frame for each item with delete button
+                    item_frame = ttk.Frame(instance_tab.params_scrollable_frame)
+                    item_frame.grid(row=row, column=0, sticky=(tk.W, tk.E), padx=5, pady=1)
+                    
+                    param_label = ttk.Label(item_frame, 
+                                           text=f"Sell: {item['name']} x{item['quantity']} (bumps: {item['bumps']}, price: {item['set_price']})", 
+                                           font=("Arial", 8))
+                    param_label.grid(row=0, column=0, sticky=tk.W)
+                    
+                    # Delete button for this item
+                    def delete_sell_item(item_idx=idx, plan_idx=plan_index):
+                        if plan_idx < len(instance_tab.plan_entries):
+                            params = instance_tab.plan_entries[plan_idx].get('params', {})
+                            if 'sell_items' in params and item_idx < len(params['sell_items']):
+                                params['sell_items'].pop(item_idx)
+                                instance_tab.plan_entries[plan_idx]['params'] = params
+                                self.update_plan_details_inline(username, selected_listbox)
+                    
+                    ttk.Button(item_frame, text="✕", width=2, command=delete_sell_item).grid(row=0, column=1, padx=(5, 0))
+                    row += 1
         else:
             if params.get('generic'):
                 for key, value in params['generic'].items():
-                    params_tree.insert('', 'end', text=f"{key}: {value}")
+                    param_label = ttk.Label(instance_tab.params_scrollable_frame, 
+                                           text=f"{key}: {value}", font=("Arial", 8))
+                    param_label.grid(row=row, column=0, sticky=tk.W, padx=5, pady=1)
+                    row += 1
+        
+        if row == 0:
+            # Don't show "No parameters set" - keep section at 0 height when empty
+            pass
+        
+        # Update params canvas scroll region and resize based on content
+        instance_tab.params_scrollable_frame.update_idletasks()
+        bbox = instance_tab.params_canvas.bbox("all")
+        if bbox and bbox[3] > bbox[1]:
+            # Has content - calculate height based on content
+            content_height = bbox[3] - bbox[1] + 4
+            instance_tab.params_canvas.configure(scrollregion=bbox, height=min(content_height, 150))
+        else:
+            # No content - set to 0 height
+            instance_tab.params_canvas.configure(scrollregion="0 0 0 0", height=0)
+    
+    def update_parameter_widgets(self, username, selected_listbox):
+        """Update parameter editing widgets based on selected plan type."""
+        instance_tab = self.instance_tabs.get(username)
+        if not instance_tab or not hasattr(instance_tab, 'params_edit_frame'):
+            return
+        
+        selection = selected_listbox.curselection()
+        if not selection:
+            # Show generic widgets
+            self._setup_generic_param_widgets(username, selected_listbox)
+            return
+        
+        index = selection[0]
+        if index >= len(instance_tab.plan_entries):
+            return
+        
+        plan_entry = instance_tab.plan_entries[index]
+        plan_name = plan_entry['name'].lower()
+        
+        # Clear existing widgets
+        for widget in instance_tab.params_edit_frame.winfo_children():
+            widget.destroy()
+        
+        if 'ge' == plan_name:
+            self._setup_ge_param_widgets(username, selected_listbox)
+        elif plan_name == 'ge_trade':
+            self._setup_ge_trade_param_widgets(username, selected_listbox)
+        elif plan_name == 'wait_plan':
+            self._setup_wait_param_widgets(username, selected_listbox)
+        elif plan_name == 'tutorial_island':
+            self._setup_tutorial_island_param_widgets(username, selected_listbox)
+        else:
+            self._setup_generic_param_widgets(username, selected_listbox)
+    
+    def _setup_generic_param_widgets(self, username, selected_listbox):
+        """Setup generic parameter editing widgets (key/value entries)."""
+        instance_tab = self.instance_tabs.get(username)
+        
+        param_key_entry = ttk.Entry(instance_tab.params_edit_frame, width=15)
+        param_key_entry.grid(row=0, column=0, padx=(0, 5))
+        param_key_entry.insert(0, "key")
+        
+        param_value_entry = ttk.Entry(instance_tab.params_edit_frame, width=15)
+        param_value_entry.grid(row=0, column=1, padx=(0, 5))
+        param_value_entry.insert(0, "value")
+        
+        ttk.Button(instance_tab.params_edit_frame, text="Add", width=8,
+                  command=lambda: self.add_parameter_inline(username, selected_listbox, param_key_entry, param_value_entry,
+                                                            instance_tab.params_scrollable_frame, instance_tab.params_canvas)).grid(row=0, column=2)
+    
+    def _setup_ge_param_widgets(self, username, selected_listbox):
+        """Setup GE-specific parameter widgets (buy/sell items)."""
+        instance_tab = self.instance_tabs.get(username)
+        
+        # Type selector (Buy or Sell)
+        ttk.Label(instance_tab.params_edit_frame, text="Type:", font=("Arial", 8)).grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        ge_type_var = tk.StringVar(value="Buy")
+        ge_type_combo = ttk.Combobox(instance_tab.params_edit_frame, textvariable=ge_type_var, 
+                                     values=["Buy", "Sell"], width=8, state="readonly")
+        ge_type_combo.grid(row=0, column=1, padx=(0, 5))
+        
+        # Item name
+        ttk.Label(instance_tab.params_edit_frame, text="Item:", font=("Arial", 8)).grid(row=0, column=2, sticky=tk.W, padx=(5, 0))
+        ge_item_name_entry = ttk.Entry(instance_tab.params_edit_frame, width=15)
+        ge_item_name_entry.grid(row=0, column=3, padx=(5, 0))
+        ge_item_name_entry.insert(0, "item name")
+        
+        # Quantity (allow -1 for sell all)
+        ttk.Label(instance_tab.params_edit_frame, text="Qty:", font=("Arial", 8)).grid(row=0, column=4, sticky=tk.W, padx=(5, 0))
+        ge_qty_spinbox = ttk.Spinbox(instance_tab.params_edit_frame, from_=-1, to=99999, width=8)
+        ge_qty_spinbox.set("1")
+        ge_qty_spinbox.grid(row=0, column=5, padx=(5, 0))
+        ttk.Label(instance_tab.params_edit_frame, text="(-1=all)", font=("Arial", 7), foreground="gray").grid(row=0, column=6, padx=(2, 0))
+        
+        # Bumps
+        ttk.Label(instance_tab.params_edit_frame, text="Bumps:", font=("Arial", 8)).grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        ge_bumps_spinbox = ttk.Spinbox(instance_tab.params_edit_frame, from_=0, to=100, width=8)
+        ge_bumps_spinbox.set("0")
+        ge_bumps_spinbox.grid(row=1, column=1, padx=(0, 5), pady=(5, 0))
+        
+        # Price
+        ttk.Label(instance_tab.params_edit_frame, text="Price:", font=("Arial", 8)).grid(row=1, column=2, sticky=tk.W, padx=(5, 0), pady=(5, 0))
+        ge_price_spinbox = ttk.Spinbox(instance_tab.params_edit_frame, from_=1, to=2147483647, width=12)
+        ge_price_spinbox.set("1")
+        ge_price_spinbox.grid(row=1, column=3, padx=(5, 0), pady=(5, 0))
+        
+        # Add button
+        def add_ge_item():
+            selection = selected_listbox.curselection()
+            if not selection:
+                messagebox.showwarning("No Selection", "Please select a plan to add an item to.")
+                return
+            
+            index = selection[0]
+            if index >= len(instance_tab.plan_entries):
+                return
+            
+            plan_entry = instance_tab.plan_entries[index]
+            params = plan_entry.get('params', {})
+            
+            item_type = ge_type_var.get().lower()  # "buy" or "sell"
+            item_name = ge_item_name_entry.get().strip()
+            
+            if not item_name or item_name == "item name":
+                messagebox.showwarning("Invalid Input", "Please enter an item name.")
+                return
+            
+            try:
+                qty_str = ge_qty_spinbox.get().strip()
+                quantity = int(qty_str) if qty_str else 1
+                bumps = int(ge_bumps_spinbox.get())
+                price_str = ge_price_spinbox.get().strip()
+                price = int(price_str) if price_str else 1
+                if quantity < -1:
+                    quantity = -1
+            except ValueError:
+                messagebox.showerror("Error", "Invalid numeric value.")
+                return
+            
+            # Initialize lists if needed
+            if f'{item_type}_items' not in params:
+                params[f'{item_type}_items'] = []
+            
+            # Add the item
+            item_data = {
+                'name': item_name,
+                'quantity': quantity,
+                'bumps': bumps,
+                'set_price': price
+            }
+            params[f'{item_type}_items'].append(item_data)
+            plan_entry['params'] = params
+            
+            # Clear entry fields
+            ge_item_name_entry.delete(0, tk.END)
+            ge_item_name_entry.insert(0, "item name")
+            ge_qty_spinbox.set("1")
+            ge_bumps_spinbox.set("0")
+            ge_price_spinbox.set("1")
+            
+            # Update display
+            self.update_plan_details_inline(username, selected_listbox)
+        
+        ttk.Button(instance_tab.params_edit_frame, text="Add", width=8, command=add_ge_item).grid(row=1, column=4, padx=(5, 0), pady=(5, 0))
+    
+    def _setup_ge_trade_param_widgets(self, username, selected_listbox):
+        """Setup GE trade parameter widgets."""
+        instance_tab = self.instance_tabs.get(username)
+        
+        ttk.Label(instance_tab.params_edit_frame, text="Role:", font=("Arial", 8)).grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        role_var = tk.StringVar(value="worker")
+        ttk.Radiobutton(instance_tab.params_edit_frame, text="Worker", variable=role_var, value="worker").grid(row=0, column=1, padx=(0, 5))
+        ttk.Radiobutton(instance_tab.params_edit_frame, text="Mule", variable=role_var, value="mule").grid(row=0, column=2, padx=(0, 5))
+        
+        def add_role_param():
+            selection = selected_listbox.curselection()
+            if not selection:
+                return
+            index = selection[0]
+            if index < len(instance_tab.plan_entries):
+                plan_entry = instance_tab.plan_entries[index]
+                params = plan_entry.get('params', {})
+                params['role'] = role_var.get()
+                plan_entry['params'] = params
+                self.update_plan_details_inline(username, selected_listbox)
+        
+        ttk.Button(instance_tab.params_edit_frame, text="Set", width=8, command=add_role_param).grid(row=0, column=3)
+    
+    def _setup_wait_param_widgets(self, username, selected_listbox):
+        """Setup wait plan parameter widgets."""
+        instance_tab = self.instance_tabs.get(username)
+        
+        ttk.Label(instance_tab.params_edit_frame, text="Wait Time:", font=("Arial", 8)).grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        wait_spinbox = ttk.Spinbox(instance_tab.params_edit_frame, from_=0.1, to=1440.0, increment=0.1, width=10)
+        wait_spinbox.set("1.0")
+        wait_spinbox.grid(row=0, column=1, padx=(0, 5))
+        ttk.Label(instance_tab.params_edit_frame, text="minutes", font=("Arial", 8)).grid(row=0, column=2, padx=(0, 5))
+        
+        def add_wait_param():
+            selection = selected_listbox.curselection()
+            if not selection:
+                return
+            index = selection[0]
+            if index < len(instance_tab.plan_entries):
+                plan_entry = instance_tab.plan_entries[index]
+                params = plan_entry.get('params', {})
+                if 'generic' not in params:
+                    params['generic'] = {}
+                params['generic']['wait_minutes'] = float(wait_spinbox.get())
+                plan_entry['params'] = params
+                self.update_plan_details_inline(username, selected_listbox)
+        
+        ttk.Button(instance_tab.params_edit_frame, text="Set", width=8, command=add_wait_param).grid(row=0, column=3)
+    
+    def _setup_tutorial_island_param_widgets(self, username, selected_listbox):
+        """Setup tutorial island parameter widgets."""
+        instance_tab = self.instance_tabs.get(username)
+        
+        ttk.Label(instance_tab.params_edit_frame, text="Credentials File:", font=("Arial", 8)).grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        cred_entry = ttk.Entry(instance_tab.params_edit_frame, width=20)
+        cred_entry.grid(row=0, column=1, padx=(0, 5))
+        cred_entry.insert(0, "filename (no .properties)")
+        
+        def add_cred_param():
+            selection = selected_listbox.curselection()
+            if not selection:
+                return
+            index = selection[0]
+            if index < len(instance_tab.plan_entries):
+                plan_entry = instance_tab.plan_entries[index]
+                params = plan_entry.get('params', {})
+                if 'generic' not in params:
+                    params['generic'] = {}
+                params['generic']['credentials_file'] = cred_entry.get().strip()
+                plan_entry['params'] = params
+                self.update_plan_details_inline(username, selected_listbox)
+        
+        ttk.Button(instance_tab.params_edit_frame, text="Set", width=8, command=add_cred_param).grid(row=0, column=2)
+    
+    def update_plan_details(self, username, selected_listbox, rules_tree, params_tree):
+        """Update the details panel for the selected plan (legacy method for compatibility)."""
+        # Redirect to inline version
+        self.update_plan_details_inline(username, selected_listbox)
+        self.update_parameter_widgets(username, selected_listbox)
     
     def save_sequence_for_instance(self, username):
         """Save the current plan sequence to a JSON file."""
@@ -2283,10 +3930,15 @@ class SimpleRecorderGUI:
             messagebox.showwarning("No Plans", "No plans selected to save.")
             return
         
+        # Default to plan_sequences directory
+        default_dir = Path(__file__).parent / "plan_sequences"
+        default_dir.mkdir(parents=True, exist_ok=True)
+        
         filename = filedialog.asksaveasfilename(
             defaultextension=".json",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            title="Save Plan Sequence"
+            title="Save Plan Sequence",
+            initialdir=str(default_dir)
         )
         
         if not filename:
@@ -2304,6 +3956,10 @@ class SimpleRecorderGUI:
                 json.dump(sequence_data, f, indent=2)
             
             messagebox.showinfo("Success", f"Plan sequence saved to {filename}")
+            
+            # Refresh sequences list if it exists
+            if hasattr(instance_tab, 'sequences_listbox'):
+                self.populate_sequences_list(username, instance_tab.sequences_listbox)
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save sequence: {e}")
@@ -2425,6 +4081,9 @@ class SimpleRecorderGUI:
             del self.instance_tabs[instance_name]
             if instance_name in self.instance_ports:
                 del self.instance_ports[instance_name]
+            
+            # Stop stats monitor for this instance
+            self.stop_stats_monitor(instance_name)
     
     def start_client_detection(self):
         """Start automatic client detection."""

@@ -5,7 +5,7 @@ from typing import Optional, Union
 
 from . import bank, inventory
 from ..helpers.runtime_utils import ipc, ui, dispatch
-from ..helpers.utils import clean_rs
+from ..helpers.utils import clean_rs, rect_beta_xy
 from ..helpers.widgets import widget_exists, get_widget_info
 
 
@@ -36,8 +36,8 @@ def interact(item_name: str, menu_option: str) -> Optional[dict]:
         return None
     
     # Calculate center coordinates
-    x = bounds.get("x", 0) + bounds.get("width", 0) // 2
-    y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+    x, y = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                         bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
     
     # Context-click the item
     step = {
@@ -144,7 +144,7 @@ def get_equipment_item_bounds(slot_index: int) -> Optional[dict]:
         return None
     
     # Get detailed info for this child widget
-        child_resp = ipc.get_widget_info(child_id)
+    child_resp = ipc.get_widget_info(child_id)
     if not child_resp or not child_resp.get("ok"):
         return None
     

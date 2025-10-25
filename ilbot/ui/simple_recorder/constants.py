@@ -33,9 +33,11 @@ REGIONS = {
     "COMBAT_TUTORIAL": (3105, 3110, 9507, 9513),
     "PRAYER_TUTORIAL": (3120, 3128, 3103, 3110),
     "MAGIC_TUTORIAL": (3137, 3144, 3082, 3091),
-    "LUMBRIDGE_NEW_PLAYER_SPAWN": (3231, 3240, 3212, 3224),
+    "LUMBRIDGE_NEW_PLAYER_SPAWN": (3210, 3230, 3205, 3235),
     "FALADOR_COWS": (3021, 3044, 3297, 3313),
-    "VARROCK_WEST_TREES": (3117, 3153, 3415, 3450)
+    "VARROCK_WEST_TREES": (3117, 3153, 3415, 3450),
+    "VARROCK_WEST_MINE": (3171, 3185, 3363, 3379),
+    "AL_KHARID_MINE": (3298, 3301, 3308, 3316)
 }
 
 # Grand Exchange region bounds (hardcoded)
@@ -56,41 +58,127 @@ CAM_BUFFER_Y_BOT = 200     # "too low" (near bottom) threshold for yaw-toward
 CAM_YAW_HOLD_MS = 220
 
 # MMO Name Generator - Organized by length for better combinations
-# 3-Letter Words (Realistic/Common)
+# 3-Letter Words (Gaming/MMO themed)
 WORDS_3 = [
-    "Max", "Sam", "Tom", "Dan", "Ben", "Jon", "Tim", "Rob", "Jim", "Bob", "Ted", "Joe", 
-    "Roy", "Ray", "Jay", "Lee", "Kim", "Ann", "Amy", "Sue", "Meg", "Liz", "Jen", "Kim", 
-    "Pat", "Kim", "Ron", "Don", "Ken", "Len", "Ian", "Eli", "Ace", "Zoe", "Rio", "Leo", 
-    "Eve", "Ava", "Ivy", "Sky", "Fox", "Cat", "Dog", "Bat", "Rat", "Ant", "Bee", "Fly", 
-    "Owl", "Eel", "Ray", "Sun", "Sea", "Sky", "Ice", "Oak", "Pine", "Maple", "Rose", "Lily"
+    "Ace", "Axe", "Arc", "Ash", "Bat", "Bee", "Boa", "Bow", "Box", "Bug",
+    "Cat", "Cyp", "Dax", "Dog", "Eel", "Eve", "Eye", "Fae", "Fay", "Fen",
+    "Fox", "Gag", "Gem", "God", "Hex", "Ice", "Ivy", "Jax", "Jay", "Jig",
+    "Jot", "Kai", "Key", "Kix", "Lax", "Lee", "Leo", "Ley", "Lox", "Lux",
+    "Lyn", "Map", "Meg", "Mob", "Nex", "Oak", "Ore", "Owl", "Pax", "Pit",
+    "Pox", "Pyg", "Qua", "Ray", "Rat", "Red", "Rex", "Rio", "Rob", "Ron",
+    "Rug", "Rye", "Sap", "Sea", "Sky", "Sun", "Tan", "Tar", "Tic", "Top",
+    "Tub", "Ump", "Vex", "Vex", "Wax", "Woe", "Wok", "Xen", "Yak", "Yew",
+    "Yin", "Zen", "Zed", "Zip", "Zoa"
 ]
 
-# 4-Letter Words (Realistic/Common)
+# 4-Letter Words (Gaming/MMO themed with RuneScape references)
 WORDS_4 = [
-    "Alex", "Jake", "Luke", "Mark", "Paul", "John", "Mike", "Dave", "Ryan", "Eric", 
-    "Adam", "Nick", "Sean", "Jack", "Will", "Matt", "Josh", "Tony", "Andy", "Carl", 
-    "Kyle", "Troy", "Dean", "Glen", "Hank", "Ivan", "Jake", "Kane", "Lane", "Mick", 
-    "Nate", "Owen", "Pete", "Rick", "Stan", "Todd", "Vic", "Wade", "Zack", "Ace", 
-    "Blue", "Cool", "Fast", "Gold", "High", "Iron", "Jazz", "King", "Lion", "Moon", 
-    "Navy", "Open", "Pure", "Rock", "Star", "True", "Wild", "Zero", "Bold", "Calm"
+    "Apex", "Aster", "Bane", "Bark", "Beam", "Beast", "Blade", "Blue", "Bold", "Bolt",
+    "Bone", "Book", "Boot", "Brew", "Cape", "Cast", "Cave", "Coal", "Cool", "Crab",
+    "Craft", "Cron", "Cross", "Crow", "Cruz", "Cure", "Dark", "Dart", "Dawn", "Dead",
+    "Demon", "Dice", "Disk", "Doss", "Dragon", "Dusk", "Dust", "Edge", "Elite", "Evil",
+    "Fang", "Fast", "Fear", "Fire", "Fish", "Flag", "Flame", "Flax", "Flux", "Fury",
+    "Fury", "Gale", "Gate", "Gaze", "Gem", "Giant", "Gift", "Gold", "Gray", "Grim",
+    "Hack", "Haze", "Heat", "Hell", "Hero", "High", "Holy", "Hope", "Horn", "Hunt",
+    "Ice", "Iris", "Iron", "Isle", "Jade", "Jazz", "Joke", "Jung", "Keon", "Key",
+    "Kick", "Kill", "King", "Kite", "Knight", "Knob", "Know", "Lair", "Lake", "Lane",
+    "Leaf", "Leap", "Legend", "Leon", "Less", "Life", "Light", "Lion", "Lock", "Long",
+    "Loot", "Lord", "Lost", "Love", "Luck", "Lyra", "Mace", "Mage", "Magic", "Mail",
+    "Main", "Major", "Make", "Mark", "Mars", "Mask", "Mast", "Math", "Maze", "Meat",
+    "Meet", "Melt", "Metal", "Mind", "Mine", "Mist", "Moon", "More", "Moss", "Most",
+    "Move", "Myth", "Navy", "Nest", "Net", "Next", "Night", "Node", "None", "Nova",
+    "Oak", "Oath", "Ocean", "Ogre", "Once", "Ore", "Orin", "Over", "Owl", "Ox",
+    "Pack", "Pain", "Palm", "Pan", "Pants", "Part", "Path", "Peak", "Peat", "Peer",
+    "Pick", "Pier", "Pile", "Pink", "Pit", "Pity", "Pixy", "Plex", "Plot", "Plus",
+    "Pool", "Poor", "Port", "Pot", "Pound", "Pour", "Pure", "Push", "Put", "Quay",
+    "Quill", "Quit", "Race", "Rage", "Raid", "Rail", "Rain", "Rake", "Rank", "Rare",
+    "Rate", "Raze", "Real", "Reap", "Reef", "Reel", "Rest", "Rice", "Rich", "Ride",
+    "Rift", "Rig", "Right", "Rile", "Ring", "Ripe", "Rise", "Risk", "Rite", "Rive",
+    "Road", "Roam", "Roar", "Rob", "Rock", "Roe", "Role", "Roll", "Rome", "Rope",
+    "Rose", "Ross", "Rot", "Rota", "Rough", "Round", "Rout", "Rove", "Row", "Royal",
+    "Rude", "Rue", "Rug", "Ruim", "Ruin", "Rule", "Rum", "Rune", "Rung", "Run",
+    "Ruse", "Rush", "Rust", "Sage", "Salt", "Sand", "Sap", "Sat", "Save", "Saw",
+    "Say", "Scab", "Scald", "Scale", "Scar", "Scare", "Scarf", "Scarlet", "Scat", "Scene",
+    "Scent", "Scheme", "School", "Science", "Scissor", "Scold", "Scoop", "Scope", "Score", "Scorn",
+    "Scout", "Scowl", "Scrap", "Scream", "Screen", "Screw", "Scribble", "Script", "Scratch", "Scrawl",
+    "Scream", "Screen", "Screw", "Scribe", "Scroll", "Scrub", "Scuff", "Sculpt", "Scum", "Scuttle",
+    "Star", "Tide", "True", "Voss", "Wild", "Wren", "Xeno", "Yara", "Zane", "Zero"
 ]
 
-# 5-Letter Words (Realistic/Common)
+# 5-Letter Words (RuneScape themed)
 WORDS_5 = [
-    "Aaron", "Blake", "Chris", "David", "Ethan", "Frank", "Grant", "Henry", "Isaac", "James", 
-    "Kevin", "Lucas", "Mason", "Noah", "Oscar", "Peter", "Quinn", "River", "Steve", "Tyler", 
-    "Unity", "Victor", "Willy", "Xavier", "Young", "Zack", "Alpha", "Brave", "Cloud", "Dream", 
-    "Eagle", "Flame", "Glory", "Happy", "Ideal", "Jolly", "Karma", "Light", "Magic", "Noble", 
-    "Ocean", "Peace", "Quick", "Royal", "Smart", "Tiger", "Urban", "Vital", "Wise", "Zen"
+    "Abyss", "Adder", "Aegis", "Agile", "Agnic", "Air", "Alder", "Alert", "Algae", "Alpha",
+    "Altar", "Amaze", "Amber", "Ameth", "Anvil", "Apex", "Apple", "Aqua", "Arch", "Archa",
+    "Arena", "Aris", "Armor", "Arrow", "Ash", "Ashen", "Ashur", "Aster", "Astral", "Atlas",
+    "Auric", "Auto", "Axe", "Azure", "Bane", "Bank", "Bark", "Barley", "Barri", "Basalt",
+    "Bass", "Bat", "Beach", "Beacon", "Bead", "Beak", "Beam", "Bean", "Bear", "Beast",
+    "Beauty", "Beaver", "Beef", "Beer", "Beet", "Began", "Begin", "Being", "Bell", "Belly",
+    "Below", "Bench", "Bend", "Bene", "Beryl", "Betta", "Better", "Between", "Bible", "Bike",
+    "Bile", "Billy", "Bingo", "Birch", "Bird", "Birth", "Biscuit", "Bit", "Bite", "Bitter",
+    "Black", "Blade", "Blame", "Blank", "Blast", "Blaze", "Bleak", "Bleed", "Bless", "Blind",
+    "Blink", "Block", "Blood", "Bloom", "Blossom", "Blow", "Blue", "Bluff", "Blunt", "Blur",
+    "Blush", "Boat", "Bobber", "Body", "Boil", "Bold", "Bolt", "Bomb", "Bone", "Bongo",
+    "Bonus", "Bony", "Book", "Boom", "Boost", "Boot", "Booth", "Border", "Bore", "Born",
+    "Borrow", "Boss", "Both", "Bother", "Bottle", "Bought", "Boulder", "Bounce", "Bound", "Bounty",
+    "Bouquet", "Boutique", "Bouton", "Bow", "Bowl", "Box", "Boy", "Bracelet", "Brain", "Brake",
+    "Brand", "Bran", "Brass", "Brave", "Brawny", "Bread", "Break", "Breath", "Breed", "Breeze",
+    "Brew", "Brick", "Bridge", "Brief", "Bright", "Brilliant", "Bring", "Brink", "Brisk", "Brist",
+    "Broad", "Broken", "Bronze", "Brook", "Broom", "Broth", "Brother", "Brought", "Brown", "Brush",
+    "Bubble", "Buck", "Bucket", "Buckle", "Bud", "Budget", "Buff", "Bug", "Build", "Built",
+    "Bulk", "Bull", "Bullet", "Bum", "Bump", "Bun", "Bunch", "Bundle", "Bunk", "Bunt",
+    "Burden", "Bureau", "Burg", "Burial", "Burl", "Burn", "Burst", "Bury", "Bus", "Bush",
+    "Bust", "Busy", "But", "Butcher", "Butt", "Butter", "Button", "Buy", "Buzz", "Bye",
+    "Byte", "Cab", "Cabin", "Cabinet", "Cable", "Cactus", "Cage", "Cake", "Calam", "Calc",
+    "Calm", "Camel", "Cameras", "Camp", "Can", "Canal", "Candy", "Cane", "Cannon", "Cant",
+    "Canvas", "Canyon", "Cap", "Cape", "Capital", "Car", "Caramel", "Card", "Care", "Career",
+    "Careful", "Cargo", "Carib", "Carn", "Carriage", "Carrier", "Carrot", "Carry", "Cart", "Carve",
+    "Case", "Cash", "Cass", "Cast", "Casual", "Cat", "Cata", "Cata", "Catacomb", "Catch",
+    "Cater", "Catfish", "Cathedral", "Cattle", "Caus", "Cause", "Caution", "Cave", "Caviar", "Cayenne",
+    "Cease", "Cedar", "Celebr", "Celes", "Celest", "Cell", "Cellar", "Cement", "Cemetery", "Censor",
+    "Census", "Cent", "Center", "Centra", "Centra", "Centur", "Cere", "Cereal", "Cert", "Cert",
+    "Cha", "Chai", "Chair", "Chamber", "Champ", "Chance", "Change", "Channel", "Chant", "Chaos",
+    "Chap", "Chap", "Chapt", "Char", "Char", "Char", "Charcoal", "Charge", "Charm", "Chase",
+    "Chat", "Cheap", "Cheat", "Check", "Cheek", "Cheese", "Cheet", "Chef", "Cherry", "Chest",
+    "Chev", "Chew", "Chic", "Chicken", "Chief", "Child", "Chill", "Chime", "Chin", "Chip",
+    "Chit", "Choc", "Chocolate", "Choice", "Choke", "Chomp", "Chop", "Chord", "Chore", "Chr",
+    "Christ", "Christian", "Chri", "Chronic", "Chron", "Chrome", "Chronic", "Chub", "Chuck", "Chum",
+    "Chunky", "Church", "Cider", "Cigar", "Cinder", "Cinema", "Cinnamon", "Circle", "Circul", "Circum",
+    "Circus", "Citadel", "Citrus", "City", "Civic", "Civil", "Civi", "Civil", "Civilian", "Clai",
+    "Claim", "Clam", "Clamp", "Clan", "Clang", "Clank", "Clap", "Clar", "Clarif", "Clarinet",
+    "Clarity", "Clash", "Clasp", "Class", "Classic", "Classif", "Classroom", "Clatter", "Clause", "Clav",
+    "Claw", "Clay", "Clean", "Clear", "Clearance", "Clearing", "Cleave", "Clench", "Clerk", "Clever",
+    "Click", "Client", "Cliff", "Climate", "Climb", "Clin", "Clinical", "Clinic", "Clink", "Clip",
+    "Cloak", "Clock", "Clog", "Clone", "Close", "Clos", "Closet", "Cloth", "Clothe", "Cloth"
 ]
 
-# 6-Letter Words (Realistic/Common)
+# 6-Letter Words (RuneScape themed)
 WORDS_6 = [
-    "Andrew", "Brandon", "Carlos", "Daniel", "Edward", "Felix", "George", "Hunter", "Isaiah", "Jordan", 
-    "Kyle", "Liam", "Marcus", "Nathan", "Oliver", "Parker", "Quinn", "Robert", "Samuel", "Thomas", 
-    "Unique", "Vincent", "William", "Xavier", "Yusuf", "Zachary", "Advent", "Bright", "Crystal", "Dragon", 
-    "Echo", "Forest", "Golden", "Humble", "Island", "Journey", "Knight", "Legend", "Mystic", "Nature", 
-    "Oracle", "Phoenix", "Quest", "Ranger", "Spirit", "Thunder", "Unique", "Violet", "Warrior", "Zenith"
+    "Abyssal", "Acorn", "Adaman", "Advent", "Aether", "Agility", "Alchemy", "Alder", "Ancient", "Angel",
+    "Anvil", "Apathy", "Apex", "Aqua", "Arcane", "Archer", "Arena", "Armor", "Arrow", "Artifact",
+    "Astral", "Attack", "Aurora", "Avenge", "Azure", "Backpack", "Badge", "Bag", "Bait", "Balance",
+    "Bandage", "Bandit", "Banjo", "Bank", "Bar", "Barb", "Barbar", "Bargain", "Bark", "Barn",
+    "Barrel", "Barrier", "Barter", "Base", "Basin", "Bast", "Batche", "Bat", "Beacon", "Beak",
+    "Beam", "Bear", "Beast", "Beat", "Beaver", "Became", "Because", "Become", "Bed", "Bee",
+    "Beef", "Been", "Beer", "Beet", "Began", "Begin", "Begun", "Behalf", "Behave", "Behavior",
+    "Being", "Belief", "Believe", "Bell", "Belong", "Below", "Belt", "Bench", "Beneath", "Benefit",
+    "Bent", "Berry", "Beside", "Best", "Bet", "Better", "Between", "Beyond", "Bias", "Bible",
+    "Bicycle", "Bid", "Big", "Bike", "Bill", "Billy", "Bind", "Bird", "Birth", "Bit",
+    "Bite", "Bitter", "Black", "Blade", "Blame", "Blank", "Blanket", "Blast", "Blaze", "Bleach",
+    "Bleak", "Bleed", "Blend", "Bless", "Blew", "Blind", "Blink", "Bliss", "Blitz", "Block",
+    "Blond", "Blood", "Bloom", "Blossom", "Blow", "Blue", "Bluff", "Blunt", "Blur", "Blush",
+    "Board", "Boat", "Body", "Boil", "Bold", "Bolt", "Bomb", "Bond", "Bone", "Bonus",
+    "Book", "Boom", "Boost", "Boot", "Booth", "Border", "Bore", "Bore", "Born", "Borrow",
+    "Boss", "Both", "Bother", "Bottle", "Bottom", "Bought", "Boulder", "Bounce", "Bound", "Bounty",
+    "Bour", "Bout", "Boutique", "Bouton", "Bow", "Bow", "Bowel", "Bowl", "Box", "Boy",
+    "Brace", "Brace", "Bracelet", "Bracket", "Brain", "Brake", "Branch", "Brand", "Brass", "Brave",
+    "Brawny", "Breach", "Bread", "Break", "Breast", "Breath", "Breathe", "Bred", "Breed", "Breeze",
+    "Brew", "Brick", "Bridge", "Brief", "Bright", "Brilliant", "Bring", "Brink", "Brisk", "Brist",
+    "Broad", "Broad", "Broadcast", "Broken", "Bronze", "Brook", "Broom", "Broth", "Brother", "Brought",
+    "Brown", "Browse", "Brush", "Brutal", "Brute", "Bubble", "Buck", "Bucket", "Buckle", "Bud",
+    "Budget", "Buff", "Buffer", "Bug", "Build", "Built", "Bulk", "Bull", "Bullet", "Bump",
+    "Bunch", "Bundle", "Bunk", "Burden", "Bureau", "Burial", "Burl", "Burn", "Burst", "Bury",
+    "Bus", "Bush", "Bust", "Busy", "But", "Butcher", "Butt", "Butter", "Button", "Buy",
+    "Buzz", "Byte"
 ]
 
 # Name generation patterns (length combinations that work well)

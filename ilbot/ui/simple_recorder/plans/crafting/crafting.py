@@ -21,11 +21,13 @@ from typing import List, Dict
 import sys
 
 from ...actions import player, bank, inventory, objects, chat, widgets
+from ...actions.bank import deposit_inventory
 from ...actions.timing import wait_until
 from ...actions.travel import travel_to_bank, go_to
 from ...helpers.camera import setup_camera_optimal
 from ...helpers.phase_utils import set_phase_with_camera
-from ...helpers.utils import press_spacebar, sleep_exponential
+from ...helpers.utils import sleep_exponential, exponential_number
+from ...helpers.keyboard import press_spacebar
 from ...helpers.widgets import widget_exists
 from ...constants import JEWELRY_CRAFTING_WIDGETS
 
@@ -224,6 +226,10 @@ class CraftingPlan(Plan):
                     if not bank.is_open():
                         bank.open_bank()
                         return self.loop_interval_ms
+                if not inventory.is_empty():
+                    deposit_inventory()
+                    if not wait_until(inventory.is_empty, max_wait_ms=3000):
+                        return self.loop_interval_ms
                 sell_items = self.methods.get_crafted_jewelry_to_sell()
 
                     
@@ -278,23 +284,23 @@ class CraftingPlan(Plan):
                             "set_price": 1000
                         })
                         current_coins -= 1000
-            items_to_buy = self.methods.calculate_buy_items_from_budget(items_to_buy, current_coins)
+                items_to_buy = self.methods.calculate_buy_items_from_budget(items_to_buy, current_coins)
 
-            if items_to_buy:
-                # Create GE plan for buying only
-                self.ge_plan = GePlan(items_to_buy=items_to_buy, items_to_sell=[])
-                logging.info(f"[{self.id}] Created GE buy plan: {[item['name'] for item in items_to_buy]}")
-            else:
-                logging.warning(f"[{self.id}] No items to buy with current budget")
-                # Reset and try banking again
-                self.bank_plan.reset()
-                self.bank_plan_updated = False
-                delattr(self, 'ge_sell_phase_complete')
-                delattr(self, 'crafting_analysis')
-                self.set_phase("BANK")
-                return self.loop_interval_ms
+                if items_to_buy:
+                    # Create GE plan for buying only
+                    self.ge_plan = GePlan(items_to_buy=items_to_buy, items_to_sell=[])
+                    logging.info(f"[{self.id}] Created GE buy plan: {[item['name'] for item in items_to_buy]}")
+                else:
+                    logging.warning(f"[{self.id}] No items to buy with current budget")
+                    # Reset and try banking again
+                    self.bank_plan.reset()
+                    self.bank_plan_updated = False
+                    delattr(self, 'ge_sell_phase_complete')
+                    delattr(self, 'crafting_analysis')
+                    self.set_phase("BANK")
+                    return self.loop_interval_ms
             
-        # Execute buy phase
+        # Execute buy phase`
         ge_status = self.ge_plan.loop(ui)
         
         if ge_status == GePlan.SUCCESS:
@@ -319,7 +325,8 @@ class CraftingPlan(Plan):
             go_to("EDGEVILLE_BANK")
             return self.loop_interval_ms
 
-        if not inventory.has_item("gold bar") and not inventory.has_item("sapphire") and not inventory.has_item("leather"):
+        if ((not inventory.has_unnoted_item("gold bar") or not inventory.has_unnoted_item(self.bank_plan.required_items[2].get("name")))
+                and not inventory.has_unnoted_item("leather")):
             # Reset bank plan so it can run through the banking process again
             self.bank_plan.reset()
             self.bank_plan_updated = False  # Reset flag so we update bank plan again
@@ -346,7 +353,7 @@ class CraftingPlan(Plan):
             objects.click_object_closest_by_distance_simple("Furnace", "Smelt")
             if not wait_until(lambda: widget_exists(29229056)): # Crafting interface
                 return self.loop_interval_ms
-            time.sleep(0.5)
+            sleep_exponential(0.3, 0.8, 1.2)
             opts = widgets.get_crafting_options_rings()
             for widget in opts:
                 if widget.get('itemId') == 1635:

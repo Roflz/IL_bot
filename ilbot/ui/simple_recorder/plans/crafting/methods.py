@@ -263,12 +263,6 @@ class CraftingMethods:
                 materials["Gold bar"] = gold_bars
                 logging.info(f"[{self.id}] Bank has {gold_bars} Gold bar")
             
-            # Check for ball of wool
-            wool = bank.get_item_count("Ball of wool")
-            if wool > 0:
-                materials["Ball of wool"] = wool
-                logging.info(f"[{self.id}] Bank has {wool} Ball of wool")
-            
             return materials
             
         except Exception as e:

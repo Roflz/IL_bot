@@ -1,0 +1,9 @@
+python-dotenv==1.0.1
+selenium==4.24.0
+webdriver-manager==4.0.2
+imapclient==3.0.1
+beautifulsoup4==4.12.3
+google-api-python-client==2.147.0
+google-auth-oauthlib==1.2.1
+google-auth==2.35.0
+pywinauto==0.6.8

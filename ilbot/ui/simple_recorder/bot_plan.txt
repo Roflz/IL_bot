@@ -1,0 +1,273 @@
+f2p start:
+
+buy items:
+all beads
+2 iron ore
+2 iron bar
+1 redberry pie
+1 bread
+2 pot of flour
+1 bucket of milk
+1 egg
+23 balls of wool
+1 spade
+6 clay
+1 soft clay
+4 copper ore
+1 blue dye
+1 orange dye
+1 yellow dye
+1 redberries
+1 ashes
+2 bucket of water
+1 bronze bar
+1 pink skirt
+5 beers
+1 rope
+1 white apron
+10 banana
+1 cadava berries
+1 fish food
+1 poison
+1 hammer
+1 garlic
+1 iron chainbody
+1 bronze med helm
+25 bones
+2 cooked meat
+1 knife
+1 eye of newt
+1 onion
+3 goblin mail
+1 cabbage
+
+For combat/mage training:
+50 trout
+some cape
+wizard hat
+wizard robe top
+blue skirt
+staff of air
+5000 mind runes
+amulet of magic
+
+
+
+
+Questing flowthrough:
+1. Equip combat items, set autocast to wind strike
+2. withdraw from bank: 1 egg, 1 bucket of milk, 2 pot of flour, coins, mind runes, 1 spade, beads for imp catcher, 2 bucket of water, 1 cadava berries, 1 tinderbox, 1 knife, 1 redberries, 1 yellow dye, 3 balls of wool, 1 ashes, 1 soft clay
+3. Start demon slayer, get the first 2 keys that are in varrock.
+4. Do romeo and juliet
+5. home teleport to lumbridge
+6. do cooks assistant
+7. Start Rune mysteries
+8. start restless ghost
+9. start x marks the spot
+10. Start Prince Ali Rescue, talk to osman for first step of quest
+11. do first steps of x marks the spot in lumbridge
+12. do first steps of restless ghost, up until you have to go to wizards tower, do misthalin mystery on the way
+13. Navigate to the wizards tower, do imp catcher, grab the skull for restless ghost, and talk to archmage sedridor for rune mysteries to get the research package
+14. Go to draynor village, dig in next 2 spots for x marks the spot, do steps for prince ali rescue up to making the key mould.
+15. Bank, grab 25 bones, go back to wizards tower and exchange them for the 3rd demon slayer key
+16. Go to draynor village, buy chronicle from draynor and buy pages to put in it, equip it. Buy cursed goblin staff.
+17. Start Vampyre slayer
+18. Bank, grab Ancient casket, white apron, coins, spade, 10 bananas, onion, eye of newt, cooked meat, mind runes
+19. Do Pirates Treasure quest up until you get the key
+20. Talk to Veos to complete X marks the spot
+21. Use Lamp on Prayer
+22. Start Corsair Curse quest by talking to captain tok
+23. Go to rimmington, complete witches potion quest.
+24. Go to Falador
+25. Bank, grab mind runes, coins, 6 clay, 4 copper, 2 iron ore, 3 goblin mail, 1 orangge dye, 1 blue dye, 1 bronze med helm, 1 iron chainbody, 1 cabbage, and rest of inventory fill with trout
+26. Go to white knights castle, start black knights fortress and knights sword quests
+27. Go complete dorics quest, and goblin diplomacy, then do black knights fortress, don't go back to falador to complete black knights fortress yet, talk to willow to start below ice mountain
+28. Go to barbarian village and complete next step of Below Ice Mountain
+29. Go to Edgeville. Talk to marley for next step of below ice mountain
+30. Go to Varrock. Withdraw 1 cooked meat, 1 bread, 1 knife, 3 demon slayer keys, 1 chest key, 1 beer, rest of inventory take food.
+31. Go to Varrock Castle, talk to sir prysin to get silverlight
+32. Go to castle library, talk to reldo for knights sword quest
+33. Talk to Aris to get the incantation for demon slayer
+34. Go to Aubury in south east varrock for rune mysteries to get the notes
+35. Go to Blue Moon Inn in Varrock, do the next steps for Below Ice Mountain, Pirates Treasure, and Vampyre Slayer
+36. Go Kill Delrith
+37. Home Tele to lumbridge
+38. Bank, grab coins, skull, bronze bar, key print, 20 balls of wool
+39. Go finish restless ghost
+40. Go talk to osman in al kharid
+41. Go to draynor and complete sheep shearer on the way
+42. Bank at draynor, grab wig, paste, rope, 3 beers, pink skirt, research notes
+43. Go to wizards tower basement and talk to sedridor to finish rune mysteries
+44. Go talk to leela and then go to draynor jail to break ali out of there for Prince Ali Rescue
+45. Bank at draynor, deposit all, withdraw mind runes, amulet of magic (equip it), stake, garlic, hammer, fish food, poison, spade, food for fight againt vampyre
+46. go to draynor manor, talk to veronica outside to start ernest the chicken on ur way in
+47. go into draynor manor, go kill the vampyre to finish vampyre slayer.
+48. Complete Enerest the chicken
+49. Exit Draynor Manor, go bank at Draynor, withdraw 1 redberry pie, 2 iron bar, any pickaxe, rest food for Corsair Curse boss.
+50. Go finish corsair curse
+51. Then go finish knights sword.
+52. Go back to falador white knights castle to finish black knights fortress and knights sword.
+53. Grab a spade and finish pirates treasure by digging at the X in falador park
+54. Bank, withdraw steak sandwich, coins, mind runes, pickaxe, fill rest of inventory with food. go finish below Ice Mountain
+55. Lumbridge home teleport -> go to al kharid palace to copmlete prince ali rescue.
+And then we are done with all quests except Shield of Arrav and Dragon Slayer
+
+
+Skills to train:
+
+Woodcutting lvl 60
+- logs to lvl 15
+- oaks to lvl 30
+- willows to lvl 60
+- yews after that
+runecrafting lvl 27
+- gotr quest
+- then just run gotr
+- eventually craft high level runes
+fletching lvl 1
+- start w fletching headless arrows to lvl 55 or 60 or so
+- then fletch maple/yew/magics
+mining lvl 15 or 60 or 1
+magic lvl 55
+herblore lvl 60
+fletching lvl 63
+fishing lvl 65
+crafting lvl 38
+
+cooking
+- cook up to lvl 30
+- cook karambwans after that
+
+hunter
+- natural history quiz to lvl 9
+- bird house runs after that
+- requires: bone voyage quest, digsite quest, 100 kudos, 10 agility, 10 herblore, 25 thieving, find uncleaned necklace
+- for kudos: uncleaned finds = 50 kudos, quiz = 28 kudos, demon slayer + rune mysteries + hazeel cult + Merlins Crystal + Priest in Peril = 25 kudos,
+
+firemaking
+- burn logs til lvl 50
+- wintertodt after that
+
+fishing
+- req: 15 agil, 30 cooking, 5 fishing, druidic ritual, jungle potion
+- fish to lvl 65
+- then karambwans
+- possibly infernal or sacred eels
+
+Smithing
+- lvl 29 via knights sword
+- train 1 more lvl to lvl 30
+- blast furnace
+- req: started The Giant Dwarf Quest, lvl 50 Mining to get Ice Gloves, lvl  30 smithing to start Blast Furnace
+
+Farming
+- req: Visit Kourend once, Priest in Peril, maybe children of the sun.
+- start w low level crops and work upwards with levels
+
+Woodcutting
+- no reqs
+- train as much as is needed for any other quests, or just for heuristics
+
+Mining
+- lvl 30 - motherlode mine
+
+Fletching
+- start making headless arrows
+- at lvl 40-50 or so start fletching bows for profit
+
+Crafting
+- craft jewelery, whatever is good price/volume
+
+Thieving
+- lvl 50 or 55, for rogues equipment/knight of ardougne.
+
+Herblore
+- N/A whatever is needed for other skills
+
+Agility
+- N/A whatever is needed for other skills.
+
+Construction
+- N/A whatever is needed for other skills
+
+Runecrafting
+req: lvl 27, gotr quest, rune mysteries quest
+
+Magic
+req: whatever is needed for farming teleports/potentially alching or enchanting jewellery at some point
+
+1) Levels required per skill
+
+Agility: 15
+Construction: N/A
+Cooking: 30
+Crafting: N/A
+Firemaking: 50
+Farming: N/A
+Fishing: 65
+Fletching: 40–50
+Herblore: 10
+Hunter: 9
+Magic: N/A
+Mining: 50
+Runecrafting: 27
+Smithing: 30
+Thieving: 55
+Woodcutting: N/A
+
+2) Quest requirements
+
+Levels:
+15 agil, 30 cooking, 5 fishing, 10 herblore, 25 thieving
+
+Druidic Ritual
+Bone Voyage (req 100 kudos, dig site completed)
+The Digsite (req 10 agil, 10 herb, 25 thieving)
+Hazeel Cult
+Merlin’s Crystal
+Priest in Peril
+Jungle Potion
+Tai bwo wannai trio (15 agil, 30 cooking, 5 fishing)
+The Giant Dwarf (started)
+Enter the Abyss (+ 1000 RC exp)
+Guardians of the Rift (req 10 RC)
+
+3) Other requirements
+
+100 Kudos
+Visit Kourend once
+Ice Gloves
+Find uncleaned necklace
+
+4) Intended activity per skill (activity only)
+
+Cooking: cook to 30, then karambwans
+Hunter: Natural History Quiz to 9, then bird house runs
+Firemaking: burn logs to 50, then Wintertodt
+Fishing: fish to 65, then karambwans (possibly infernal/sacred eels)
+Smithing: Knight’s Sword to 29, then 30, then Blast Furnace
+Farming: low-level crops upward
+Woodcutting: train as needed for other quests/heuristics
+Mining: Motherlode Mine at 30
+Fletching: headless arrows, then bows for profit at ~40–50
+Crafting: jewelry (best price/volume)
+Thieving: 50–55 for rogues/knight of ardougne
+Herblore: as needed for other skills
+Agility: as needed for other skills
+Construction: as needed for other skills
+Runecrafting: GOTR
+Magic: farming teleports / alch / enchanting jewelry
+
+Members startup guide:
+Before members:
+follow quest guide
+train the following skills:
+Cooking -> lvl 30
+Firemaking -> lvl 50
+Fishing -> lvl 65
+Mining -> lvl 30
+Magic -> Splash to lvl 50s or so
+
+
+1. Druidic Ritual -> Herblore lvl 3
+2. Hazeel Cult -> Thieving -> lvl 11

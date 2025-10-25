@@ -14,7 +14,8 @@ from ..helpers.chat import (
     dialogue_is_open as _dialogue_is_open,
     get_dialogue_text_raw as _get_dialogue_text_raw,
 )
-from ..helpers.utils import press_spacebar, clean_rs
+from ..helpers.utils import clean_rs, rect_beta_xy
+from ..helpers.keyboard import press_spacebar
 
 
 def dialogue_is_open() -> bool:
@@ -194,8 +195,8 @@ def click_continue_widget() -> Optional[dict]:
             if widget_data.get("visible", False):
                 bounds = widget_data.get("bounds")
                 if bounds:
-                    x = bounds.get("x", 0) + bounds.get("width", 0) // 2
-                    y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+                    x, y = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                                         bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
                     
                     step = {
                         "action": "click-continue-widget",
@@ -212,8 +213,8 @@ def click_continue_widget() -> Optional[dict]:
             if widget_data.get("visible", False):
                 bounds = widget_data.get("bounds")
                 if bounds:
-                    x = bounds.get("x", 0) + bounds.get("width", 0) // 2
-                    y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+                    x, y = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                                         bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
                     
                     step = {
                         "action": "click-continue-widget",
@@ -418,8 +419,8 @@ def click_chat_message(search_text: str, case_sensitive: bool = False) -> Option
             return None
         
         # Calculate center coordinates
-        x = bounds.get("x", 0) + bounds.get("width", 0) // 2
-        y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+        x, y = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                             bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
         
         print(f"[CHAT] Clicking chat message at ({x}, {y}): {matching_message.get('full_text', '')[:50]}...")
         

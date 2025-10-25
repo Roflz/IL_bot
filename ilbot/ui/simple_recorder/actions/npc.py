@@ -5,6 +5,7 @@ import time
 from ..helpers.runtime_utils import ipc
 from ..helpers.npc import closest_npc_by_name, npc_action_index
 from ..helpers.rects import unwrap_rect, rect_center_xy
+from ..helpers.utils import sleep_exponential
 from .chat import dialogue_is_open, can_choose_option, can_continue, any_chat_active, option_exists, choose_option, continue_dialogue
 from .travel import _handle_door_opening, _first_blocking_door_from_waypoints
 from ..services.click_with_camera import click_npc_with_camera
@@ -72,12 +73,11 @@ def _find_closest_npc_in_area(name: str, area: str | tuple) -> Dict[str, Any] | 
     return closest_npc
 
 
-def click_npc_simple(name: str) -> Optional[dict]:
+def click_npc_simple(name: str, action: str) -> Optional[dict]:
     """
     Left-click an NPC by (partial) name. This version does NOT use pathing or door handling - direct click only.
     """
     max_retries = 3
-    expected_action = "Talk-to"
     
     for attempt in range(max_retries):
         fresh_npc = closest_npc_by_name(name)
@@ -92,25 +92,9 @@ def click_npc_simple(name: str) -> Optional[dict]:
         result = click_npc_with_camera(
             npc_name=fresh_npc.get("name"),
             world_coords=world_coords,
-            aim_ms=420
+            aim_ms=420,
+            action=action
         )
-        
-        if result:
-            # Wait up to 600ms for lastInteraction to update and verify
-            start_time = time.time()
-            while (time.time() - start_time) * 1000 < 600:
-                interaction_data = ipc.get_last_interaction()
-                last_interaction = interaction_data.get("interaction")
-                
-                if last_interaction:
-                    action = last_interaction.get("action", "")
-                    target_name = last_interaction.get("target_name", "")
-                    
-                    # Check if the interaction matches what we expect
-                    if expected_action in action and expected_target in target_name:
-                        return result
-                
-                time.sleep(0.05)  # 50ms
 
     return None
 
@@ -122,56 +106,53 @@ def click_npc_action(name: str, action: str) -> Optional[dict]:
       - Right-click + context-select if the desired action is at index > 0.
     If a CLOSED door lies on the path to the NPC, click the earliest blocking door first.
     """
-    max_retries = 3
-    
-    for attempt in range(max_retries):
-        # Use optimized find_npc command
-        npc_resp = ipc.find_npc(name)
-        
-        if not npc_resp or not npc_resp.get("ok") or not npc_resp.get("found"):
-            return None
-        
-        fresh_npc = npc_resp.get("npc")
-        print(f"[NPC_ACTION] Found NPC: {fresh_npc.get('name')} at distance {fresh_npc.get('distance')}")
-        print(f"[NPC_ACTION] NPC actions: {fresh_npc.get('actions')}")
+    # Use optimized find_npc command
+    npc_resp = ipc.find_npc(name)
 
-        # 1) Check for doors on the path to the NPC
-        gx, gy = fresh_npc.get("world", {}).get("x"), fresh_npc.get("world", {}).get("y")
-        if isinstance(gx, int) and isinstance(gy, int):
-            wps, dbg_path = ipc.path(goal=(gx, gy))
-            door_plan = _first_blocking_door_from_waypoints(wps)
-            if door_plan:
-                # Handle door opening with retry logic and recently traversed door tracking
-                if not _handle_door_opening(door_plan, wps):
-                    # Door opening failed after retries, continue to next attempt
-                    continue
-                else:
-                    return True
+    if not npc_resp or not npc_resp.get("ok") or not npc_resp.get("found"):
+        return None
 
-        # 2) Click the NPC action with pathing logic
-        rect = unwrap_rect(fresh_npc.get("clickbox"))
-        name_str = fresh_npc.get("name") or "NPC"
+    fresh_npc = npc_resp.get("npc")
+    print(f"[NPC_ACTION] Found NPC: {fresh_npc.get('name')} at distance {fresh_npc.get('distance')}")
+    print(f"[NPC_ACTION] NPC actions: {fresh_npc.get('actions')}")
 
-        # Determine anchor point
-        print(f"[NPC_ACTION] Checking coordinates - rect: {rect}, canvas: {fresh_npc.get('canvas')}")
+    # 1) Check for doors on the path to the NPC
+    gx, gy = fresh_npc.get("world", {}).get("x"), fresh_npc.get("world", {}).get("y")
+    if isinstance(gx, int) and isinstance(gy, int):
+        wps, dbg_path = ipc.path(goal=(gx, gy))
+        door_plan = _first_blocking_door_from_waypoints(wps)
+        if door_plan:
+            # Handle door opening with retry logic and recently traversed door tracking
+            if not _handle_door_opening(door_plan, wps):
+                # Door opening failed after retries, continue to next attempt
+                return False
+            else:
+                return True
 
-        # Get world coordinates for the NPC
-        world_coords = fresh_npc.get("world", {})
-        if not world_coords or not isinstance(world_coords.get("x"), int) or not isinstance(world_coords.get("y"), int):
-            print(f"[NPC_ACTION] No valid world coordinates for NPC, trying next attempt")
-            continue
+    # 2) Click the NPC action with pathing logic
+    rect = unwrap_rect(fresh_npc.get("clickbox"))
+    name_str = fresh_npc.get("name") or "NPC"
 
-        result = click_npc_with_camera(
-            npc_name=name_str,
-            action=action,
-            world_coords=world_coords,
-            aim_ms=420
-        )
-        
-        print(f"[NPC_ACTION] Click result: {result}")
-        
-        if result:
-            return result
+    # Determine anchor point
+    print(f"[NPC_ACTION] Checking coordinates - rect: {rect}, canvas: {fresh_npc.get('canvas')}")
+
+    # Get world coordinates for the NPC
+    world_coords = fresh_npc.get("world", {})
+    if not world_coords or not isinstance(world_coords.get("x"), int) or not isinstance(world_coords.get("y"), int):
+        print(f"[NPC_ACTION] No valid world coordinates for NPC, trying next attempt")
+        return None
+
+    result = click_npc_with_camera(
+        npc_name=name_str,
+        action=action,
+        world_coords=world_coords,
+        aim_ms=420
+    )
+
+    print(f"[NPC_ACTION] Click result: {result}")
+
+    if result:
+        return result
 
     return None
 
@@ -227,7 +208,6 @@ def chat_with_npc(npc_name: str, options: Optional[List[str]] = None, max_wait_m
     if not dialogue_is_open() and not can_choose_option() and not can_continue():
         # Click on the NPC to start conversation
         result = click_npc_action(npc_name, "Talk-to")
-        # result = check_door_traversal(3098, 3107, 0, max_time=3.0)
         if result is None:
             return None
         
@@ -236,7 +216,7 @@ def chat_with_npc(npc_name: str, options: Optional[List[str]] = None, max_wait_m
         while not dialogue_is_open() and not can_choose_option():
             if (time.time() - start_time) * 1000 > max_wait_ms:
                 return None
-            time.sleep(0.1)
+            sleep_exponential(0.05, 0.15, 1.5)
         
         return result
     

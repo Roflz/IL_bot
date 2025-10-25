@@ -5,6 +5,7 @@ from typing import Optional, List, Dict, Any
 from . import tab
 from .timing import wait_until
 from ..helpers.runtime_utils import ipc, ui, dispatch
+from ..helpers.utils import rect_beta_xy
 
 
 def get_combat_styles() -> List[Dict[str, Any]]:
@@ -86,8 +87,8 @@ def select_combat_style(style_index: int) -> Optional[dict]:
         return None
     
     # Calculate center coordinates
-    x = bounds["x"] + bounds["width"] // 2
-    y = bounds["y"] + bounds["height"] // 2
+    x, y = rect_beta_xy((bounds["x"], bounds["x"] + bounds["width"],
+                         bounds["y"], bounds["y"] + bounds["height"]), alpha=2.0, beta=2.0)
     
     print(f"[COMBAT] Selecting combat style {style_index} at ({x}, {y})")
     
@@ -172,8 +173,8 @@ def select_auto_retaliate() -> Optional[dict]:
         return None
     
     # Calculate center coordinates
-    x = bounds["x"] + bounds["width"] // 2
-    y = bounds["y"] + bounds["height"] // 2
+    x, y = rect_beta_xy((bounds["x"], bounds["x"] + bounds["width"],
+                         bounds["y"], bounds["y"] + bounds["height"]), alpha=2.0, beta=2.0)
     
     print(f"[COMBAT] Toggling auto retaliate at ({x}, {y})")
     

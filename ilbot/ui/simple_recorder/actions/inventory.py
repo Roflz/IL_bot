@@ -3,9 +3,11 @@ import time
 from . import tab
 from .tab import open_tab
 from .timing import wait_until
-from ..helpers.inventory import inv_has, inv_has_any, get_item_coordinates, inv_count, first_inv_slot, inv_slot_bounds
+from ..helpers.inventory import inv_has, inv_has_any, get_item_coordinates, inv_count, first_inv_slot
 from ..helpers.runtime_utils import ipc, ui, dispatch
 from ..helpers.tab import is_inventory_tab_open
+from ..helpers.utils import sleep_exponential, rect_beta_xy, clean_rs
+from ..helpers.rects import unwrap_rect, rect_center_xy
 
 from typing import Optional, Callable, List
 
@@ -206,126 +208,23 @@ def use_item_on_item(item1_name: str, item2_name: str, max_retries: int = 3) -> 
     Returns:
         UI dispatch result or None if failed
     """
-    # Ensure inventory tab is open before using items
-    if not tab.is_tab_open("INVENTORY"):
-        if not tab.ensure_tab_open("INVENTORY"):
-            return None
-    
     # Check if both items exist in inventory
     if not has_item(item1_name):
         return None
     if not has_item(item2_name):
         return None
-    
-    # Find the items in inventory
-    inventory_data = ipc.get_inventory() or {}
-    items = inventory_data.get("slots", [])
-    item1 = None
-    item2 = None
-    
-    for item in items:
-        item_name = (item.get("itemName") or "").strip()
-        if not item_name:  # Skip empty slots
-            continue
-            
-        # Exact match for item1 (the "using" item)
-        if item1 is None and item_name.lower() == item1_name.lower():
-            item1 = item
-        # Exact match for item2 (the "target" item)  
-        elif item2 is None and item_name.lower() == item2_name.lower():
-            item2 = item
-            
-        if item1 and item2:
-            break
-    
-    if not item1 or not item2:
-        return None
-    
-    # Get click coordinates for both items
-    item1_coords = get_item_coordinates(item1)
-    item2_coords = get_item_coordinates(item2)
-    
-    if not item1_coords or not item2_coords:
-        return None
-    
-    # Click first item with retry logic
-    for attempt in range(max_retries):
-        # Get fresh inventory data and item coordinates on each retry
-        fresh_inventory_data = ipc.get_inventory() or {}
-        fresh_items = fresh_inventory_data.get("slots") or []
-        fresh_item1 = None
-        
-        for item in fresh_items:
-            item_name = (item.get("itemName") or "").strip()
-            if item_name and item_name.lower() == item1_name.lower():
-                fresh_item1 = item
-                break
-        
-        if not fresh_item1:
-            return None
-            
-        fresh_item1_coords = get_item_coordinates(fresh_item1)
-        if not fresh_item1_coords:
-            return None
-        
-        step1 = {
-            "action": "inventory-use-item",
-            "click": {"type": "point", "x": fresh_item1_coords[0], "y": fresh_item1_coords[1]},
-            "target": {"domain": "inventory", "name": item1_name},
-            "max_retries": 1,
-            "expected_action": "Use",
-            "expected_target": item1_name
-        }
-        result1 = dispatch(step1)
-        
-        if result1:
-            time.sleep(0.2)
-            break
-            
-        if attempt < max_retries - 1:
-            time.sleep(0.5)
-    
+
+    result1 = interact(item1_name, "Use")
+
     if not result1:
         return None
-    
-    # Click second item with retry logic
-    for attempt in range(max_retries):
-        # Get fresh inventory data and item coordinates on each retry
-        fresh_inventory_data = ipc.get_inventory() or {}
-        fresh_items = fresh_inventory_data.get("slots") or []
-        fresh_item2 = None
-        
-        for item in fresh_items:
-            item_name = (item.get("itemName") or "").strip()
-            if item_name and item_name.lower() == item2_name.lower():
-                fresh_item2 = item
-                break
-        
-        if not fresh_item2:
-            return None
-            
-        fresh_item2_coords = get_item_coordinates(fresh_item2)
-        if not fresh_item2_coords:
-            return None
-        
-        step2 = {
-            "action": "inventory-use-on-item",
-            "click": {"type": "point", "x": fresh_item2_coords[0], "y": fresh_item2_coords[1]},
-            "target": {"domain": "inventory", "name": item2_name},
-            "max_retries": 1,
-            "expected_action": "Use",
-            "expected_target": item2_name
-        }
-        result2 = dispatch(step2)
-        
-        if result2:
-            return result2
-            
-        if attempt < max_retries - 1:
-            time.sleep(0.2)
-    
-    return None
 
+    sleep_exponential(0.3, 0.8)
+
+    from ilbot.ui.simple_recorder.actions import objects
+    result2 = interact(item2_name, "Use", exact_match=False)
+
+    return result2
 
 def use_item_on_object(item_name: str, object_name: str, max_retries: int = 3) -> Optional[dict]:
     """
@@ -339,159 +238,21 @@ def use_item_on_object(item_name: str, object_name: str, max_retries: int = 3) -
     Returns:
         UI dispatch result or None if failed
     """
-    # Ensure inventory tab is open before using items
-    if not tab.is_tab_open("INVENTORY"):
-        tab.open_inventory_tab()
-        return None
-    
     # Check if item exists in inventory
     if not has_item(item_name):
         return None
-    
-    # Find the item in inventory
-    inventory_data = ipc.get_inventory() or {}
-    items = inventory_data.get("slots", [])
-    item = None
-    
-    for inv_item in items:
-        inv_item_name = (inv_item.get("itemName") or "").strip()
-        if not inv_item_name:  # Skip empty slots
-            continue
-            
-        # Exact match for the item
-        if inv_item_name.lower() == item_name.lower():
-            item = inv_item
-            break
-    
-    if not item:
-        return None
-    
-    # Get click coordinates for the item
-    item_coords = get_item_coordinates(item)
-    if not item_coords:
-        return None
-    
-    # Click the item with retry logic
-    for attempt in range(max_retries):
-        # Get fresh inventory data and item coordinates on each retry
-        fresh_inventory_data = ipc.get_inventory() or {}
-        fresh_items = fresh_inventory_data.get("slots") or []
-        fresh_item = None
-        
-        for inv_item in fresh_items:
-            inv_item_name = (inv_item.get("itemName") or "").strip()
-            if inv_item_name and inv_item_name.lower() == item_name.lower():
-                fresh_item = inv_item
-                break
-        
-        if not fresh_item:
-            return None
-            
-        fresh_item_coords = get_item_coordinates(fresh_item)
-        if not fresh_item_coords:
-            return None
-        
-        step1 = {
-            "action": "inventory-use-item",
-            "click": {"type": "point", "x": fresh_item_coords[0], "y": fresh_item_coords[1]},
-            "target": {"domain": "inventory", "name": item_name},
-            "max_retries": 1,
-            "expected_action": "Use",
-            "expected_target": item_name
-        }
-        result1 = dispatch(step1)
-        
-        if result1:
-            break
-            
-        if attempt < max_retries - 1:
-            time.sleep(0.2)
-    
+
+    result1 = interact(item_name, "Use")
+
     if not result1:
         return None
+
+    sleep_exponential(0.3, 0.8)
+
+    from ilbot.ui.simple_recorder.actions import objects
+    result2 = objects.click_object_closest_by_distance_simple(object_name, f"Use")
     
-    # Now click on the game object with retry logic
-    for attempt in range(max_retries):
-        # Get fresh object data for object search
-        objects_data = ipc.get_objects() or {}
-        
-        # Search for the game object
-        objs = (objects_data.get("closestGameObjects") or []) + (objects_data.get("gameObjects") or [])
-        target_obj = None
-        
-        for obj in objs:
-            obj_name = (obj.get("name") or "").strip()
-            if not obj_name:
-                continue
-                
-            # Partial match for object name
-            if object_name.lower() in obj_name.lower():
-                target_obj = obj
-                break
-        
-        # IPC fallback if not found in objects data
-        if target_obj is None:
-            resp = ipc.get_objects(object_name, ["WALL", "GAME", "DECOR", "GROUND"]) or {}
-            found = resp.get("objects") or []
-            if found:
-                # Choose closest object
-                player_data = ipc.get_player() or {}
-                me = player_data.get("player") or {}
-                me_x = me.get("worldX") if isinstance(me.get("worldX"), int) else player_data.get("worldX")
-                me_y = me.get("worldY") if isinstance(me.get("worldY"), int) else player_data.get("worldY")
-                
-                def obj_wxy_p(o):
-                    w = o.get("world") or {}
-                    ox = w.get("x", o.get("worldX"))
-                    oy = w.get("y", o.get("worldY"))
-                    return ox, oy
-                
-                scored = []
-                for o in found:
-                    ox, oy = obj_wxy_p(o)
-                    if isinstance(me_x, int) and isinstance(me_y, int) and isinstance(ox, int) and isinstance(oy, int):
-                        dist = abs(ox - me_x) + abs(oy - me_y)
-                    else:
-                        dist = 10**9
-                    scored.append((dist, o))
-                
-                scored.sort(key=lambda t: t[0])
-                target_obj = scored[0][1]
-        
-        if not target_obj:
-            return None
-        
-        # Get object click coordinates
-        from ..helpers.rects import unwrap_rect, rect_center_xy
-        rect = unwrap_rect(target_obj.get("clickbox")) or unwrap_rect(target_obj.get("bounds"))
-        if rect:
-            cx, cy = rect_center_xy(rect)
-            point = {"x": cx, "y": cy}
-            anchor = {"bounds": rect}
-        elif isinstance(target_obj.get("canvasX"), (int, float)) and isinstance(target_obj.get("canvasY"), (int, float)):
-            cx, cy = int(target_obj["canvasX"]), int(target_obj["canvasY"])
-            point = {"x": cx, "y": cy}
-            anchor = {}
-        else:
-            return None
-        
-        step2 = {
-            "action": "inventory-use-on-object",
-            "click": ({"type": "rect-center"} if rect else {"type": "point", **point}),
-            "target": {"domain": "object", "name": object_name, **anchor},
-            "max_retries": 1,
-            "expected_action": "Use",
-            "expected_target": object_name
-        }
-        result2 = dispatch(step2)
-        
-        if result2:
-            return result2
-            
-        if attempt < max_retries - 1:
-            time.sleep(0.2)
-    
-    return None
+    return result2
 
 
 def inventory_has_amount(item_name: str, expected_amount: int) -> bool:
@@ -510,13 +271,14 @@ def inventory_has_amount(item_name: str, expected_amount: int) -> bool:
     return current_count >= expected_amount
 
 
-def interact(item_name: str, menu_option: str) -> Optional[dict]:
+def interact(item_name: str, menu_option: str, exact_match: bool = False) -> Optional[dict]:
     """
     Context-click an inventory item and select a specific menu option.
     
     Args:
         item_name: Name of the item to interact with
         menu_option: Menu option to select (e.g., "Use", "Drop", "Examine")
+        exact_match: If True, only matches exact target and action names; if False, uses substring matching
     
     Returns:
         UI dispatch result or None if failed
@@ -525,34 +287,58 @@ def interact(item_name: str, menu_option: str) -> Optional[dict]:
         print(f"[INVENTORY] Opening inventory tab before interacting with {item_name}")
         open_tab("INVENTORY")
         # Wait a moment for the tab to open
-        time.sleep(0.2)
+        sleep_exponential(0.1, 0.3, 1.5)
     
     # Ensure we're still on inventory tab before proceeding
     if not is_inventory_tab_open():
         print(f"[INVENTORY] Failed to open inventory tab, aborting interaction")
         return None
     
-    # Find the item in inventory
-    item = first_inv_slot(item_name)
-    if not item:
-        return None
+    # Inner attempt loop with fresh coordinate recalculation
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        # Fresh coordinate recalculation
+        item = first_inv_slot(item_name)
+        if not item:
+            continue
+        
+        bounds = item.get("bounds")
+        if not bounds:
+            continue
+        
+        # Calculate center coordinates
+        x, y = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                             bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
+        
+        # Context-click the item
+        step = {
+            "action": "inventory-interact",
+            "click": {"type": "point", "x": int(x), "y": int(y)},
+            "target": {"domain": "inventory", "name": item_name, "menu_option": menu_option},
+        }
+        
+        result = dispatch(step)
+        
+        if result:
+            # Check if the correct interaction was performed
+            from ..helpers.ipc import get_last_interaction
+            last_interaction = get_last_interaction()
+            
+            expected_target = item_name
+            expected_action = menu_option
+            
+            # Use exact match or contains based on exact_match parameter
+            target_match = (clean_rs(last_interaction.get("target", "")).lower() == expected_target.lower()) if exact_match else (expected_target.lower() in clean_rs(last_interaction.get("target", "")).lower())
+            action_match = (clean_rs(last_interaction.get("action", "")).lower() == expected_action.lower()) if exact_match else (expected_action.lower() in clean_rs(last_interaction.get("action", "")).lower())
+            
+            if last_interaction and target_match and action_match:
+                print(f"[CLICK] {expected_target} ({menu_option}) - interaction verified")
+                return result
+            else:
+                print(f"[CLICK] {expected_target} ({menu_option}) - incorrect interaction, retrying...")
+                continue
     
-    # Get item bounds
-    bounds = item.get("bounds")
-    if not bounds:
-        return None
-    
-    # Calculate center coordinates
-    x = bounds.get("x", 0) + bounds.get("width", 0) // 2
-    y = bounds.get("y", 0) + bounds.get("height", 0) // 2
-    
-    # Context-click the item
-    step = {
-        "action": "inventory-interact",
-        "click": {"type": "point", "x": int(x), "y": int(y)},
-        "target": {"domain": "inventory", "name": item_name, "menu_option": menu_option},
-    }
-    return dispatch(step)
+    return None
 
 
 def is_full() -> bool:

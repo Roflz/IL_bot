@@ -6,6 +6,7 @@ from typing import List, Dict, Optional, Any
 
 from .npc import click_npc_simple
 from ..helpers.runtime_utils import ipc, ui, dispatch
+from ..helpers.utils import sleep_exponential, rect_beta_xy
 
 def get_spells() -> List[Dict[str, Any]]:
     """
@@ -56,18 +57,25 @@ def select_spell(spell_name: str) -> Optional[Dict]:
     if not target_spell.get("visible", False) or not target_spell.get("hasListener", False):
         return None
     
-    # Get click coordinates
-    canvas = target_spell.get("canvas", {})
-    if not canvas.get("x") or not canvas.get("y"):
-        return None
+    # Get click coordinates from bounds first, then fallback to canvas
+    bounds = target_spell.get("bounds", {})
+    if bounds and bounds.get("width", 0) > 0 and bounds.get("height", 0) > 0:
+        x, y = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                             bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
+    else:
+        # Fallback to canvas coordinates
+        canvas = target_spell.get("canvas", {})
+        if not canvas.get("x") or not canvas.get("y"):
+            return None
+        x, y = canvas.get("x"), canvas.get("y")
     
     # Create click action
     step = {
         "action": "click-spell",
         "click": {
             "type": "point",
-            "x": int(canvas["x"]),
-            "y": int(canvas["y"])
+            "x": x,
+            "y": y
         },
         "target": {
             "domain": "spell",
@@ -152,14 +160,14 @@ def cast_spell(spell_name: str, target_name: str = None, target_type: str = "npc
     
     # Wait a moment for spell selection to register
     import time
-    time.sleep(0.1)
+    sleep_exponential(0.05, 0.15, 1.5)
     
     # Now find and click the target
     if target_type == "object":
         from .objects import click
         return click(target_name)
     elif target_type == "npc":
-        return click_npc_simple(target_name)
+        return click_npc_simple(target_name, "Cast")
     elif target_type == "item":
         from .inventory import interact
         return interact(target_name, "Cast")

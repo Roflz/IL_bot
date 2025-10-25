@@ -7,29 +7,8 @@ import json
 from datetime import datetime
 from ..helpers.runtime_utils import ui, dispatch, ipc
 from ..helpers.widgets import widget_exists, get_widget_info
+from ..helpers.utils import sleep_exponential, rect_beta_xy
 
-# Timing instrumentation
-_TIMING_ENABLED = True
-_TIMING_FILE = "widgets.timing.jsonl"
-
-def _mark_timing(label: str) -> int:
-    """Mark a timing point and return nanoseconds timestamp."""
-    return time.perf_counter_ns()
-
-def _emit_timing(data: dict):
-    """Emit timing data as JSONL."""
-    if not _TIMING_ENABLED:
-        return
-    
-    data["ts"] = datetime.now().isoformat()
-    print(f"[WIDGET_TIMING] {json.dumps(data)}")
-    
-    # Also write to file
-    try:
-        with open(_TIMING_FILE, "a") as f:
-            f.write(json.dumps(data) + "\n")
-    except Exception:
-        pass  # Don't fail if we can't write to file
 
 def click_widget(widget_id: int) -> Optional[dict]:
     """
@@ -41,60 +20,26 @@ def click_widget(widget_id: int) -> Optional[dict]:
     Returns:
         UI dispatch result or None if failed
     """
-    # Timing instrumentation
-    t0_start = _mark_timing("start")
-    timing_data = {
-        "phase": "widget_click_timing",
-        "widget_id": widget_id,
-        "ok": True,
-        "error": None,
-        "dur_ms": {},
-        "counts": {"checks": 0}
-    }
     
     try:
-        # Check if widget exists and is visible
-        t1_check_exists = _mark_timing("check_exists")
-        timing_data["dur_ms"]["check_exists"] = (t1_check_exists - t0_start) / 1_000_000
-        timing_data["counts"]["checks"] += 1
         
         if not widget_exists(widget_id):
-            timing_data["ok"] = False
-            timing_data["error"] = "Widget does not exist"
-            _emit_timing(timing_data)
             return None
-        
-        # Get widget info to get coordinates
-        t2_get_info = _mark_timing("get_info")
-        timing_data["dur_ms"]["get_info"] = (t2_get_info - t1_check_exists) / 1_000_000
         
         widget_info = get_widget_info(widget_id)
         if not widget_info:
-            timing_data["ok"] = False
-            timing_data["error"] = "Could not get widget info"
-            _emit_timing(timing_data)
             return None
         
         widget_data = widget_info.get("data", {})
         bounds = widget_data.get("bounds")
         
         if not bounds:
-            timing_data["ok"] = False
-            timing_data["error"] = "No bounds found"
-            _emit_timing(timing_data)
             return None
         
-        # Calculate center coordinates
-        t3_calculate = _mark_timing("calculate")
-        timing_data["dur_ms"]["calculate"] = (t3_calculate - t2_get_info) / 1_000_000
-        
-        x = bounds.get("x", 0) + bounds.get("width", 0) // 2
-        y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+        x, y = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                            bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
         
         # Click on the widget
-        t4_dispatch = _mark_timing("dispatch")
-        timing_data["dur_ms"]["dispatch"] = (t4_dispatch - t3_calculate) / 1_000_000
-        
         step = {
             "action": "widget-click",
             "click": {"type": "point", "x": int(x), "y": int(y)},
@@ -102,18 +47,9 @@ def click_widget(widget_id: int) -> Optional[dict]:
         }
         result = dispatch(step)
         
-        t5_complete = _mark_timing("complete")
-        timing_data["dur_ms"]["total"] = (t5_complete - t0_start) / 1_000_000
-        _emit_timing(timing_data)
-        
         return result
     
     except Exception as e:
-        t6_error = _mark_timing("error")
-        timing_data["ok"] = False
-        timing_data["error"] = str(e)
-        timing_data["dur_ms"]["total"] = (t6_error - t0_start) / 1_000_000
-        _emit_timing(timing_data)
         return None
 
 def click_widget_by_text(widget_id: int, text: str) -> Optional[dict]:
@@ -136,8 +72,8 @@ def click_widget_by_text(widget_id: int, text: str) -> Optional[dict]:
         if widget.get("id") == widget_id and text.lower() in widget.get("text", "").lower():
             bounds = widget.get("bounds")
             if bounds:
-                x = bounds.get("x", 0) + bounds.get("width", 0) // 2
-                y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+                x, y = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                                     bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
                 
                 step = {
                     "action": "widget-click",
@@ -280,8 +216,8 @@ def get_widget_center(widget_id: int) -> Optional[tuple[int, int]]:
     if not bounds:
         return None
     
-    x = bounds.get("x", 0) + bounds.get("width", 0) // 2
-    y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+    x, y = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                        bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
     return (int(x), int(y))
 
 def click_widget_relative(widget_id: int, offset_x: int = 0, offset_y: int = 0) -> Optional[dict]:
@@ -489,7 +425,7 @@ def wait_for_widget(widget_id: int, timeout: float = 5.0) -> bool:
     while time.time() - start_time < timeout:
         if widget_exists(widget_id) and is_widget_visible(widget_id):
             return True
-        time.sleep(0.1)
+        sleep_exponential(0.05, 0.15, 1.5)
     
     return False
 
@@ -512,7 +448,7 @@ def wait_for_widget_text(widget_id: int, expected_text: str, timeout: float = 5.
         widget_text = get_widget_text(widget_id)
         if widget_text and expected_text.lower() in widget_text.lower():
             return True
-        time.sleep(0.1)
+        sleep_exponential(0.05, 0.15, 1.5)
     
     return False
 
@@ -728,8 +664,8 @@ def click_chat_continue() -> Optional[dict]:
         return None
     
     # Calculate center coordinates
-    x = bounds.get("x", 0) + bounds.get("width", 0) // 2
-    y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+    x, y = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                         bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
     
     # Click on the continue widget
     step = {

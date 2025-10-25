@@ -48,6 +48,18 @@ def set_action_executor(executor_instance):
     global _action_executor
     _action_executor = executor_instance
 
+# Global rule parameters
+_rule_params = None
+
+def get_rule_params():
+    """Get the global rule parameters."""
+    return _rule_params
+
+def set_rule_params(params):
+    """Set the global rule parameters."""
+    global _rule_params
+    _rule_params = params
+
 # ===== UTILITY FUNCTIONS =====
 
 def dispatch(step):
@@ -85,3 +97,9 @@ class _Ref:
 # Create references that will always get the current value
 ipc = _Ref(lambda: _ipc)
 ui = _Ref(lambda: _ui)
+
+# Rule params reference
+def _get_rule_params():
+    if _rule_params is None:
+        return None
+    return _rule_params

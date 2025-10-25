@@ -24,24 +24,28 @@ from .base import Plan
 from ..helpers import quest
 from ..helpers.tab import tab_exists
 from ..helpers.widgets import get_widget_text, rect_center_from_widget, get_character_design_widgets, get_character_design_main, get_character_design_button_realtime, get_all_character_design_buttons, widget_exists, character_design_widget_exists, get_widget_info
-from ..helpers.utils import press_enter, press_backspace, press_esc, press_spacebar, clean_rs
+from ..helpers.utils import clean_rs, sleep_exponential
+from ..helpers.keyboard import press_enter, press_esc, press_backspace, press_spacebar
+from ..helpers.camera import setup_camera_optimal
+from ..helpers.phase_utils import set_phase_with_camera
 
 class TutorialIslandPlan(Plan):
     id = "TUTORIAL_ISLAND"
     label = "Tutorial Island Completion"
 
-    def __init__(self):
+    def __init__(self, credentials_file: str = None):
         self.state = {"phase": "START_TUTORIAL"}
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
+        self.credentials_file = credentials_file
+        self.character_name = None  # Will store the final character name
+        self.credentials_renamed = False  # Track if we've already renamed the file
         
         # Set up camera immediately during initialization
-        from ilbot.ui.simple_recorder.helpers.camera import setup_camera_optimal
         setup_camera_optimal()
 
 
     def set_phase(self, phase: str, camera_setup: bool = True):
-        from ..helpers.phase_utils import set_phase_with_camera
         return set_phase_with_camera(self, phase, camera_setup)
 
     def loop(self, ui):
@@ -75,6 +79,14 @@ class TutorialIslandPlan(Plan):
                             # Name is available, click SET_NAME button
                             if click_tutorial_set_name():
                                 logging.info("[TUTORIAL] SET_NAME button clicked, waiting for window to close...")
+                                # Store the character name for credentials renaming
+                                self.character_name = get_widget_text(36569100)
+                                logging.info(f"[TUTORIAL] Character name set to: {self.character_name}")
+                                
+                                # Rename credentials file if specified
+                                if self.credentials_file and not self.credentials_renamed:
+                                    self._rename_credentials_file()
+                                
                                 wait_until(lambda: widget_exists(44498948))
                                 return
                             else:
@@ -111,13 +123,13 @@ class TutorialIslandPlan(Plan):
                                                     "target": {"domain": "tutorial", "name": "name_input_focus"}
                                                 }
                                                 dispatch(step)
-                                                time.sleep(0.5)  # Wait for focus
+                                                sleep_exponential(0.3, 0.8, 1.2)  # Wait for focus
                                         # Now backspace to clear the field
                                         for _ in range(len(current_text)):
                                             press_backspace()
-                                            time.sleep(0.05)
+                                            sleep_exponential(0.03, 0.08, 1.5)
                                         # Wait a moment for backspacing to complete
-                                        time.sleep(0.5)
+                                        sleep_exponential(0.3, 0.8, 1.2)
                                         return
                                     elif status_text and "available" in status_text.lower():
                                         return
@@ -135,28 +147,26 @@ class TutorialIslandPlan(Plan):
                 return
 
             case "CHARACTER_CREATION": #WORKING! RUN WITHOUT BREAKPOINTS
-                if not widget_exists(44498948):
+                if not widget_exists(44498948) and widget_exists(60882944):
+                    widgets.click_widget(60882951)
+                    return
+                if wait_until(lambda: not widget_exists(44498948) and not widget_exists(60882944), max_wait_ms=600):
                     self.set_phase("TALK_TO_GUIDE", ui)
                     return
 
                 # Get all character design buttons via real-time IPC
                 logging.info("[TUTORIAL] Attempting to get character design buttons...")
                 design_buttons = get_all_character_design_buttons()
-                logging.info(f"[TUTORIAL] get_all_character_design_buttons() returned: {design_buttons}")
                 
                 if design_buttons:
                     logging.info(f"[TUTORIAL] Found {len(design_buttons)} character design buttons via IPC")
                     
                     # Customize character appearance
                     from ilbot.ui.simple_recorder.actions.character import customize_character_appearance
-                    customize_character_appearance(design_buttons)
+                    customize_character_appearance(design_buttons, "TUTORIAL")
                 else:
                     logging.info("[TUTORIAL] No character design buttons found via IPC")
-                
-                # Move to next phase after customization
-                if not wait_until(lambda: not widget_exists(44498948)):
-                    return
-                self.set_phase("TALK_TO_GUIDE", ui)
+
                 return
 
             case "TALK_TO_GUIDE":
@@ -219,7 +229,7 @@ class TutorialIslandPlan(Plan):
                 if chat.dialogue_contains_text("Woodcutting"):
                     if not inventory.has_item("logs"):
                         if not player.get_player_animation() == "CHOPPING":
-                            objects.click("Tree", "Chop down")
+                            objects.click_object_closest_by_distance_simple("Tree", "Chop down")
                             wait_until(lambda: player.get_player_animation() == "CHOPPING", max_wait_ms=3000)
                             if not wait_until(lambda: inventory.has_item("logs")):
                                 return
@@ -243,7 +253,7 @@ class TutorialIslandPlan(Plan):
                 elif inventory.has_items(["Bronze axe", "Tinderbox"]):
                     if not inventory.has_item("logs"):
                         if not player.get_player_animation() == "CHOPPING":
-                            objects.click("Tree", "Chop down")
+                            objects.click_object_closest_by_path_simple("Tree", "Chop down")
                             wait_until(lambda: player.get_player_animation() == "CHOPPING", max_wait_ms=3000)
                             return
                     elif not player.get_player_animation() == "FIREMAKING":
@@ -288,7 +298,7 @@ class TutorialIslandPlan(Plan):
                     self.set_phase("MINING_TUTORIAL")
                     return
                 if chat.dialogue_contains_text("caves.") or chat.dialogue_contains_text("ready to move on"):
-                    objects.click("Ladder", "Climb-down")
+                    objects.click_object_closest_by_path_simple("Ladder", "Climb-down")
                     wait_until(lambda: player.get_y() > 9000)
                     return
                 if chat.dialogue_contains_text("flashing icon"):
@@ -307,7 +317,7 @@ class TutorialIslandPlan(Plan):
                     return
                 if inventory.has_item("hammer"):
                     if inventory.has_item("bronze bar"):
-                        objects.click("Anvil", "Smith")
+                        objects.click_object_closest_by_path_simple("Anvil", "Smith")
                         if not wait_until(lambda: widgets.smithing_interface_open()):
                             return
                         widgets.click_widget(20447241) # bronze dagger in smithing interface
@@ -317,15 +327,15 @@ class TutorialIslandPlan(Plan):
 
                 if inventory.has_item("Bronze pickaxe"):
                     if not inventory.has_item("Tin ore") and not inventory.has_item("bronze bar"):
-                        objects.click('Tin rocks')
+                        objects.click_object_closest_by_distance_simple('Tin rocks')
                         wait_until(lambda: inventory.has_item("Tin ore"))
                         return
                     if not inventory.has_item("Copper ore") and not inventory.has_item("bronze bar"):
-                        objects.click('Copper rocks')
+                        objects.click_object_closest_by_distance_simple('Copper rocks')
                         wait_until(lambda: inventory.has_item("Copper ore"))
                         return
                     if inventory.has_items({"Copper ore": 1, "Tin ore": 1}):
-                        objects.click("Furnace", "Use")
+                        objects.click_object_closest_by_distance_simple("Furnace", "Use")
                         wait_until(lambda: inventory.has_item("Bronze bar"))
                         return
                 if not npc.closest_npc_by_name("Mining Instructor"):
@@ -345,7 +355,7 @@ class TutorialIslandPlan(Plan):
                     self.set_phase("BANK_TUTORIAL")
                     return
                 if chat.dialogue_contains_text("just talk to the combat instructor"):
-                    objects.click("Ladder", "Climb-up")
+                    objects.click_object_closest_by_path_simple("Ladder", "Climb-up")
                     wait_until(lambda: player.get_y() < 9000)
                     return
                 if inventory.has_any_items(["Shortbow", "Bronze arrow"]):
@@ -369,7 +379,7 @@ class TutorialIslandPlan(Plan):
                         npc.click_npc_action("Giant rat", "Attack")
                         return
                     return
-                if chat.dialogue_contains_text("Click on the gates to continue."):
+                if chat.dialogue_contains_text("Click on the gates to continue.") or chat.dialogue_contains_text("Sit back and watch"):
                     if not player.is_in_combat():
                         npc.click_npc_action("Giant rat", "Attack")
                         return
@@ -417,14 +427,14 @@ class TutorialIslandPlan(Plan):
 
             case "POLL_BOOTH":
                 if chat.dialogue_contains_text("Moving on"):
-                    if widget_exists(20316160):  # Poll booth interface
+                    if widget_exists(60817409):  # Poll booth interface
                         press_esc()
                         return
                     self.set_phase("ACCOUNT_GUIDE")
                     return
                 elif not chat.dialogue_contains_text("Voting") and not chat.dialogue_contains_text("booths are found in")\
                         and not chat.dialogue_contains_text("A flag appears"):
-                    objects.click("Poll booth", "Use")
+                    objects.click_object_closest_by_path_simple("Poll booth", "Use")
                     return
                 elif widget_exists(20316160): # Poll booth interface
                     press_esc()
@@ -434,7 +444,7 @@ class TutorialIslandPlan(Plan):
                     return
 
             case "ACCOUNT_GUIDE": # GOOD AND WORKING
-                if widget_exists(20316160) or widget_exists(22609920):  # Poll booth interface
+                if widget_exists(20316160) or widget_exists(22609920) or widget_exists(60817409):  # Poll booth interface
                     press_esc()
                     return
                 if chat.dialogue_contains_text("Continue through the next door"):
@@ -472,6 +482,14 @@ class TutorialIslandPlan(Plan):
                 if trav.in_area("LUMBRIDGE_NEW_PLAYER_SPAWN"):
                     self.set_phase("DONE")
                     return
+                if chat.dialogue_contains_text("Cast your Home Teleport"):
+                    spellbook.cast_spell("Lumbridge Home Teleport")
+                    if not wait_until(lambda: trav.in_area("LUMBRIDGE_NEW_PLAYER_SPAWN"), max_wait_ms=20000):
+                        return
+                    return
+                if widget_exists(10027008):
+                    press_esc()
+                    return
                 if inventory.has_items({"Mind rune", "Air rune"}) and not chat.dialogue_contains_text("To the mainland!") and not player.is_in_combat() and not chat.dialogue_is_open() and not chat.get_options() and not chat.can_continue():
                     if not tab.is_tab_open("SPELLBOOK"):
                         tab.open_tab("SPELLBOOK")
@@ -499,4 +517,42 @@ class TutorialIslandPlan(Plan):
             case "DONE":
                 logging.info("[TUTORIAL] Tutorial Island completed!")
                 return
+
+    def _rename_credentials_file(self):
+        """Rename the credentials file to match the character name."""
+        if not self.credentials_file or not self.character_name or self.credentials_renamed:
+            return
+        
+        try:
+            import os
+            import shutil
+            from pathlib import Path
+            
+            # Define paths
+            credentials_dir = Path("D:/repos/bot_runelite_IL/credentials")
+            source_file = credentials_dir / f"{self.credentials_file}.properties"
+            target_file = credentials_dir / f"{self.character_name}.properties"
+            
+            # Check if source file exists
+            if not source_file.exists():
+                logging.warning(f"[TUTORIAL] Source credentials file not found: {source_file}")
+                return
+            
+            # Check if target file already exists
+            if target_file.exists():
+                logging.warning(f"[TUTORIAL] Target credentials file already exists: {target_file}")
+                return
+            
+            # Rename the file
+            shutil.move(str(source_file), str(target_file))
+            self.credentials_renamed = True
+            
+            logging.info(f"[TUTORIAL] Successfully renamed credentials file:")
+            logging.info(f"[TUTORIAL]   From: {source_file}")
+            logging.info(f"[TUTORIAL]   To: {target_file}")
+            
+        except Exception as e:
+            logging.error(f"[TUTORIAL] Error renaming credentials file: {e}")
+            import traceback
+            logging.error(f"[TUTORIAL] Traceback: {traceback.format_exc()}")
 
