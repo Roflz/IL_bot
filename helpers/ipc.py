@@ -28,10 +28,13 @@ class IPCClient:
                 s.sendall((line + "\n").encode("utf-8"))
                 data = b""
                 while True:
-                    ch = s.recv(1)
-                    if not ch or ch == b"\n":
+                    chunk = s.recv(4096)
+                    if not chunk:
                         break
-                    data += ch
+                    data += chunk
+                    if b"\n" in chunk:
+                        data = data.split(b"\n", 1)[0]
+                        break
                 resp = json.loads(data.decode("utf-8")) if data else None
                 dt = int((time.time() - t0)*1000)
                 return resp
@@ -558,6 +561,16 @@ class IPCClient:
         """Get the current world number."""
         return self._send({"cmd": "get_world"}) or {}
     
+    def get_worlds(self) -> dict:
+        """
+        Get the available world list (expects a list under key 'worlds').
+
+        Expected world objects typically include:
+          - id (int)
+          - members (bool)
+        """
+        return self._send({"cmd": "get_worlds"}) or {}
+
     def hop_world(self, world_id: int) -> dict:
         """Hop to a specific world."""
         return self._send({"cmd": "hop_world", "world_id": world_id}) or {}

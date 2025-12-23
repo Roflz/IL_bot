@@ -3,8 +3,8 @@
 from __future__ import annotations
 from typing import Optional, List, Dict, Any
 
-from actions import get_widget_children
-from ..helpers.runtime_utils import ipc
+from actions.widgets import get_widget_children
+from helpers.runtime_utils import ipc
 
 # Expected payload structure (only visible widgets exported):
 # payload["chat_dialogue"] = {
@@ -44,7 +44,7 @@ def dialogue_is_open() -> bool:
     R = _dlg_right()
 
     # Check for Messagebox.CONTINUE widget (ID 15007748) - this indicates actual dialogue
-    from ..helpers.widgets import widget_exists
+    from helpers.widgets import widget_exists
     if widget_exists(15007748):
         return True
 
@@ -62,7 +62,7 @@ def dialogue_is_open() -> bool:
 
 def can_continue() -> bool:
     # Check for Messagebox.CONTINUE widget (ID 15007748) first - must be visible and text contains "continue"
-    from ..helpers.widgets import widget_exists, get_widget_info
+    from helpers.widgets import widget_exists, get_widget_info
     if widget_exists(15007748):
         widget_info = get_widget_info(15007748)
         if widget_info:
@@ -185,7 +185,7 @@ def has_informational_text() -> bool:
         15007747,  # Messagebox.TEXT (general dialogue)
     ]
     
-    from ..helpers.widgets import widget_exists
+    from helpers.widgets import widget_exists
     for widget_id in informational_widgets:
         if widget_exists(widget_id):
             return True
@@ -335,7 +335,7 @@ def get_dialogue_info() -> Dict[str, Any]:
         
         for widget_id, widget_name in dialogue_widgets:
             try:
-                from ..helpers.widgets import get_widget_info
+                from helpers.widgets import get_widget_info
                 widget_info = get_widget_info(widget_id)
                 
                 if widget_info and widget_info.get("data"):

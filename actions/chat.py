@@ -56,7 +56,7 @@ def dialogue_contains(substr: str) -> bool:
         return False
     
     # Get chat data directly from IPC
-    from ..helpers.runtime_utils import ipc
+    from helpers.runtime_utils import ipc
     chat_data = ipc.get_chat() or {}
 
     def _side_text(side_key: str) -> str:
@@ -81,7 +81,7 @@ def option_exists(text: str) -> bool:
     Return True if a chat menu option containing `text` (case-insensitive) exists.
     """
     # Get chat data directly from IPC
-    from ..helpers.runtime_utils import ipc
+    from helpers.runtime_utils import ipc
     chat_data = ipc.get_chat() or {}
 
     opts = (((chat_data.get("chatMenu") or {}).get("options") or {}).get("texts") or [])
@@ -104,7 +104,7 @@ def any_chat_active() -> bool:
     - Any chat menu options available
     """
     # Get chat data directly from IPC
-    from ..helpers.runtime_utils import ipc
+    from helpers.runtime_utils import ipc
     chat_data = ipc.get_chat() or {}
     
     # Check if dialogue is open
@@ -160,7 +160,7 @@ def can_click_continue_widget() -> bool:
     """
     Check if any "Click here to continue" widget is visible and clickable.
     """
-    from ..helpers.widgets import widget_exists, get_widget_info
+    from helpers.widgets import widget_exists, get_widget_info
     
     # Check Messagebox.CONTINUE widget (ID 15007748)
     if widget_exists(15007748):
@@ -184,7 +184,7 @@ def click_continue_widget() -> Optional[dict]:
     """
     Action: Click any "Click here to continue" widget.
     """
-    from ..helpers.widgets import widget_exists, get_widget_info
+    from helpers.widgets import widget_exists, get_widget_info
     
     # Try Messagebox.CONTINUE widget (ID 15007748) first
     if widget_exists(15007748):
@@ -240,6 +240,8 @@ def choose_option(choice: Union[int, str]) -> Optional[dict]:
             idx = next((i for i, s in enumerate(options) if choice.casefold() in (s or "").casefold()), 0)
         except ValueError:
             return None
+        # convert 0-based index to chat key (1..N)
+        idx = int(idx) + 1
     else:
         idx = int(choice)
 

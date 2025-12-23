@@ -47,9 +47,7 @@ class SplashPlan(Plan):
             setup_camera_optimal()
         except Exception as e:
             logging.warning(f"[{self.id}] Could not setup camera: {e}")
-        
-        # Create simple bank plan
-        # TODO: Replace placeholder items with actual items needed for splashing
+
         self.bank_plan = BankPlanSimple(
             bank_area=None,  # Use closest bank
             required_items=[
@@ -58,8 +56,6 @@ class SplashPlan(Plan):
             ],
             deposit_all=True,
             equip_items={
-                # TODO: Add equipment to equip if needed
-                # Example:
                 "weapon": ["Cursed goblin staff"],
                 "helmet": ["Iron full helm"],
                 "body": ["Iron platebody"],
@@ -256,8 +252,9 @@ class SplashPlan(Plan):
 
     def _handle_splash(self, ui):
         if not inventory.has_items(["Mind rune", "Air rune"]):
-            self.set_phase("DONE")
-            return
+            if not wait_until(lambda: inventory.has_items(["Mind rune", "Air rune"]), max_wait_ms=1200):
+                self.set_phase("DONE")
+                return
         if not player.is_in_combat():
             if can_continue():
                 press_spacebar()

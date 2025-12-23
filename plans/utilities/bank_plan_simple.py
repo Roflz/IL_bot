@@ -55,7 +55,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from actions import bank, inventory, player, ge, equipment
 from actions import travel
 from actions import wait_until
-from helpers import near_any_bank
+from helpers.bank import near_any_bank
 from ..base import Plan
 
 

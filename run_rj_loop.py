@@ -12,6 +12,40 @@ import logging
 from services.action_executor import ActionExecutor
 import socket
 
+# Ensure the project package can be imported (so relative imports like `..constants` work inside plans)
+_PROJECT_ROOT = Path(__file__).resolve().parent
+_PROJECT_PKG = _PROJECT_ROOT.name
+_PARENT_DIR = _PROJECT_ROOT.parent
+if str(_PARENT_DIR) not in sys.path:
+    sys.path.insert(0, str(_PARENT_DIR))
+if str(_PROJECT_ROOT) not in sys.path:
+    # Keep root on sys.path so existing top-level imports like `import actions` keep working
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+# Prefer importing everything through the project package so internal relative imports work.
+# Many modules use `from ..constants import ...` style imports which require package context.
+try:
+    import importlib
+
+    # Import the package itself (e.g. `bot_runelite_IL`)
+    importlib.import_module(_PROJECT_PKG)
+
+    # Alias common top-level module names to their package equivalents.
+    # This makes existing imports like `from actions import bank` resolve to `bot_runelite_IL.actions`,
+    # which allows internal relative imports (`..constants`, `..helpers`, etc.) to work correctly.
+    _ALIASES = ("constants", "actions", "helpers", "plans", "services", "utils")
+    for _name in _ALIASES:
+        _full = f"{_PROJECT_PKG}.{_name}"
+        try:
+            _mod = importlib.import_module(_full)
+            sys.modules[_name] = _mod
+        except Exception:
+            # Best-effort: not all names are necessarily importable in all environments
+            pass
+except Exception:
+    # Best-effort: if package-mode setup fails, discovery will fall back to top-level imports.
+    pass
+
 # Configure logging to write to files instead of console/GUI
 def setup_file_logging(port: int):
     """Set up logging to write to files instead of GUI output."""
@@ -39,6 +73,11 @@ def discover_plans():
     """Dynamically discover available plans from the plans directory."""
     plans = {}
     plans_dir = Path(__file__).parent / "plans"
+
+    # Prefer importing plans through the project package (e.g. bot_runelite_IL.plans.*)
+    # This allows plan modules to use relative imports to the project root (e.g. `from ..constants import ...`).
+    preferred_base = f"{_PROJECT_PKG}.plans"
+    fallback_base = "plans"
     
     # Scan main plans directory
     for plan_file in plans_dir.glob("*.py"):
@@ -46,7 +85,7 @@ def discover_plans():
             continue
         
         plan_name = plan_file.stem
-        module_name = f"ilbot.ui.simple_recorder.plans.{plan_name}"
+        module_name = f"{preferred_base}.{plan_name}"
         
         try:
             # Import the module dynamically with a fresh import
@@ -56,8 +95,15 @@ def discover_plans():
             # Remove the module from cache if it exists to force fresh import
             if module_name in sys.modules:
                 del sys.modules[module_name]
-            
-            module = importlib.import_module(module_name)
+
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:
+                # Fallback for environments where the project package import isn't available
+                module_name = f"{fallback_base}.{plan_name}"
+                if module_name in sys.modules:
+                    del sys.modules[module_name]
+                module = importlib.import_module(module_name)
             
             # Look for a plan class (usually ends with 'Plan')
             plan_class = None
@@ -91,7 +137,7 @@ def discover_plans():
                     continue
                 
                 plan_name = plan_file.stem
-                module_name = f"ilbot.ui.simple_recorder.plans.{subdir.name}.{plan_name}"
+                module_name = f"{preferred_base}.{subdir.name}.{plan_name}"
                 
                 try:
                     import importlib
@@ -100,8 +146,14 @@ def discover_plans():
                     # Remove the module from cache if it exists to force fresh import
                     if module_name in sys.modules:
                         del sys.modules[module_name]
-                    
-                    module = importlib.import_module(module_name)
+
+                    try:
+                        module = importlib.import_module(module_name)
+                    except Exception:
+                        module_name = f"{fallback_base}.{subdir.name}.{plan_name}"
+                        if module_name in sys.modules:
+                            del sys.modules[module_name]
+                        module = importlib.import_module(module_name)
                     
                     # Look for a plan class
                     plan_class = None
@@ -136,7 +188,7 @@ def discover_plans():
                 continue
             
             plan_name = plan_file.stem
-            module_name = f"ilbot.ui.simple_recorder.plans.utilities.{plan_name}"
+            module_name = f"{preferred_base}.utilities.{plan_name}"
             
             try:
                 import importlib
@@ -145,8 +197,14 @@ def discover_plans():
                 # Remove the module from cache if it exists to force fresh import
                 if module_name in sys.modules:
                     del sys.modules[module_name]
-                
-                module = importlib.import_module(module_name)
+
+                try:
+                    module = importlib.import_module(module_name)
+                except Exception:
+                    module_name = f"{fallback_base}.utilities.{plan_name}"
+                    if module_name in sys.modules:
+                        del sys.modules[module_name]
+                    module = importlib.import_module(module_name)
                 
                 # Look for a plan class
                 plan_class = None

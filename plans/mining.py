@@ -15,10 +15,12 @@ from pathlib import Path
 import sys
 
 from actions import objects, player, inventory, bank
-from actions import interact as inventory_interact
 from actions import wait_until
-from actions.travel import in_area, go_to, travel_to_bank
-from helpers.utils import sleep_exponential
+from actions.inventory import shift_click_item
+from actions.objects import click_object_no_camera
+from actions.player import hop_world, get_player_position
+from actions.travel import in_area, go_to, travel_to_bank, go_to_tile
+from helpers.utils import sleep_exponential, exponential_number
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -35,7 +37,7 @@ class MiningPlan(Plan):
     label = "Mining Plan"
     
     def __init__(self):
-        self.state = {"phase": "MINING_COPPER_TIN"}
+        self.state = {"phase": "MINING_IRON"}
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
         
@@ -95,6 +97,16 @@ class MiningPlan(Plan):
         match(phase):
             case "BANK":
                 return self._handle_bank(ui)
+
+            case "GO_TO_MINING_AREA":
+                # Check if we're in the copper/tin area
+                if not in_area(self.copper_tin_area):
+                    logging.info(f"[{self.id}] Traveling to {self.copper_tin_area}...")
+                    go_to(self.copper_tin_area)
+                    return self.loop_interval_ms
+                else:
+                    self.set_phase("MINING_COPPER_TIN")
+                    return self.loop_interval_ms
 
             case "MINING_COPPER_TIN":
                 return self._handle_mining_copper_tin()
@@ -173,7 +185,7 @@ class MiningPlan(Plan):
                 bank.close_bank()
                 if not wait_until(bank.is_closed, max_wait_ms=3000):
                     return self.loop_interval_ms
-            self.set_phase("MINING_COPPER_TIN")
+            self.set_phase("GO_TO_MINING_AREA")
             return self.loop_interval_ms
         
         elif bank_status == BankPlanSimple.ERROR:
@@ -201,27 +213,16 @@ class MiningPlan(Plan):
         # Drop ores if inventory is full
         if inventory.is_full():
             logging.info(f"[{self.id}] Inventory full, dropping ores...")
-            self._drop_all_ores()
+            inventory.drop_all(["Copper ore", "Tin ore", "Iron ore"])
             return self.loop_interval_ms
         
         # Check if we're already mining
         if player.get_player_animation() == "MINING":
-            return self.loop_interval_ms
-
-        # Check if we're in the copper/tin area
-        if not in_area(self.copper_tin_area):
-            logging.info(f"[{self.id}] Traveling to {self.copper_tin_area}...")
-            go_to(self.copper_tin_area)
-            return self.loop_interval_ms
+            return exponential_number(0.1, 2, 4)
 
         # Look for copper or tin rocks to mine
         logging.info(f"[{self.id}] Looking for copper/tin rocks to mine")
-        rock = objects.click_object_in_area("Rocks", self.copper_tin_area, "Mine")
-        if not rock:
-            # Try "Copper ore" or "Tin ore" as object names
-            rock = objects.click_object_in_area("Copper ore", self.copper_tin_area, "Mine")
-            if not rock:
-                rock = objects.click_object_in_area("Tin ore", self.copper_tin_area, "Mine")
+        rock = objects.click_object_closest_by_distance_no_camera(["Copper rocks", "Tin rocks"],"Mine", exact_match_target_and_action = True)
         
         if rock:
             wait_until(lambda: player.get_player_animation() == "MINING", max_wait_ms=5000)
@@ -237,47 +238,30 @@ class MiningPlan(Plan):
         # Drop ores if inventory is full
         if inventory.is_full():
             logging.info(f"[{self.id}] Inventory full, dropping ores...")
-            self._drop_all_ores()
+            inventory.drop_all(["Copper ore", "Tin ore", "Iron ore"])
             return self.loop_interval_ms
         
         # Check if we're already mining
         if player.get_player_animation() == "MINING":
-            return self.loop_interval_ms
+            return exponential_number(0.1, 2, 4)
 
-        # Check if we're in the iron area
-        if not in_area(self.iron_area):
-            logging.info(f"[{self.id}] Traveling to {self.iron_area}...")
-            go_to(self.iron_area)
+        if player.find_other_player_on_tile(3295, 3310):
+            if player.find_other_player_on_tile(3302, 3310) or player.find_other_player_on_tile(3302, 3309) or player.get_player_position() == (3295, 3310):
+                random_world = player.random_world()
+                hop_world(random_world)
+                return self.loop_interval_ms
+            elif get_player_position() != (3302, 3310) and get_player_position() != (3302, 3309):
+                go_to_tile(3302, 3310)
+                return self.loop_interval_ms
+        elif get_player_position() != (3295, 3310):
+            go_to_tile(3295, 3310)
             return self.loop_interval_ms
 
         # Look for iron rocks to mine
         logging.info(f"[{self.id}] Looking for iron rocks to mine")
-        rock = objects.click_object_in_area("Rocks", self.iron_area, "Mine")
-        if not rock:
-            # Try "Iron ore" as object name
-            rock = objects.click_object_in_area("Iron ore", self.iron_area, "Mine")
-        
+
+        rock = objects.click_object_closest_by_distance_no_camera("Iron rocks","Mine", exact_match_target_and_action = True)
         if rock:
             wait_until(lambda: player.get_player_animation() == "MINING", max_wait_ms=5000)
-        
-        return self.loop_interval_ms
-    
-    def _drop_all_ores(self):
-        """Drop all ores from inventory."""
-        ore_names = ["Copper ore", "Tin ore", "Iron ore"]
-        for ore_name in ore_names:
-            if inventory.has_item(ore_name):
-                count = inventory.inv_count(ore_name)
-                logging.info(f"[{self.id}] Dropping {count} {ore_name}")
-                # Drop all of this ore type
-                while inventory.has_item(ore_name):
-                    # Try "Drop-All" first, fallback to "Drop" if that doesn't work
-                    result = inventory_interact(ore_name, "Drop-All")
-                    if not result or not result.get("ok"):
-                        # Try single drop
-                        result = inventory_interact(ore_name, "Drop")
-                    if result and result.get("ok"):
-                        sleep_exponential(0.1, 0.3, 1.2)
-                    else:
-                        break  # Failed to drop, break out of loop
 
+        return self.loop_interval_ms

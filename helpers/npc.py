@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Optional, Dict, Any, List, Tuple
 
-from ..helpers.runtime_utils import ipc
+from helpers.runtime_utils import ipc
 
 def _all_npcs() -> List[dict]:
     """Get all visible NPCs; filter out null/empty names."""

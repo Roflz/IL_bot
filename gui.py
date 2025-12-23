@@ -826,7 +826,11 @@ class SimpleRecorderGUI:
         self.instance_count_label.grid(row=2, column=1, sticky=tk.W, pady=2, padx=(5, 0))
         
         # Credential selection
-        ttk.Label(runelite_tab, text="Credential Files:", style='Header.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(10, 3))
+        cred_header = ttk.Frame(runelite_tab)
+        cred_header.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 3))
+        cred_header.columnconfigure(0, weight=1)
+        ttk.Label(cred_header, text="Credential Files:", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W)
+        ttk.Button(cred_header, text="Refresh Credentials", command=self.refresh_credentials).grid(row=0, column=1, sticky=tk.E)
         
         # Available credentials (left)
         cred_frame = ttk.Frame(runelite_tab)
@@ -909,9 +913,6 @@ class SimpleRecorderGUI:
         self.detection_status_label = ttk.Label(detection_controls, text="Auto-detection: Stopped", style='Info.TLabel')
         self.detection_status_label.grid(row=2, column=0, sticky=tk.W, pady=(5, 0))
         
-        # Populate credentials
-        self.populate_credentials()
-        
         # Output tab
         output_tab = ttk.Frame(self.notebook, padding="5")
         self.notebook.add(output_tab, text="Output")
@@ -929,6 +930,8 @@ class SimpleRecorderGUI:
         log_scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.log_text.yview)
         log_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         self.log_text.configure(yscrollcommand=log_scrollbar.set)
+        # Populate credentials after log widget is initialized
+        self.populate_credentials()
     
     def setup_styles(self):
         """Configure the GUI styles and colors."""
@@ -1706,12 +1709,41 @@ class SimpleRecorderGUI:
     
     def populate_credentials(self):
         """Populate the credentials listbox with available credential files."""
-        credentials_dir = Path("/credentials")
+        credentials_dir = Path(__file__).resolve().parent / "credentials"
+        logging.info(f"[GUI] Credentials directory: {credentials_dir}")
         if credentials_dir.exists():
             for cred_file in sorted(credentials_dir.glob("*.properties")):
                 self.credentials_listbox.insert(tk.END, cred_file.name)
         else:
-            self.log_message("Credentials directory not found: D:/repos/bot_runelite_IL/credentials", 'error')
+            self.log_message(f"Credentials directory not found: {credentials_dir}", 'error')
+
+    def refresh_credentials(self):
+        """
+        Re-scan the credentials directory and refresh the available credentials listbox.
+        Keeps current selection (best-effort) and does not modify already-selected credentials.
+        """
+        try:
+            # Best-effort: remember selection by filename
+            selected_names = set()
+            try:
+                for idx in self.credentials_listbox.curselection():
+                    selected_names.add(self.credentials_listbox.get(idx))
+            except Exception:
+                selected_names = set()
+
+            self.credentials_listbox.delete(0, tk.END)
+            self.populate_credentials()
+
+            # Restore selection
+            if selected_names:
+                for i in range(self.credentials_listbox.size()):
+                    name = self.credentials_listbox.get(i)
+                    if name in selected_names:
+                        self.credentials_listbox.selection_set(i)
+
+            self.log_message(f"Refreshed credentials list", 'info')
+        except Exception as e:
+            self.log_message(f"Failed to refresh credentials: {e}", 'error')
     
     def add_credential(self):
         """Add selected credentials to the selected list."""
@@ -2750,7 +2782,8 @@ class SimpleRecorderGUI:
         
         try:
             # Build PowerShell command
-            script_path = Path("/launch-runelite.ps1")
+            script_path = Path(__file__).resolve().parent / "launch-runelite.ps1"
+            logging.info(f"[GUI] RuneLite launcher script path: {script_path}")
             if not script_path.exists():
                 messagebox.showerror("Script Not Found", f"RuneLite launcher script not found at {script_path}")
                 return

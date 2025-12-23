@@ -3,9 +3,11 @@ from typing import Optional, List, Union, Dict, Any
 import time
 
 from helpers.runtime_utils import ipc
+from helpers.runtime_utils import dispatch
 from helpers.npc import closest_npc_by_name, npc_action_index
 from helpers.rects import unwrap_rect
-from helpers.utils import sleep_exponential
+from helpers.utils import sleep_exponential, rect_beta_xy, clean_rs
+from helpers.ipc import get_last_interaction
 from .chat import dialogue_is_open, can_choose_option, can_continue, any_chat_active, option_exists, choose_option, continue_dialogue
 from .travel import _handle_door_opening, _first_blocking_door_from_waypoints
 from services.click_with_camera import click_npc_with_camera
@@ -86,7 +88,7 @@ def click_npc_simple(name: str, action: str) -> Optional[dict]:
 
         # Click the NPC directly using centralized function
         world_coords = {"x": fresh_npc.get("worldX"), "y": fresh_npc.get("worldY"), "p": fresh_npc.get("worldP", 0)}
-        from ..services.click_with_camera import click_npc_with_camera
+        from services.click_with_camera import click_npc_with_camera
         result = click_npc_with_camera(
             npc_name=fresh_npc.get("name"),
             world_coords=world_coords,
@@ -177,13 +179,81 @@ def click_npc_action_simple(name: str, action: str) -> Optional[dict]:
 
     # Use centralized function for simple NPC action
     world_coords = {"x": npc.get("world", {}).get("x"), "y": npc.get("world", {}).get("y"), "p": npc.get("world", {}).get("p", 0)}
-    from ..services.click_with_camera import click_npc_with_camera
+    from services.click_with_camera import click_npc_with_camera
     return click_npc_with_camera(
         npc_name=npc.get("name"),
         action=action,
         world_coords=world_coords,
         aim_ms=420
     )
+
+
+def click_npc_action_simple_prefer_no_camera(name: str, action: str, exact_match: bool = False) -> Optional[dict]:
+    """
+    Prefer-no-camera NPC click:
+    - Attempts a context-select click using the NPC's current clickbox/canvas (no camera movement).
+    - If verification fails, returns None (no camera fallback here).
+    """
+    npc_resp = ipc.find_npc(name)
+    if not npc_resp or not npc_resp.get("ok") or not npc_resp.get("found"):
+        return None
+
+    target = npc_resp.get("npc") or {}
+    world = target.get("world") or {}
+    if not isinstance(world.get("x"), int) or not isinstance(world.get("y"), int):
+        return None
+
+    rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
+    point = None
+    anchor = {}
+    if rect:
+        cx, cy = rect_beta_xy(
+            (
+                rect.get("x", 0),
+                rect.get("x", 0) + rect.get("width", 0),
+                rect.get("y", 0),
+                rect.get("y", 0) + rect.get("height", 0),
+            ),
+            alpha=2.0,
+            beta=2.0,
+        )
+        anchor = {"bounds": rect}
+        point = {"x": cx, "y": cy}
+    elif isinstance((target.get("canvas") or {}).get("x"), (int, float)) and isinstance((target.get("canvas") or {}).get("y"), (int, float)):
+        point = {"x": int(target["canvas"]["x"]), "y": int(target["canvas"]["y"])}
+    else:
+        return None
+
+    sleep_exponential(0.05, 0.15, 1.5)
+    step = {
+        "action": "click-npc-context",
+        "click": {
+            "type": "context-select",
+            "x": point["x"],
+            "y": point["y"],
+            "row_height": 16,
+            "start_dy": 10,
+            "open_delay_ms": 120,
+            "exact_match": exact_match,
+        },
+        "option": action,
+        "target": {"domain": "npc", "name": target.get("name") or name, **anchor, "world": {"x": world["x"], "y": world["y"], "p": int(world.get("p", 0))}},
+        "anchor": point,
+    }
+    result = dispatch(step)
+    if not result:
+        return None
+
+    last_interaction = get_last_interaction() or {}
+    clean_action = clean_rs(last_interaction.get("action", ""))
+    want_action = clean_rs(action).lower()
+    action_match = (clean_action.lower() == want_action) if exact_match else (
+        (want_action in clean_action.lower()) or (clean_action.lower() in want_action)
+    )
+    want = clean_rs(name).lower()
+    tgt = clean_rs(last_interaction.get("target", "")).lower()
+    target_match = (tgt == want) if exact_match else ((want in tgt) or (tgt and (tgt in want)))
+    return result if (last_interaction and action_match and target_match) else None
 
 def chat_with_npc(npc_name: str, options: Optional[List[str]] = None, max_wait_ms: int = 4000) -> Optional[Union[int, dict]]:
     """

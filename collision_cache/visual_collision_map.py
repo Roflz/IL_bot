@@ -6,11 +6,18 @@ Creates a single comprehensive PNG image of the collected collision data.
 import sys
 import os
 import json
+import argparse
+from collections import Counter, deque
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 # Add the current directory to the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Also add the repo root to the path so we can import `helpers.*` even when this script
+# is executed as `py collision_cache/visual_collision_map.py` (where sys.path may not include CWD).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 # CollisionDataFlag constants from RuneLite API
 BLOCK_N  = 2        # CollisionDataFlag.BLOCK_MOVEMENT_NORTH
@@ -84,7 +91,8 @@ def load_collision_data():
     """Load ALL collision data from cache."""
     # Use the script's directory as the base path
     script_dir = Path(__file__).parent
-    cache_file = script_dir / "collision_cache" / "collision_map_debug.json"
+    # Cache lives in this folder (collision_cache/collision_map_debug.json)
+    cache_file = script_dir / "collision_map_debug.json"
     print(f"[DEBUG] Loading from: {cache_file.absolute()}")
     if not cache_file.exists():
         print("ERROR: No collision cache found. Run collision mapping first.")
@@ -104,20 +112,146 @@ def load_collision_data():
         return None
 
 
+def _try_get_player_region_bin(bin_size: int = 64, port: int = 17000):
+    """
+    Best-effort: get the player's current region bin (rx, ry, plane) via IPC.
+    Returns None if IPC isn't available or player coords can't be read.
+    """
+    try:
+        from helpers.ipc import IPCClient
+        ipc = IPCClient(port=port)
+        resp = ipc.get_player() or {}
+        if not resp.get("ok"):
+            return None
+        p = resp.get("player") or {}
+        x = p.get("worldX")
+        y = p.get("worldY")
+        # RuneLite exporter commonly uses `plane`; some older code used `worldP`
+        pl = p.get("plane", p.get("worldP", 0))
+        if not isinstance(x, int) or not isinstance(y, int):
+            return None
+        return (x // bin_size, y // bin_size, int(pl))
+    except Exception:
+        return None
+
+
+def _compute_region_bins(collision_data: dict, bin_size: int = 64) -> tuple[set[tuple[int, int, int]], Counter]:
+    """
+    Convert collision tiles to region bins and counts:
+      region key = (rx, ry, plane) where rx=x//bin_size, ry=y//bin_size
+    """
+    regions = set()
+    counts = Counter()
+    for tile in collision_data.values():
+        try:
+            x, y, p = int(tile.get("x", 0)), int(tile.get("y", 0)), int(tile.get("p", 0))
+        except Exception:
+            continue
+        k = (x // bin_size, y // bin_size, p)
+        regions.add(k)
+        counts[k] += 1
+    return regions, counts
+
+
+def _compute_components(regions: set[tuple[int, int, int]], counts: Counter) -> list[dict]:
+    """
+    Compute connected components over region bins (4-neighbor adjacency) per plane.
+    Returns list of dicts with:
+      - plane
+      - regions (set of region keys)
+      - tiles (count)
+    Sorted by tiles desc.
+    """
+    seen = set()
+    comps = []
+    for start in regions:
+        if start in seen:
+            continue
+        plane = start[2]
+        q = deque([start])
+        seen.add(start)
+        comp_regions = set()
+        tiles = 0
+        while q:
+            rx, ry, p = q.popleft()
+            if p != plane:
+                continue
+            k = (rx, ry, plane)
+            comp_regions.add(k)
+            tiles += counts.get(k, 0)
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nk = (rx + dx, ry + dy, plane)
+                if nk in regions and nk not in seen:
+                    seen.add(nk)
+                    q.append(nk)
+        comps.append({"plane": plane, "regions": comp_regions, "tiles": tiles})
+    comps.sort(key=lambda c: c["tiles"], reverse=True)
+    return comps
+
+
+def _select_component_regions(
+    collision_data: dict,
+    *,
+    component_mode: str,
+    component_index: int,
+    bin_size: int,
+    ipc_port: int,
+) -> tuple[set[tuple[int, int, int]], str]:
+    """
+    Select which disconnected map component to render.
+    Default: player, fallback to largest if IPC isn't available.
+    """
+    regions, counts = _compute_region_bins(collision_data, bin_size=bin_size)
+    comps = _compute_components(regions, counts)
+    if not comps:
+        return set(), "no components found"
+
+    mode = (component_mode or "player").strip().lower()
+    if mode == "largest":
+        return comps[0]["regions"], f"largest component (tiles={comps[0]['tiles']})"
+
+    if mode == "index":
+        idx0 = max(0, int(component_index) - 1)
+        idx0 = min(idx0, len(comps) - 1)
+        return comps[idx0]["regions"], f"component index {idx0+1} (tiles={comps[idx0]['tiles']})"
+
+    # player (fallback to largest)
+    pr = _try_get_player_region_bin(bin_size=bin_size, port=ipc_port)
+    if pr is None:
+        return comps[0]["regions"], f"player unavailable; fallback to largest (tiles={comps[0]['tiles']})"
+
+    for c in comps:
+        if pr in c["regions"]:
+            return c["regions"], f"player component (tiles={c['tiles']})"
+
+    return comps[0]["regions"], f"player region {pr} not in cache; fallback to largest (tiles={comps[0]['tiles']})"
+
+
+def _filter_collision_data_to_regions(collision_data: dict, regions: set[tuple[int, int, int]], bin_size: int) -> dict:
+    """Filter collision_data dict to only include tiles whose region-bin is in `regions`."""
+    if not regions:
+        return collision_data
+    out = {}
+    for k, tile in collision_data.items():
+        try:
+            x, y, p = int(tile.get("x", 0)), int(tile.get("y", 0)), int(tile.get("p", 0))
+        except Exception:
+            continue
+        rk = (x // bin_size, y // bin_size, p)
+        if rk in regions:
+            out[k] = tile
+    return out
+
+
 def is_water_tile(x, y, plane, water_data):
     """Check if a tile is water."""
     return f"{x},{y},{plane}" in water_data
 
 
-def generate_single_map():
-    """Generate a single comprehensive collision map with embedded legend using ALL tiles."""
+def generate_single_map(collision_data: dict, *, tile_size: int = 2, output_file: Path | None = None):
+    """Generate a single collision map with embedded legend using the provided tiles."""
     print("SIMPLE COLLISION MAP GENERATOR")
     print("=" * 50)
-    
-    # Load ALL collision data
-    collision_data = load_collision_data()
-    if not collision_data:
-        return False
     
     print(f"Loaded {len(collision_data)} collision tiles")
     
@@ -135,7 +269,7 @@ def generate_single_map():
     print(f"Map size: {width_tiles}x{height_tiles}")
     
     # Create the map image with space for legend
-    tile_size = 16  # 2x2 pixels per tile for better wall visualization
+    tile_size = max(1, int(tile_size))
     map_width = width_tiles * tile_size
     map_height = height_tiles * tile_size
     
@@ -388,7 +522,8 @@ def generate_single_map():
     
     # Save the map with embedded legend
     script_dir = Path(__file__).parent
-    output_file = script_dir / "collision_cache" / "detailed_collision_map_debug.png"
+    if output_file is None:
+        output_file = script_dir / "detailed_collision_map_debug.png"
     
     print(f"[DEBUG] Saving PNG to: {output_file}")
     print(f"[DEBUG] Image size: {img.size[0]}x{img.size[1]} pixels")
@@ -411,17 +546,49 @@ def generate_single_map():
 
 
 def main():
+    ap = argparse.ArgumentParser(description="Generate a collision map PNG from collision_map_debug.json")
+    ap.add_argument("--component", choices=["player", "largest", "index"], default="player",
+                    help="Which disconnected map component to render (default: player; falls back to largest if IPC unavailable)")
+    ap.add_argument("--index", type=int, default=1,
+                    help="When --component=index, which component number (1-based) to render (default: 1)")
+    ap.add_argument("--bin-size", type=int, default=64,
+                    help="Region bin size in tiles for component detection (default: 64)")
+    ap.add_argument("--tile-size", type=int, default=8,
+                    help="Pixels per game-tile in the output image (default: 8)")
+    ap.add_argument("--ipc-port", type=int, default=17000,
+                    help="IPC port used for --component=player (default: 17000)")
+    ap.add_argument("--output", type=str, default="",
+                    help="Output PNG path (default: collision_cache/detailed_collision_map_debug.png)")
+    args = ap.parse_args()
+
     print("SIMPLE COLLISION MAP GENERATOR")
     print("=" * 50)
-    print("This will generate a comprehensive collision map using ALL tiles from the cache.")
+    print(f"component={args.component} bin_size={args.bin_size} tile_size={args.tile_size}")
     print()
     
+    collision_data = load_collision_data()
+    if not collision_data:
+        return
+
+    selected_regions, reason = _select_component_regions(
+        collision_data,
+        component_mode=args.component,
+        component_index=int(args.index),
+        bin_size=int(args.bin_size),
+        ipc_port=int(args.ipc_port),
+    )
+    filtered = _filter_collision_data_to_regions(collision_data, selected_regions, bin_size=int(args.bin_size))
+    print(f"[DEBUG] Component selection: {reason}")
+    print(f"[DEBUG] Rendering tiles: {len(filtered):,} / {len(collision_data):,}")
+
+    output_path = Path(args.output).expanduser().resolve() if args.output else (Path(__file__).parent / "detailed_collision_map_debug.png")
+
     try:
-        success = generate_single_map()
+        success = generate_single_map(filtered, tile_size=int(args.tile_size), output_file=output_path)
         if success:
             print("\n[SUCCESS] Collision map with embedded legend created successfully!")
             print("File created:")
-            print("  - detailed_collision_map_debug.png (includes legend and statistics)")
+            print(f"  - {output_path} (includes legend and statistics)")
         else:
             print("\n[ERROR] Failed to create collision map!")
     except Exception as e:

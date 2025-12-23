@@ -9,6 +9,7 @@ import time
 import json
 import socket
 import argparse
+import subprocess
 from pathlib import Path
 
 # Add the current directory to the path
@@ -30,19 +31,26 @@ def find_ipc_port(start_port: int = 17000, end_port: int = 17020) -> int:
 def ipc_send_direct(msg: dict, port: int = 17000, timeout: float = 0.35):
     """Send a message directly to the IPC plugin."""
     host = "127.0.0.1"
-    t0 = time.time()
     try:
         line = json.dumps(msg, separators=(",", ":"))
         with socket.create_connection((host, port), timeout=timeout) as s:
             s.settimeout(timeout)
             s.sendall((line + "\n").encode("utf-8"))
-            data = b""
+            # Read newline-delimited JSON efficiently (recv(1) is extremely slow for large responses)
+            buf = bytearray()
+            max_bytes = 50_000_000  # safety cap (50MB)
             while True:
-                ch = s.recv(1)
-                if not ch or ch == b"\n":
+                chunk = s.recv(4096)
+                if not chunk:
                     break
-                data += ch
-        resp = json.loads(data.decode("utf-8")) if data else None
+                nl = chunk.find(b"\n")
+                if nl != -1:
+                    buf += chunk[:nl]
+                    break
+                buf += chunk
+                if len(buf) > max_bytes:
+                    raise RuntimeError(f"IPC response exceeded {max_bytes} bytes")
+        resp = json.loads(buf.decode("utf-8")) if buf else None
         return resp
     except Exception as e:
         print(f"[IPC ERR] {type(e).__name__}: {e}")
@@ -87,18 +95,32 @@ def is_player_in_scene(player_x, player_y, player_p, scene_base_x, scene_base_y,
 
 def save_collision_data(data, cache_dir=""):
     """Save collision data to cache."""
-    cache_path = Path(cache_dir) if cache_dir else Path("ilbot/ui/simple_recorder")
-    cache_dir_path = cache_path / "collision_cache"
+    # Default to this repo's collision_cache directory (next to this script).
+    # If cache_dir is provided:
+    # - If it's the repo root (contains "collision_cache/"), write there
+    # - If it's already the collision_cache dir, write directly there
+    # - Otherwise, write to "<cache_dir>/collision_cache/"
+    if cache_dir:
+        base = Path(cache_dir).expanduser().resolve()
+        if (base / "collision_cache").is_dir():
+            cache_dir_path = base / "collision_cache"
+        elif base.name.lower() == "collision_cache":
+            cache_dir_path = base
+        else:
+            cache_dir_path = base / "collision_cache"
+    else:
+        cache_dir_path = Path(__file__).resolve().parent
+
     cache_dir_path.mkdir(parents=True, exist_ok=True)
     
-    # Use main cache file
+    # Main cache file in collision_cache/
     cache_file = cache_dir_path / "collision_map_debug.json"
     
     # Load existing data from the cache file
     existing_data = {}
     if cache_file.exists():
         try:
-            with open(cache_file, 'r') as f:
+            with open(cache_file, 'r', encoding="utf-8") as f:
                 existing_data = json.load(f)
         except Exception as e:
             print(f"[WARNING] Could not load existing cache: {e}")
@@ -131,14 +153,14 @@ def save_collision_data(data, cache_dir=""):
             }
             print(f"  [DEBUG] Writing data structure with keys: {list(data_to_write.keys())}")
             
-            with open(temp_file, 'w') as f:
+            with open(temp_file, 'w', encoding="utf-8") as f:
                 json.dump(data_to_write, f, indent=2)
             
             print(f"  [DEBUG] Temp file written successfully")
             
             # Verify the temp file was written correctly
             print(f"  [DEBUG] Verifying temp file...")
-            with open(temp_file, 'r') as f:
+            with open(temp_file, 'r', encoding="utf-8") as f:
                 temp_data = json.load(f)
                 temp_tiles = len(temp_data.get("collision_data", {}))
                 temp_water = len(temp_data.get("water_data", {}))
@@ -153,7 +175,7 @@ def save_collision_data(data, cache_dir=""):
             
             # Verify the final file was written correctly
             print(f"  [DEBUG] Verifying final cache file...")
-            with open(cache_file, 'r') as f:
+            with open(cache_file, 'r', encoding="utf-8") as f:
                 final_data = json.load(f)
                 final_tiles = len(final_data.get("collision_data", {}))
                 final_water = len(final_data.get("water_data", {}))
@@ -171,8 +193,15 @@ def save_collision_data(data, cache_dir=""):
     else:
         print(f"  [SKIPPED] No new tiles to save")
 
-    print(f"Current working directory: {os.getcwd()}")
-    os.system("python visual_collision_map.py")
+    # Optional: regenerate the PNG map (can be very large / memory intensive).
+    # Enable explicitly by setting env var: GENERATE_COLLISION_MAP=1
+    if new_tiles > 0 and os.environ.get("GENERATE_COLLISION_MAP") == "1":
+        try:
+            script = cache_dir_path / "visual_collision_map.py"
+            if script.exists():
+                subprocess.run([sys.executable, str(script)], cwd=str(cache_dir_path), check=False)
+        except Exception as e:
+            print(f"  [WARNING] Could not run visual_collision_map.py: {e}")
     
     return len(collision_data), new_tiles
 
@@ -214,10 +243,9 @@ def fixed_route_mapper(port: int = None):
         return False
     
     print("SUCCESS: Connected to IPC plugin")
-    print()
     
-    # Load existing cache
-    cache_file = Path("") / "collision_map_debug.json"
+    # Load existing cache (cache lives alongside this script)
+    cache_file = Path(__file__).parent / "collision_map_debug.json"
     collision_data = {}
     if cache_file.exists():
         try:
@@ -233,7 +261,6 @@ def fixed_route_mapper(port: int = None):
     total_tiles = len(collision_data)
     
     print(f"Starting with {total_tiles} cached tiles")
-    print()
     
     try:
         while True:

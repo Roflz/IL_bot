@@ -51,8 +51,11 @@ staff of air
 5000 mind runes
 amulet of magic
 
-
-
+items for training skills:
+pickaxes up to adamant
+fishing rod, fly fishing rod, fishing bait, feathers
+logs for firemaking
+fish for cooking
 
 Questing flowthrough:
 1. Equip combat items, set autocast to wind strike
@@ -261,13 +264,97 @@ Magic: farming teleports / alch / enchanting jewelry
 Members startup guide:
 Before members:
 follow quest guide
+items for training skills:
+pickaxes up to adamant
+fishing rod, fly fishing rod, fishing bait, feathers
+logs for firemaking
+fish for cooking
 train the following skills:
 Cooking -> lvl 30
-Firemaking -> lvl 50
+Firemaking -> lvl 50 - 61 logs
 Fishing -> lvl 65
 Mining -> lvl 30
 Magic -> Splash to lvl 50s or so
 
+Buy List:
+1 Raw Bear meat
+1 raw rat meat
+1 raw Beef
+1 raw chicken
+1 bread
+1 bucket of wax
+1 bat bones
+Air and law runes
+1 coal
+1 iron bar
+3 cut sapphires
+1 redberry pie
+1 bucket of water
+1 chisel
+150 rune or pure essence
+1 bucket
+1 pestle and mortar
+1 vial
+1 cup of tea
+2 ropes
+1 opal
+1 charcoal
+1 knife
+1 sliced banana
+3 logs
+1 iron spear
+1 agility potion (4)
+1 jogre bones
+1 seaweed
+2 vodka
+Runes for magic combat (chaos)
+teleport tabs, ring of dueling, games necklace, glory, necklace of passage, skills necklace, maybe stamina pots or super energys
 
+General path:
 1. Druidic Ritual -> Herblore lvl 3
-2. Hazeel Cult -> Thieving -> lvl 11
+2. Merlin's Crystal
+3. Giant Dwarf
+4. Hazeel Cult -> Thieving -> lvl 11
+5. Train thieving to lvl 25 at cake stall
+6. Train agility to lvl 15 at gnome course
+7. Enter the Abyss rc -> lvl 9
+8. Temple of the Eye
+9. Priest in Peril
+10. Digsite
+11. Jungle Potion
+12. Tai Bwo Wannai Trio
+13. get kudos
+14. do bone voyage
+
+Detailed path:
+1. Bank, equip mage robes, staff of air, games necklace, ring of dueling
+2. withdraw law runes, coins, chaos runes, glory, varrock tele tabs, raw bear meat, rat meat, beef, and chicken, bread, tinderbox, bucket of wax, bat bones, rest trout
+3. tele to burthorpe, do druidic ritual
+4. tele to camelot, do merlins crystal
+5. Start giant dwarf up in relleka, just until you get into keldagrim
+6. tele to varrock to bank, or ring of dueling. grab ardougne tele, keep your trout in invent and combat stuff.
+7. tele to ardougne, do hazeel cult. you can use fishing trawler tele
+8. train thieving to 25 at cake stall, then agility to lvl 15 at gnome course
+9. bank, deposit anything worth much, get varrock teles, necklace of passage, skills necklace, and glory
+10. do enter the abyss
+11. train runecrafting 1 more lvl to lvl 10. do air runes in fally
+11. withdraw varrock teles, bucket of water, chisel, pickaxe, glory, and ring of dueling.
+12. tele to al kharid with ring of dueling and do temple of the eye quest
+13. Go do Priest in Peril. equip melee combat equipment and bring food, bucket and varrock as
+14. bank. equip magic combat equipment and withdraw runes, equip amulet of glory
+15. withdraw 2 antipoisons, sliced banana, small fishing net, pestle and mortar, 2 logs, iron spear, agility potion (4), knife, tinderbox, jogre bones, seaweed, coins, and the rest trout
+16. tele to karamja w glory, do jungle potion and then tai bwo wannai trio quests. herblore lvl will now be 9
+17. Train 1 more herblore lvl
+18. withdraw varrock teles, pestle and mortar, vial, tinderbox, cup of tea, 2 ropes, opal, charcoal, coins, energy potions.
+19. go do digsite quest
+20. go clean finds in varrock museum to get all the relics and digsite pendant
+21. collect kudos rewards for quests and do natural history quiz
+22. Buy digsite pendant at ge
+23. withdraw 2 vodka, 1 marrentil pot unf, glory, skills neck, varrock teles, digsite pendants, hammer, iron bar, 2 oak planks, nails
+24. do bone voyage
+25. get ice gloves
+
+
+NOW
+ACTIVITIES:
+MLM - motherlode mine. Get 100 nuggets for coal bag at blast furnace.

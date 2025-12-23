@@ -105,9 +105,10 @@ class ActionExecutor:
         if ctype == "type":
             text = (click.get("text") or "")
             per_ms = int(click.get("per_char_ms", 20))
+            enter = bool(click.get("enter", True))
             if text:
                 try:
-                    self.ipc.type(text, per_char_ms=per_ms)
+                    self.ipc.type(text, enter=enter, per_char_ms=per_ms)
                 except Exception as e:
                     self.debug(f"[IPC] type error: {e}")
             return
@@ -187,16 +188,26 @@ class ActionExecutor:
                         ((not want_tgt) or (et == want_tgt))
                 else:
                     # Partial match: option contains the wanted text (current behavior)
-                    return ((not want_opt) or (want_opt in eo)) and \
-                        ((not want_tgt) or (want_tgt in et))
+                    # Allow either-direction containment for targets to handle cases like:
+                    #   want_tgt="empty sack", et="sack"
+                    return ((not want_opt) or (want_opt in eo) or (eo in want_opt)) and \
+                        ((not want_tgt) or (want_tgt in et) or (et in want_tgt))
+
+            def _visual_index(e) -> int:
+                try:
+                    return int(e.get("visualIndex"))
+                except Exception:
+                    return 999999
 
             cand = [e for e in entries if _match(e)]
             if not cand:
                 return
 
-            # Check if the target option is at index 0 (first/default option)
-            target_entry = cand[0]
-            target_visual_index = target_entry.get('visualIndex')
+            # Prefer the best match:
+            # - lowest visualIndex (top-most menu option)
+            # This matters when multiple identical entries match (e.g., multiple "Mine -> Ore vein").
+            target_entry = sorted(cand, key=_visual_index)[0]
+            target_visual_index = _visual_index(target_entry)
 
             if target_visual_index == 0:
                 # First option - use simple left-click instead of context menu
@@ -221,8 +232,15 @@ class ActionExecutor:
                     return
 
                 # Check if the target option is at index 0 (first/default option)
-                target_entry = cand[0]
-                # # Not first option - use context menu selection
+                target_entry = sorted(cand, key=_visual_index)[0]
+                target_visual_index = _visual_index(target_entry)
+
+                # If the best match is the first option, prefer a simple left-click (no menu click).
+                if target_visual_index == 0:
+                    click_result = self._click_canvas(ax, ay, button="left")
+                    return click_result
+
+                # Not first option - use context menu selection
                 r = target_entry.get('rect')or {}
                 # rect.x / rect.y are ABSOLUTE canvas coords from the plugin logs:
                 # e.g. rect=(751,409 110x15)

@@ -3,12 +3,12 @@
 from __future__ import annotations
 from typing import Optional, Union
 
-                                                                   from helpers.runtime_utils import ipc, dispatch
+from helpers.runtime_utils import ipc, dispatch
 from helpers.utils import clean_rs, rect_beta_xy
 from helpers.widgets import widget_exists
 
 
-                                                                   def interact(item_name: str, menu_option: str) -> Optional[dict]:
+def interact(item_name: str, menu_option: str) -> Optional[dict]:
     """
     Context-click an equipment inventory item and select a specific menu option.
     This interacts with unequipped items in the equipment interface, not equipped items.
@@ -269,6 +269,91 @@ def has_equipped(item_names: Union[str, list[str]]) -> bool:
             return False
     
     return True
+
+
+def ensure_only_equipped(
+    allowed_items: list[str],
+    *,
+    bank_prefer: str = "bank chest",
+    keep_bank_open: bool = True,
+) -> bool:
+    """
+    Ensure that ONLY the allowed items are equipped (and that they are equipped).
+
+    Intended usage (Blast Furnace):
+        ensure_only_equipped(["Ice gloves"], bank_prefer="bank chest")
+
+    Notes:
+    - This is an equipment helper: it does NOT open/close the bank.
+    - If the bank is open, it will use bank helpers (deposit_equipment / withdraw_item / bank.interact).
+    - If the bank is not open, it will use inventory helpers (inventory.interact) and will NOT attempt
+      to unequip extra items (since that's bank/UI-dependent in our current codebase).
+    - Uses lazy imports to avoid import cycles.
+    """
+    allowed_items = [clean_rs(x).strip() for x in (allowed_items or []) if clean_rs(x).strip()]
+    if not allowed_items:
+        return True
+
+    allowed_norm = {clean_rs(x).lower() for x in allowed_items}
+    required_items = allowed_items
+
+    def _equipped_names() -> list[str]:
+        eq = list_equipped_items() or []
+        out = []
+        for it in eq:
+            nm = clean_rs(it.get("name", "")).strip()
+            if nm:
+                out.append(nm.lower())
+        return out
+
+    # Fast path: already exactly what we want (no extras, and all required equipped)
+    eqn = _equipped_names()
+    if eqn and all(n in allowed_norm for n in eqn) and all(clean_rs(x).lower() in eqn for x in required_items):
+        return True
+
+    # Lazy imports (avoid cycles)
+    from actions import bank, inventory, wait_until
+
+    # 1) If we have extra equipment, only the bank-open path can cleanly remove it in current codebase.
+    eqn = _equipped_names()
+    has_extras = any(n not in allowed_norm for n in eqn)
+    if has_extras:
+        if not bank.is_open():
+            return False
+        bank.deposit_equipment()
+        wait_until(lambda: all(n in allowed_norm for n in _equipped_names()), max_wait_ms=3000)
+
+    # 2) Ensure each required item is equipped.
+    for item in required_items:
+        if has_equipped(item):
+            continue
+
+        # If bank is open, prefer bank helpers (withdraw if needed, then bank.interact).
+        if bank.is_open():
+            if not inventory.has_item(item):
+                bank.withdraw_item(item, withdraw_x=1)
+                wait_until(lambda: inventory.has_item(item), max_wait_ms=3000)
+                if not inventory.has_item(item):
+                    return False
+
+            # Try to equip via bank inventory interactions (no slot knowledge needed).
+            bank.interact(item, ["wear", "wield"])
+            wait_until(lambda it=item: has_equipped(it), max_wait_ms=3000)
+            if not has_equipped(item):
+                return False
+            continue
+
+        # Bank not open: must be able to equip from inventory only.
+        if not inventory.has_item(item):
+            return False
+        inventory.interact(item, "Wear", exact_match=False) or inventory.interact(item, "Wield", exact_match=False)
+        wait_until(lambda it=item: has_equipped(it), max_wait_ms=3000)
+        if not has_equipped(item):
+            return False
+
+    # Final verification: no extras, and all required equipped.
+    eqn2 = _equipped_names()
+    return bool(eqn2) and all(n in allowed_norm for n in eqn2) and all(has_equipped(x) for x in required_items)
 
 
 def has_any_equipped(item_names: list[str]) -> bool:

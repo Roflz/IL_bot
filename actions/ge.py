@@ -14,9 +14,9 @@ from helpers.ge import (
     ge_buy_confirm_widget, click_item_search, confirm_offer, is_offer_screen_open
 )
 from helpers.keyboard import press_enter
-from ..actions import travel as trav, bank, inventory as inv
+from . import travel as trav, bank, inventory as inv
 from helpers.bank import select_note, bank_note_selected
-from ..actions.timing import wait_until
+from .timing import wait_until
 from constants import BANK_REGIONS
 
 # ---------- simple reads ----------
@@ -241,7 +241,7 @@ def buy_chatbox_first_x_items(count: int = 5) -> list:
     chatbox_widget_id = 10616883  # 162.51
     
     # Get child widgets of the chatbox
-    from ..actions.widgets import get_widget_children
+    from actions.widgets import get_widget_children
     children = get_widget_children(chatbox_widget_id).get('children')
     
     if not children:
@@ -302,7 +302,7 @@ def click_chatbox_item_by_name(item: str, x: int = 5) -> dict | None:
     chatbox_widget_id = 10616883  # 162.51
     
     # Get child widgets of the chatbox
-    from ..actions.widgets import get_widget_children
+    from actions.widgets import get_widget_children
     children = get_widget_children(chatbox_widget_id).get('children')
     
     if not children:
@@ -369,7 +369,7 @@ def open_ge() -> dict | None:
             
             if result:
                 # Check if the correct interaction was performed
-                from ..helpers.ipc import get_last_interaction
+                from helpers.ipc import get_last_interaction
                 last_interaction = get_last_interaction()
                 
                 expected_action = "Exchange"
@@ -409,7 +409,7 @@ def open_ge() -> dict | None:
             
             if result:
                 # Check if the correct interaction was performed
-                from ..helpers.ipc import get_last_interaction
+                from helpers.ipc import get_last_interaction
                 last_interaction = get_last_interaction()
                 
                 expected_action = "Exchange"

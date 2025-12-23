@@ -6,7 +6,7 @@ Helper functions for interacting with the bank inventory interface.
 Similar to equipment inventory but for bank items.
 """
 
-from ..helpers.runtime_utils import ipc
+from helpers.runtime_utils import ipc
 
 
 def get_bank_inventory_items() -> list[dict]:

@@ -61,7 +61,7 @@ from actions import bank, inventory, player, equipment, ge
 from actions import travel
 from actions import get_best_weapon_for_level, get_best_armor_for_level
 from actions import wait_until
-from helpers import near_any_bank
+from helpers.bank import near_any_bank
 from helpers import setup_camera_optimal
 from helpers import set_phase_with_camera
 from ..base import Plan

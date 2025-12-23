@@ -387,7 +387,7 @@ def get_players() -> List[Dict]:
         A list of dictionaries containing player information including location, bounds, etc.
     """
     try:
-        from ..helpers.runtime_utils import ipc
+        from helpers.runtime_utils import ipc
         
         result = ipc.get_players()
         

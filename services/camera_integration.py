@@ -28,7 +28,8 @@ def aim_midtop_at_world(wx: int, wy: int, *, max_ms: int = 600):
         pitch_dead_zone = 30  # New buffer for pitch
         
         # Continuous checking with timeout
-        max_aim_time = 5.0  # Maximum 5 seconds for aiming
+        # Respect caller-provided max_ms (default 600ms). Clamp to sane bounds.
+        max_aim_time = max(0.05, min(5.0, float(max_ms) / 1000.0))
         check_interval = 0.05  # Check every 50ms for more responsive control
         start_time = time.time()
         
@@ -66,6 +67,10 @@ def aim_midtop_at_world(wx: int, wy: int, *, max_ms: int = 600):
                 # needs_pitch = not y_close and not needs_pitch_up
                 needs_yaw = not x_in_range or not y_in_range
                 needs_scale = not (500 <= current_scale <= 600)  # Check if scale is in reasonable range
+
+                # Exit early once we're "good enough"
+                if (x_in_range and y_in_range) and (not needs_pitch_up) and (not needs_yaw) and (not needs_scale):
+                    break
                 
                 # Handle pitch adjustments
                 if needs_pitch_up:
@@ -121,8 +126,8 @@ def aim_midtop_at_world(wx: int, wy: int, *, max_ms: int = 600):
                     else:
                         ipc.scroll(1)   # Zoom in
                 
-                # Wait before next check
-                time.sleep(check_interval)
+                # Wait before next check (use existing sleep util for variability)
+                sleep_exponential(check_interval * 0.8, check_interval * 1.2, 1.0)
         
         finally:
             # Always release all pressed keys when done

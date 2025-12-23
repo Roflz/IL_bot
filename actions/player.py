@@ -1,6 +1,9 @@
+import logging
+import time
 from typing import Optional, Union
 
 from actions import inventory, widgets
+from actions import chat
 from . import tab
 from .timing import wait_until
 from helpers.runtime_utils import ipc
@@ -8,6 +11,7 @@ from helpers.vars import get_var
 from constants import PLAYER_ANIMATIONS
 from helpers.utils import sleep_exponential
 from helpers.keyboard import press_spacebar
+from helpers.utils import random_number
 
 
 def get_player_plane(default=None):
@@ -177,6 +181,48 @@ def get_y() -> Optional[int]:
 def get_player_position():
     position  = (get_x(), get_y())
     return position
+
+
+def find_other_player_on_tile(tile_x: int, tile_y: int, plane: int | None = None) -> dict | None:
+    """
+    Find any *other* player (not the local player) standing on a specific world tile.
+
+    Args:
+        tile_x: World X coordinate of the tile
+        tile_y: World Y coordinate of the tile
+        plane: Optional plane to match (0/1/2/3). If None, any plane matches.
+
+    Returns:
+        The first matching player dict if found, otherwise None.
+    """
+    try:
+        # Determine local player's name so we can exclude it
+        me_resp = ipc.get_player() or {}
+        me = (me_resp.get("player") or {}) if me_resp.get("ok") else {}
+        my_name = me.get("name")
+
+        players_resp = ipc.get_players() or {}
+        if not players_resp.get("ok"):
+            return None
+        players = players_resp.get("players", []) or []
+        if not players:
+            return None
+
+        for p in players:
+            if my_name and p.get("name") == my_name:
+                continue
+
+            px = p.get("worldX")
+            py = p.get("worldY")
+            pp = p.get("plane", p.get("worldP", 0))
+
+            if px == tile_x and py == tile_y and (plane is None or int(pp) == int(plane)):
+                return p
+
+        return None
+    except Exception as e:
+        print(f"[PLAYERS] Error finding other player on tile ({tile_x}, {tile_y}, {plane}): {e}")
+        return None
 
 def in_cutscene(timeout: float = 0.35) -> bool:
     """
@@ -384,11 +430,6 @@ def get_health() -> Optional[int]:
     player_data = resp.get("player")
     if not player_data:
         return None
-    
-    # Try healthRatio first (current hitpoints)
-    health_ratio = player_data.get("healthRatio")
-    if health_ratio is not None and health_ratio > 0:
-        return health_ratio
     
     # Fallback to hitpoints skill level
     skills = player_data.get("skills", {})
@@ -598,6 +639,67 @@ def get_world() -> Optional[int]:
         return None
     
     return resp.get("world")
+
+
+def random_world(kind: str = "f2p", exclude_current: bool = True, debug: bool = False) -> int | None:
+    """
+    Return a random world id of the requested type, optionally excluding the current world.
+
+    Args:
+        kind: Either "f2p" or "p2p" (case-insensitive).
+        exclude_current: If True, and IPC is available, the current world will be excluded.
+
+    Returns:
+        A world id (int) or None if no eligible worlds exist.
+    """
+    k = (kind or "").strip().lower()
+    if k not in ("f2p", "p2p"):
+        raise ValueError("kind must be 'f2p' or 'p2p'")
+
+    want_members = (k == "p2p")
+
+    # IPC-provided world list (RuneLite-side source of truth).
+    resp = None
+    worlds: list[dict] = []
+    try:
+        resp = ipc.get_worlds()
+        if resp and resp.get("ok") and isinstance(resp.get("worlds"), list):
+            worlds = resp.get("worlds") or []
+    except Exception as e:
+        if debug:
+            logging.exception("[random_world] ipc.get_worlds() raised: %s", e)
+        worlds = []
+
+    # No IPC support / failed to fetch list.
+    if not worlds:
+        if debug:
+            logging.info("[random_world] get_worlds failed/empty resp=%s", resp)
+        return None
+
+    try:
+        cur = get_world() if exclude_current else None
+    except Exception:
+        cur = None
+
+    eligible: list[int] = []
+    for w in worlds:
+        try:
+            wid = int(w.get("id"))
+        except Exception:
+            continue
+        if cur is not None and wid == int(cur):
+            continue
+        mem = bool(w.get("members", False))
+        if mem != want_members:
+            continue
+        eligible.append(wid)
+
+    eligible = list(sorted(set(eligible)))
+    if not eligible:
+        return None
+
+    idx = int(random_number(0, len(eligible) - 1, output_type="int"))
+    return int(eligible[idx])
 
 
 def hop_world(world_id: int) -> bool:

@@ -9,9 +9,10 @@ from actions import find_chat_message, \
     click_chat_message
 from actions import wait_until
 from actions import other_offer_contains, accept_trade, other_offer_confirmation_contains, \
-    accept_trade_confirm, find_player_by_name, trade_with_player, my_offer_contains, offer_all_items
+    accept_trade_confirm, trade_with_player, my_offer_contains, offer_all_items
 import actions.travel as trav
 import actions.bank as bank
+from actions.trade import find_player_by_name
 
 from .base import Plan
 from .utilities.bank_plan_simple import BankPlanSimple

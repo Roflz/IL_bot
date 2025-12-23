@@ -88,6 +88,7 @@ def open_bank(prefer: str | None = None) -> dict | None:
     prefer = (prefer or "").strip().lower()
     want_booth = prefer in ("bank booth", "grand exchange booth")
     want_banker = prefer == "banker"
+    want_chest = prefer in ("bank chest", "chest")
 
     # Auto-prefer banker in GE area
     try:
@@ -102,13 +103,15 @@ def open_bank(prefer: str | None = None) -> dict | None:
 
     # Get bank objects and NPCs using new IPC format
     booth_resp = ipc.get_objects("bank booth", ["GAME"])
+    chest_resp = ipc.get_objects("bank chest", ["GAME"])
     banker_resp = ipc.get_npcs("banker")
 
     # Extract objects and NPCs from responses
     booths = booth_resp.get("objects", []) if booth_resp and booth_resp.get("ok") else []
+    chests = chest_resp.get("objects", []) if chest_resp and chest_resp.get("ok") else []
     bankers = banker_resp.get("npcs", []) if banker_resp and banker_resp.get("ok") else []
 
-    logging.info(f"[OPEN_BANK] Found {len(booths)} booths, {len(bankers)} bankers")
+    logging.info(f"[OPEN_BANK] Found {len(chests)} chests, {len(booths)} booths, {len(bankers)} bankers")
 
     # Find the best target
     target = None
@@ -123,8 +126,18 @@ def open_bank(prefer: str | None = None) -> dict | None:
                 return i
         return None
 
+    # Prefer bank chest when requested
+    if want_chest and chests:
+        for chest in chests:
+            actions = chest.get("actions", [])
+            bank_idx = find_bank_action(actions)
+            if bank_idx is not None:
+                target = chest
+                target_type = "object"
+                break
+
     # Try to find booth first (unless specifically wanting banker)
-    if not want_banker and booths:
+    if target is None and (not want_banker) and booths:
         for booth in booths:
             name = booth.get("name", "").lower()
             actions = booth.get("actions", [])
@@ -198,7 +211,7 @@ def open_bank(prefer: str | None = None) -> dict | None:
     world_coords_dict = {"x": gx, "y": gy, "p": 0}
 
     if target_type == "object":
-        from ..services.click_with_camera import click_object_with_camera
+        from services.click_with_camera import click_object_with_camera
         result = click_object_with_camera(
             object_name=name,
             action=action,
@@ -206,7 +219,7 @@ def open_bank(prefer: str | None = None) -> dict | None:
             aim_ms=420
         )
     else:  # NPC
-        from ..services.click_with_camera import click_npc_with_camera
+        from services.click_with_camera import click_npc_with_camera
         result = click_npc_with_camera(
             npc_name=name,
             action=action,
@@ -230,7 +243,7 @@ def open_bank(prefer: str | None = None) -> dict | None:
             # Handle any special widgets
             sleep_exponential(0.3, 0.8, 1.2)  # Let interface load
 
-            from ..actions.widgets import click_widget
+            from actions.widgets import click_widget
 
             if widget_exists(43515912):
                 logging.info(f"[OPEN_BANK] Found special widget, clicking 43515933")
@@ -290,20 +303,32 @@ def withdraw_item(
                            rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)), alpha=2.0, beta=2.0)
     item_name = str(name).strip()
 
-    # --- Withdraw-All via live context menu ---
+    # --- Withdraw-All (prefer Quantity: All + left-click) ---
     if withdraw_all:
-        step = {
-            "action": "withdraw-item-all",
-            "option": "withdraw-all",
-            "click": {
-                "type": "context-select",        # uses live menu geometry via IPC "menu"        # case-insensitive match
-                "target": item_name.lower(),     # substring match against menu target
-                "x": int(cx),                    # right-click anchor (canvas)
-                "y": int(cy),
-                "open_delay_ms": 120
-            },
-            "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
-        }
+        try:
+            # Prefer selecting the bank Quantity: All button and then doing a simple left-click.
+            ensure_quantity_button_set("All")
+            step = {
+                "action": "withdraw-item-all",
+                "click": {"type": "point", "x": cx, "y": cy},
+                "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
+                "postconditions": [f"inventory contains '{item_name}'"],
+            }
+            return dispatch(step)
+        except Exception:
+            # Fallback: Withdraw-All via live context menu
+            step = {
+                "action": "withdraw-item-all",
+                "option": "withdraw-all",
+                "click": {
+                        "type": "context-select",        # uses live menu geometry via IPC "menu"
+                    "target": item_name.lower(),     # substring match against menu target
+                    "x": int(cx),                    # right-click anchor (canvas)
+                    "y": int(cy),
+                    "open_delay_ms": 120
+                },
+                "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
+            }
         return dispatch(step)
 
     if withdraw_x == 5:
@@ -325,6 +350,21 @@ def withdraw_item(
         step = {
             "action": "withdraw-item-10",
             "option": "withdraw-10",
+            "click": {
+                "type": "context-select",        # uses live menu geometry via IPC "menu"        # case-insensitive match
+                "target": item_name.lower(),     # substring match against menu target
+                "x": int(cx),                    # right-click anchor (canvas)
+                "y": int(cy),
+                "open_delay_ms": 120
+            },
+            "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
+        }
+        return dispatch(step)
+
+    if withdraw_x == 1:
+        step = {
+            "action": "withdraw-item-1",
+            "option": "withdraw-1",
             "click": {
                 "type": "context-select",        # uses live menu geometry via IPC "menu"        # case-insensitive match
                 "target": item_name.lower(),     # substring match against menu target
@@ -510,7 +550,7 @@ def close_bank() -> dict | None:
 
 def toggle_note_mode() -> dict | None:
     """Toggle bank note mode (withdraw as note/withdraw as item)"""
-    from ..constants import BANK_WIDGETS
+    from constants import BANK_WIDGETS
 
     # Get the bank note toggle widget directly
     widget_info = widgets.get_widget_info(BANK_WIDGETS["NOTE"])
@@ -670,7 +710,7 @@ def interact_inventory(item_name: str, action: str) -> dict | None:
 
             if result:
                 # Check if the correct interaction was performed
-                from ..helpers.ipc import get_last_interaction
+                from helpers.ipc import get_last_interaction
                 last_interaction = get_last_interaction()
 
                 expected_action = action
@@ -792,14 +832,14 @@ def deposit_item(item_name: str) -> dict | None:
 
             if result:
                 # Check if the correct interaction was performed
-                from ..helpers.ipc import get_last_interaction
+                from helpers.ipc import get_last_interaction
                 last_interaction = get_last_interaction()
 
                 expected_action = "deposit-" if quantity == 1 else "deposit-all"
                 expected_target = item_name
 
                 if (last_interaction and
-                    expected_action in last_interaction.get("action") and
+                    expected_action in last_interaction.get("action").lower() and
                     clean_rs(last_interaction.get("target", "")).lower() == expected_target.lower()):
                     print(f"[CLICK] {expected_target} - interaction verified")
                     return result
@@ -871,6 +911,36 @@ def _try_action(item_name: str, action: str, bounds: dict, canvas: dict) -> dict
                                bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
     else:
         cx, cy = int(canvas["x"]), int(canvas["y"])
+
+    # Pre-check: if the desired menu entry isn't present, do NOT attempt the interaction.
+    # This avoids opening the context menu / clicking when the bank menu option doesn't exist.
+    try:
+        # Hover at the target point to populate the live menu entries.
+        hover_result = ipc.click(cx, cy, hover_only=True)
+        if not (hover_result and hover_result.get("ok")):
+            return None
+
+        sleep_exponential(0.05, 0.15, 1.5)
+
+        info = ipc._send({"cmd": "menu"}) or {}
+        entries = info.get("entries") or []
+        want_opt = clean_rs(action).lower()
+        want_tgt = clean_rs(item_name).lower()
+
+        def _match(e) -> bool:
+            eo = clean_rs((e.get("option") or "")).lower()
+            et = clean_rs((e.get("target") or "")).lower()
+            # bank targets sometimes include extra text (quantity, tags); allow either-direction containment
+            opt_ok = (eo == want_opt) or (want_opt in eo) or (eo in want_opt)
+            tgt_ok = (not want_tgt) or (want_tgt in et) or (et in want_tgt)
+            return opt_ok and tgt_ok
+
+        if not any(_match(e) for e in entries):
+            print(f"[BANK] Menu option '{action}' not present for '{item_name}', skipping")
+            return None
+    except Exception:
+        # If menu probing fails, fall back to existing behavior (best effort).
+        pass
 
     # Create context click step
     step = {
@@ -1022,7 +1092,7 @@ def set_quantity_button(quantity: str) -> dict | None:
     Returns:
         Result of the click action, or None if failed
     """
-    from ..constants import BANK_WIDGETS
+    from constants import BANK_WIDGETS
 
     # Map quantity strings to widget IDs
     quantity_map = {
@@ -1094,7 +1164,7 @@ def search_bank(search_term: str) -> dict | None:
 
         if result1:
             # Check if the correct interaction was performed
-            from ..helpers.ipc import get_last_interaction
+            from helpers.ipc import get_last_interaction
             last_interaction = get_last_interaction()
 
             expected_action = "bank-search-click"
@@ -1179,7 +1249,7 @@ def click_bank_tab(tab_name: str) -> dict | None:
 
         if result:
             # Check if the correct interaction was performed
-            from ..helpers.ipc import get_last_interaction
+            from helpers.ipc import get_last_interaction
             last_interaction = get_last_interaction()
 
             expected_action = "bank-click-tab"
@@ -1451,15 +1521,16 @@ def equip_item(item_name: str, slot: str) -> bool:
         True if the equip action was successful, False otherwise
     """
     try:
-        # Determine the correct action based on slot type
-        if slot == "weapon":
-            action = "wield"
-        else:
-            action = "wear"
+        # Try both common equip actions; prefer the typical one for the slot.
+        # Some items/contexts swap "Wear" vs "Wield", so we fall back to the other.
+        actions = ["wield", "wear"] if slot == "weapon" else ["wear", "wield"]
 
-        # Use bank.interact to equip the item
-        result = interact(item_name, action)
-        return result is not None
+        for action in actions:
+            result = interact(item_name, action)
+            if result is not None:
+                return True
+
+        return False
 
     except Exception as e:
         logging.error(f"[equip_item] actions/bank.py: Error equipping {item_name} to {slot}: {e}")

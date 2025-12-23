@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 def load_collision_data(start_coords=None, dest_coords=None, buffer=200):
     """Load collision data from cache, filtered by start/destination bounds."""
     script_dir = Path(__file__).parent
-    cache_file = script_dir / "collision_cache" / "collision_map_debug.json"
+    # Cache lives in this folder (collision_cache/collision_map_debug.json)
+    cache_file = script_dir / "collision_map_debug.json"
     # Loading collision data
     
     if not cache_file.exists():
@@ -1180,8 +1181,8 @@ def main(destination_x=None, destination_y=None, port=17000):
     
     # Draw path on map
     script_dir = Path(__file__).parent
-    input_image = script_dir / "collision_cache" / "detailed_collision_map_debug.png"
-    output_image = script_dir / "collision_cache" / "path_current_to_ge_debug.png"
+    input_image = script_dir / "detailed_collision_map_debug.png"
+    output_image = script_dir / "path_current_to_ge_debug.png"
     
     draw_path_on_map(input_image, path, collision_data, output_image, start_pos=current_pos, goal_pos=DESTINATION_TARGET)
     

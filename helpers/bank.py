@@ -72,19 +72,8 @@ def bank_note_selected() -> bool:
 def bank_qty_all_selected() -> bool:
     """Check if 'All' quantity button is selected for withdrawals."""
     try:
-        quantity_buttons_data = ipc.get_bank_quantity_buttons()
-        if not quantity_buttons_data or not quantity_buttons_data.get("ok"):
-            logging.error("[bank_qty_all_selected] helpers/bank.py: Failed to get bank quantity buttons from IPC")
-            return False
-        
-        quantity_buttons = quantity_buttons_data.get("quantity_buttons", [])
-        for button_group in quantity_buttons:
-            if button_group.get("name") == "quantityAll":
-                buttons = button_group.get("buttons", [])
-                for button in buttons:
-                    if button.get("selected", False):
-                        return True
-        return False
+        # Prefer varbit-based mode detection (consistent with actions/bank.py)
+        return is_quantityall_selected()
     except Exception as e:
         logging.error(f"[bank_qty_all_selected] helpers/bank.py: {e}")
         return False
@@ -160,7 +149,7 @@ def near_any_bank(destination_area: str) -> bool:
     try:
         # Handle special case for CLOSEST_BANK
         if destination_area == "CLOSEST_BANK" or not destination_area:
-            from ..helpers.navigation import closest_bank_key
+            from helpers.navigation import closest_bank_key
             actual_bank_area = closest_bank_key()
             destination_area = actual_bank_area
 
@@ -168,7 +157,7 @@ def near_any_bank(destination_area: str) -> bool:
             return True
 
         # Check for bank booths in the specific area
-        from actions import _find_closest_object_in_area
+        from actions.objects import _find_closest_object_in_area
         bank_booth = _find_closest_object_in_area("bank booth", destination_area)
         if bank_booth:
             distance = bank_booth.get("distance", 999)
@@ -317,7 +306,7 @@ def is_swap_selected() -> bool:
     """Check if SWAP mode is selected."""
     try:
         from .widgets import click_listener_on
-        from ..constants import BANK_WIDGETS
+        from constants import BANK_WIDGETS
         return click_listener_on(BANK_WIDGETS["SWAP"])
     except Exception as e:
         logging.error(f"[is_swap_selected] helpers/bank.py: {e}")
@@ -327,7 +316,7 @@ def is_insert_selected() -> bool:
     """Check if INSERT mode is selected."""
     try:
         from .widgets import click_listener_on
-        from ..constants import BANK_WIDGETS
+        from constants import BANK_WIDGETS
         return click_listener_on(BANK_WIDGETS["INSERT"])
     except Exception as e:
         logging.error(f"[is_insert_selected] helpers/bank.py: {e}")
@@ -337,7 +326,7 @@ def is_item_selected() -> bool:
     """Check if ITEM mode is selected."""
     try:
         from .widgets import click_listener_on
-        from ..constants import BANK_WIDGETS
+        from constants import BANK_WIDGETS
         return click_listener_on(BANK_WIDGETS["ITEM"])
     except Exception as e:
         logging.error(f"[is_item_selected] helpers/bank.py: {e}")
@@ -347,7 +336,7 @@ def is_note_selected() -> bool:
     """Check if NOTE mode is selected."""
     try:
         from .widgets import click_listener_on
-        from ..constants import BANK_WIDGETS
+        from constants import BANK_WIDGETS
         return click_listener_on(BANK_WIDGETS["NOTE"])
     except Exception as e:
         logging.error(f"[is_note_selected] helpers/bank.py: {e}")

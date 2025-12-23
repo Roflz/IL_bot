@@ -1,4 +1,3 @@
-from actions import player
 from constants import *
 
 def get_nav_rect(rect_or_key):
@@ -81,6 +80,8 @@ def player_in_rect(rect: tuple[int,int,int,int]) -> bool:
     return (x0 <= x <= x1) and (y0 <= y <= y1)
 
 def closest_bank_key() -> str:
+    # Local import to avoid circular import (helpers.navigation <- actions.travel <- helpers.navigation)
+    from actions import player
     x, y = player.get_player_position()
     # If we don't know player pos, just prefer the first entry.
     if x is None or y is None:

@@ -89,7 +89,7 @@ class TutorialIslandPlan(Plan):
                                 logging.info("[TUTORIAL] Failed to click SET_NAME button")
                         else:
                             # No status yet, try initial generated name
-                            from ..constants import generate_player_name
+                            from constants import generate_player_name
                             initial_name = generate_player_name()
                             if get_widget_text(36569100) == "*" or get_widget_text(36569100) == "":
                                 type_tutorial_name(initial_name)

@@ -8,6 +8,7 @@ from helpers.runtime_utils import ipc
 from helpers.navigation import get_nav_rect, closest_bank_key, _merge_door_into_projection
 from helpers.utils import sleep_exponential, get_random_walkable_tile, get_center_weighted_walkable_tile
 from services.click_with_camera import click_ground_with_camera, click_object_with_camera
+from constants import BANK_REGIONS, REGIONS
 
 # Timing instrumentation constants
 _GO_TO_TIMING_ENABLED = True
@@ -604,8 +605,6 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False, destination: st
                 chosen = random.choice(usable[-3:])
             
             world_coords = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
-        
-        from ..services.click_with_camera import click_ground_with_camera
 
         result = click_ground_with_camera(
             world_coords=world_coords,
@@ -617,6 +616,72 @@ def go_to(rect_or_key: str | tuple | list, center: bool = False, destination: st
     
     except Exception as e:
         raise e
+
+
+def go_to_tile(tile_x: int, tile_y: int, *, plane: int | None = None, arrive_radius: int = 0, aim_ms: int = 700) -> dict | bool | None:
+    """
+    One movement click toward a specific world tile (x, y).
+
+    This is a tile-targeted companion to `go_to()` (which targets areas/rects).
+    It reuses IPC pathing + projection + door handling.
+
+    Args:
+        tile_x: World X
+        tile_y: World Y
+        plane: Optional plane. If None, uses current plane.
+        arrive_radius: Consider "arrived" if within this many tiles (Manhattan distance).
+        aim_ms: Camera aim time for `click_ground_with_camera`.
+
+    Returns:
+        - True if already within arrive_radius of the tile
+        - dict (click result) if a click was attempted
+        - None on failure
+    """
+    if not isinstance(tile_x, int) or not isinstance(tile_y, int):
+        return None
+
+    px, py = player.get_x(), player.get_y()
+    if isinstance(px, int) and isinstance(py, int):
+        if _calculate_distance(px, py, tile_x, tile_y) <= max(0, int(arrive_radius)):
+            return True
+
+    try:
+        if plane is None:
+            plane = player.get_plane()
+    except Exception:
+        plane = None
+
+    # Use a 1-tile rect around the target so IPC path returns a usable waypoint list.
+    rect = (tile_x - 1, tile_x + 1, tile_y - 1, tile_y + 1)
+    wps, _dbg_path = ipc.path(rect=rect, visualize=False)
+    if not wps:
+        return None
+
+    proj, _dbg_proj = ipc.project_many(wps)
+    proj = _merge_door_into_projection(wps, proj)
+
+    usable = [p for p in proj if isinstance(p, dict) and p.get("canvas")]
+    if not usable:
+        return None
+
+    # Handle doors (same logic as go_to()) before clicking.
+    door_plan = _first_blocking_door_from_waypoints(wps)
+    if door_plan:
+        if not _handle_door_opening(door_plan, wps):
+            return None
+        return True
+
+    chosen = usable[-1]
+    world_coords = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
+    if isinstance(world_coords, dict) and plane is not None:
+        world_coords.setdefault("p", plane)
+
+    return click_ground_with_camera(
+        world_coords=world_coords,
+        description=f"Move toward tile ({tile_x}, {tile_y})",
+        aim_ms=aim_ms,
+        waypoint_path=wps,
+    )
 
 def travel_to_bank(bank_area= "CLOSEST_BANK"):
     """Handle traveling to the bank."""
@@ -836,7 +901,7 @@ def go_to_and_find_npc(rect_or_key: str | tuple | list, npc_name: str,
     """
     print(f"[TRAVEL] Going to {rect_or_key} to find {npc_name}")
 
-    from ..actions.npc import closest_npc_by_name
+    from actions.npc import closest_npc_by_name
     if closest_npc_by_name(npc_name):
         return True
     
@@ -932,9 +997,6 @@ def move_to_random_tile_in_area(area_key: str) -> bool:
     Returns:
         bool: True if movement was successful, False otherwise
     """
-    # Import area definitions
-    from ..constants import BANK_REGIONS, REGIONS
-    
     # Get area bounds
     area_bounds = None
     if area_key in BANK_REGIONS:

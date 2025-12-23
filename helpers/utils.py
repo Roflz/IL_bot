@@ -328,7 +328,7 @@ def get_random_walkable_tile(destination_key: str, custom_dest_rect: tuple = Non
     """
     try:
         from collision_cache.pathfinder import load_collision_data, get_walkable_tiles
-        from ..helpers.navigation import get_nav_rect
+        from helpers.navigation import get_nav_rect
         
         # Get destination coordinates
         if custom_dest_rect and isinstance(custom_dest_rect, (tuple, list)) and len(custom_dest_rect) == 4:
@@ -383,7 +383,7 @@ def get_center_walkable_tile(destination_key: str, custom_dest_rect: tuple = Non
     """
     try:
         from collision_cache.pathfinder import load_collision_data, get_walkable_tiles
-        from ..helpers.navigation import get_nav_rect
+        from helpers.navigation import get_nav_rect
         
         # Get destination coordinates
         if custom_dest_rect and isinstance(custom_dest_rect, (tuple, list)) and len(custom_dest_rect) == 4:
@@ -447,7 +447,7 @@ def get_center_weighted_walkable_tile(destination_key: str, custom_dest_rect: tu
     """
     try:
         from collision_cache.pathfinder import load_collision_data, get_walkable_tiles
-        from ..helpers.navigation import get_nav_rect
+        from helpers.navigation import get_nav_rect
         
         # Get destination coordinates
         if custom_dest_rect and isinstance(custom_dest_rect, (tuple, list)) and len(custom_dest_rect) == 4:

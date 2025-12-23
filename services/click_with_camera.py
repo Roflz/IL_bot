@@ -5,9 +5,10 @@ Handles the 3-step process: camera movement, fresh coordinates, click.
 import random
 
 from helpers import unwrap_rect
+from helpers.ipc import get_last_interaction
 from helpers.utils import clean_rs, sleep_exponential, rect_beta_xy
-from ..services.camera_integration import aim_midtop_at_world
-from helpers import ipc, dispatch
+from services.camera_integration import aim_midtop_at_world
+from helpers.runtime_utils import ipc, dispatch
 from helpers.navigation import _merge_door_into_projection
 
 
@@ -89,13 +90,17 @@ def click_object_with_camera(
                         
                     if result:
                         # Check if the correct interaction was performed
-                        from helpers import get_last_interaction
                         last_interaction = get_last_interaction()
                         
                         # Use exact match or contains based on exact_match parameter
                         clean_action = clean_rs(last_interaction.get("action", ""))
-                        action_match = (clean_action.lower() == action.lower()) if exact_match else (action.lower() in clean_action.lower())
-                        target_match = (last_interaction.get("target_name", "").lower() == object_name.lower()) if exact_match else (object_name.lower() in last_interaction.get("target_name", "").lower())
+                        want_action = (action or "").lower()
+                        action_match = (clean_action.lower() == want_action) if exact_match else (
+                            (want_action in clean_action.lower()) or (clean_action.lower() in want_action)
+                        )
+                        want = clean_rs(object_name).lower()
+                        tgt = clean_rs(last_interaction.get("target_name", "")).lower()
+                        target_match = (tgt == want) if exact_match else ((want in tgt) or (tgt and (tgt in want)))
                         
                         if (last_interaction and action_match and target_match):
                             print(f"[CLICK] {object_name} ({action}) - interaction verified")
@@ -111,18 +116,30 @@ def click_object_with_camera(
                     x=world_coords['x'], 
                     y=world_coords['y'], 
                     plane=world_coords.get('p', 0),
-                    name=object_name
+                    # Don't rely on server-side name filtering here; some objects resolve via impostors.
+                    name=None
                 )
                 
                 if not objects_resp.get("ok") or not objects_resp.get("objects"):
                     continue
                 
-                # Find the matching object by name
+                # Find the matching object by name (prefer exact equality, else soft match when exact_match=False)
+                want_name = clean_rs(object_name).strip().lower()
                 matching_object = None
-                for obj in objects_resp["objects"]:
-                    if obj.get("name", "").lower() == object_name.lower():
+                soft_match = None
+                for obj in (objects_resp.get("objects") or []):
+                    nm = clean_rs(obj.get("name", "")).strip().lower()
+                    if not want_name:
                         matching_object = obj
                         break
+                    if nm == want_name:
+                        matching_object = obj
+                        break
+                    if not exact_match and ((want_name in nm) or (nm in want_name)):
+                        if soft_match is None:
+                            soft_match = obj
+                if matching_object is None and not exact_match:
+                    matching_object = soft_match
                 
                 if not matching_object or not matching_object.get("canvas"):
                     continue
@@ -161,13 +178,17 @@ def click_object_with_camera(
                 
                 if result:
                     # Check if the correct interaction was performed
-                    from helpers import get_last_interaction
                     last_interaction = get_last_interaction()
                     
                     # Use exact match or contains based on exact_match parameter
                     clean_action = clean_rs(last_interaction.get("action", ""))
-                    action_match = (clean_action.lower() == action.lower()) if exact_match else (action.lower() in clean_action.lower())
-                    target_match = (clean_rs(last_interaction.get("target", "")).lower() == object_name.lower()) if exact_match else (object_name.lower() in clean_rs(last_interaction.get("target", "")).lower())
+                    want_action = (action or "").lower()
+                    action_match = (clean_action.lower() == want_action) if exact_match else (
+                        (want_action in clean_action.lower()) or (clean_action.lower() in want_action)
+                    )
+                    want = clean_rs(object_name).lower()
+                    tgt = clean_rs(last_interaction.get("target", "")).lower()
+                    target_match = (tgt == want) if exact_match else ((want in tgt) or (tgt and (tgt in want)))
                     
                     if (last_interaction and action_match and target_match):
                         print(f"[CLICK] {object_name} - interaction verified")
@@ -267,13 +288,17 @@ def click_npc_with_camera(
                 
                 if result:
                     # Check if the correct interaction was performed
-                    from helpers import get_last_interaction
                     last_interaction = get_last_interaction()
                     
                     # Use exact match or contains based on exact_match parameter
                     clean_action = clean_rs(last_interaction.get("action", ""))
-                    action_match = (clean_action == action) if exact_match else (action in clean_action)
-                    target_match = (clean_rs(last_interaction.get("target", "")).lower() == npc_name.lower()) if exact_match else (npc_name.lower() in clean_rs(last_interaction.get("target", "")).lower())
+                    want_action = clean_rs(action).lower()
+                    action_match = (clean_action.lower() == want_action) if exact_match else (
+                        (want_action in clean_action.lower()) or (clean_action.lower() in want_action)
+                    )
+                    want = clean_rs(npc_name).lower()
+                    tgt = clean_rs(last_interaction.get("target", "")).lower()
+                    target_match = (tgt == want) if exact_match else ((want in tgt) or (tgt and (tgt in want)))
                     
                     if (last_interaction and action_match and target_match):
                         print(f"[CLICK] {npc_name} - interaction verified")
@@ -285,6 +310,137 @@ def click_npc_with_camera(
         return None
     
     except Exception as e:
+        raise
+
+
+def click_npc_with_camera_no_reacquire(
+    target_npc: dict,
+    action: str = None,
+    world_coords: dict = None,
+    aim_ms: int = 420,
+    exact_match: bool = False,
+) -> dict | None:
+    """
+    Click an NPC with camera movement, WITHOUT re-acquiring a (potentially different) NPC from IPC.
+
+    This is meant to be used when the caller has already selected/filtered a specific NPC (e.g. not
+    in combat, not 0% hp) and wants to click *that* NPC, not whichever IPC reports as "closest"
+    at click-time.
+    """
+    try:
+        if not isinstance(target_npc, dict):
+            return None
+
+        if not world_coords:
+            # Prefer explicit world_coords; otherwise attempt to use the NPC's attached world coords
+            world_coords = target_npc.get("world")
+        if not isinstance(world_coords, dict):
+            return None
+
+        npc_name = (target_npc.get("name") or "").strip() or "Unknown"
+
+        # Try camera retry directions: first try without moving camera, then LEFT, then RIGHT
+        camera_retry_directions = [None, "LEFT", "RIGHT"]
+        camera_retry_duration = 0.5  # Move camera for 500ms
+
+        for _, direction in enumerate(camera_retry_directions):
+            # Move camera if this is not the first attempt
+            if direction is not None:
+                try:
+                    ipc.key_press(direction)
+                    sleep_exponential(camera_retry_duration * 0.8, camera_retry_duration * 1.2, 1.0)
+                    ipc.key_release(direction)
+                except Exception:
+                    pass  # Don't fail if camera movement fails
+
+            # Try multiple attempts with different coordinates
+            max_attempts = 3
+            for _attempt in range(max_attempts):
+                # Move camera to target tile (still OK; doesn't change which NPC we're targeting)
+                aim_midtop_at_world(world_coords["x"], world_coords["y"], max_ms=aim_ms)
+
+                # Pick click point from the already-selected NPC (no IPC npc query here)
+                rect = unwrap_rect(target_npc.get("clickbox")) or unwrap_rect(target_npc.get("bounds"))
+                anchor = {}
+                point = None
+
+                if rect:
+                    cx, cy = rect_beta_xy(
+                        (
+                            rect.get("x", 0),
+                            rect.get("x", 0) + rect.get("width", 0),
+                            rect.get("y", 0),
+                            rect.get("y", 0) + rect.get("height", 0),
+                        ),
+                        alpha=2.0,
+                        beta=2.0,
+                    )
+                    anchor = {"bounds": rect}
+                    point = {"x": cx, "y": cy}
+                else:
+                    canvas = target_npc.get("canvas") if isinstance(target_npc.get("canvas"), dict) else None
+                    if isinstance((canvas or {}).get("x"), (int, float)) and isinstance((canvas or {}).get("y"), (int, float)):
+                        point = {"x": int(canvas["x"]), "y": int(canvas["y"])}
+                    else:
+                        # Last resort: tile center projection (still no NPC re-acquire)
+                        proj = ipc.project_world_tile(int(world_coords["x"]), int(world_coords["y"])) or {}
+                        if proj.get("ok") and proj.get("onscreen") and isinstance(proj.get("canvas"), dict):
+                            point = {"x": int(proj["canvas"]["x"]), "y": int(proj["canvas"]["y"])}
+
+                if not point:
+                    continue
+
+                # Small delay to ensure hover is registered
+                sleep_exponential(0.05, 0.15, 1.5)
+
+                step = {
+                    "action": "click-npc-context",
+                    "click": {
+                        "type": "context-select",
+                        "x": point["x"],
+                        "y": point["y"],
+                        "row_height": 16,
+                        "start_dy": 10,
+                        "open_delay_ms": 120,
+                        "exact_match": exact_match,
+                    },
+                    "option": action,
+                    "target": {"domain": "npc", "name": npc_name, **anchor, "world": world_coords},
+                    "anchor": point,
+                }
+
+                result = dispatch(step)
+                if not result:
+                    continue
+
+                # Check if the correct interaction was performed
+                last_interaction = get_last_interaction() or {}
+
+                # Action verify: if action is None (left click), don't require action match
+                clean_action = clean_rs(last_interaction.get("action", ""))
+                if action is None:
+                    action_match = True
+                else:
+                    action_match = (clean_action == action) if exact_match else (action in clean_action)
+
+                # Target verify (prefer target_name which is already cleaned in the plugin)
+                target_name = clean_rs(last_interaction.get("target_name") or last_interaction.get("target") or "")
+                if exact_match:
+                    target_match = target_name.lower() == npc_name.lower()
+                else:
+                    want = clean_rs(npc_name).lower()
+                    tgt = target_name.lower()
+                    target_match = (want in tgt) or (tgt and (tgt in want))
+
+                if action_match and target_match:
+                    print(f"[CLICK] {npc_name} - interaction verified (no reacquire)")
+                    return result
+
+                print(f"[CLICK] {npc_name} - incorrect interaction, retrying (no reacquire)...")
+
+        return None
+
+    except Exception:
         raise
 
 
@@ -433,7 +589,6 @@ def click_ground_with_camera(
                 
                 if result:
                     # Check if the correct interaction was performed
-                    from helpers import get_last_interaction
                     last_interaction = get_last_interaction()
                     
                     if last_interaction and last_interaction.get("action") == "Walk here":

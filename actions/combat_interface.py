@@ -5,7 +5,7 @@ from typing import Optional, List, Dict, Any
 from . import tab
 from .timing import wait_until
 from helpers.runtime_utils import ipc, dispatch
-from helpers.utils import rect_beta_xy
+from helpers.utils import rect_beta_xy, sleep_exponential
 
 
 def get_combat_styles() -> List[Dict[str, Any]]:
@@ -66,7 +66,7 @@ def select_combat_style(style_index: int) -> Optional[dict]:
         wait_until(lambda: tab.is_tab_open("COMBAT"), max_wait_ms=3000)
     
     # Combat style widget IDs
-    widget_ids = [38862853, 38862857, 38862861, 38862865]
+    widget_ids = [38862854, 38862858, 38862862, 38862866] # attack, str, shared, def
     widget_id = widget_ids[style_index]
     
     # Get widget data to get bounds
@@ -98,6 +98,8 @@ def select_combat_style(style_index: int) -> Optional[dict]:
         "click": {"type": "point", "x": x, "y": y},
         "target": {"domain": "combat", "name": f"style_{style_index}"}
     }
+
+    sleep_exponential(0.4, 1.5, 1)
     
     # Execute the click
     result = dispatch(step)
@@ -135,6 +137,8 @@ def current_combat_style() -> Optional[int]:
         style_index = 0
     elif combat_style_value == 1:  # Strength  
         style_index = 1
+    elif combat_style_value == 2:  # Shared
+        style_index = 2
     elif combat_style_value == 3:  # Defence
         style_index = 3
     else:

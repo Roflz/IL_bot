@@ -35,7 +35,7 @@ from actions import get_player_plane
 from actions import wait_until
 from constants import REGIONS
 from helpers import quest as quest_helper
-from helpers import closest_npc_by_name
+from helpers.npc import closest_npc_by_name
 from helpers.keyboard import press_esc
 from .utilities.bank_plan_simple import BankPlanSimple
 from .utilities.ge import GePlan, create_ge_plan
