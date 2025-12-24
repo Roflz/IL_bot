@@ -45,7 +45,7 @@ from helpers.utils import exponential_number, sleep_exponential
 from helpers.widgets import widget_exists
 from helpers.inventory import has_only_items
 from helpers.inventory import inv_count
-from helpers.vars import get_var, has_blast_furnace_foreman_permission
+from helpers.vars import get_var
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -81,77 +81,74 @@ class BlastFurnacePlan(Plan):
 
     def _pay_foreman_if_needed(self) -> int | None:
         """
-        Foreman payment guard for Smithing < 60.
+        Foreman payment guard.
         The fee lasts ~10 minutes. We re-pay when there is <1 minute remaining.
-        
-        If the player has completed the Fremennik Hard diary (Blast Furnace foreman
-        permission), payment is skipped entirely.
+        Skips payment if smithing level is 60+ (free access).
 
         Returns:
           - int delay to return from the current phase if we took an action
           - None if no action needed (caller should continue)
         """
-        # Check if player has Fremennik Hard diary completed (free Blast Furnace access)
-        has_permission = has_blast_furnace_foreman_permission()
-        if has_permission:
-            # Player has free access, no payment needed
+        # Skip payment if smithing level is 60+
+        smith_lvl = player.get_skill_level("smithing")
+        if (smith_lvl is not None) and int(smith_lvl) >= 60:
             return None
         
-        smith_lvl = player.get_skill_level("smithing")
-        if (smith_lvl is not None) and int(smith_lvl) < 60:
-            # Timer: start when we pay. Re-pay when remaining < 60s.
-            interval_s = 10 * 60
-            repay_when_remaining_le_s = 60
-            ts = self.state.get("foreman_paid_ts")
-            if ts is not None:
-                try:
-                    elapsed = float(time.monotonic() - float(ts))
-                except Exception:
-                    elapsed = interval_s
-            else:
+        # Timer: start when we pay. Re-pay when remaining < 60s.
+        interval_s = 10 * 60
+        repay_when_remaining_le_s = 60
+        ts = self.state.get("foreman_paid_ts")
+        if ts is not None:
+            try:
+                elapsed = float(time.monotonic() - float(ts))
+            except Exception:
                 elapsed = interval_s
+        else:
+            elapsed = interval_s
 
-            should_pay = (ts is None) or (elapsed >= float(interval_s - repay_when_remaining_le_s))
-            if not should_pay:
-                return None
+        should_pay = (ts is None) or (elapsed >= float(interval_s - repay_when_remaining_le_s))
+        if not should_pay:
+            return None
 
-            if not inventory.has_item("Coins", min_qty=2500):
-                # If we can't afford the foreman fee, stop the plan.
-                try:
-                    if int(bank.get_item_count("Coins") or 0) < 2500:
-                        return self._set_done("Not enough coins to pay foreman (need 2,500).")
-                except Exception:
+        if not inventory.has_item("Coins", min_qty=2500):
+            if not inventory.is_empty():
+                bank.deposit_inventory()
+                wait_until(lambda: inventory.is_empty(), max_wait_ms=1000)
+            # If we can't afford the foreman fee, stop the plan.
+            try:
+                if int(bank.get_item_count("Coins") or 0) < 2500:
                     return self._set_done("Not enough coins to pay foreman (need 2,500).")
-                bank.withdraw_item("Coins", withdraw_all=True)
-                wait_until(lambda: inventory.has_item("Coins", min_qty=2500), max_wait_ms=1200)
-                if not inventory.has_item("Coins", min_qty=2500):
-                    return self._set_done("Failed to withdraw enough coins to pay foreman (need 2,500).")
-                return exponential_number(250, 800, 1.2)
-            bank.close_bank()
-            wait_until(bank.is_closed, min_wait_ms=exponential_number(350, 1200, 1), max_wait_ms=3000)
-            if not npc.click_npc_action_simple_prefer_no_camera("Blast Furnace Foreman", "Pay"):
-                return exponential_number(450, 1200, 1.2)
-            wait_until(lambda: chat.can_choose_option())
-            sleep_exponential(0.35, 1.2, 1)
-            coins_before = inv_count("Coins")
-            chat.choose_option(1)
-            # Verify we actually paid (should consume 2,500 coins)
-            if not wait_until(lambda: inv_count("Coins") <= (coins_before - 2500), max_wait_ms=4000):
-                return exponential_number(450, 1200, 1.2)
-            self.state["foreman_paid"] = True
-            self.state["foreman_paid_ts"] = time.monotonic()
-            sleep_exponential(0.35, 1.2, 1)
-            objects.click_object_closest_by_distance_prefer_no_camera(
-                "Bank chest",
-                action="Use",
-                types=["GAME"],
-                exact_match_object=False,
-                exact_match_target_and_action=False,
-                require_action_on_object=True,
-            )
-            wait_until(bank.is_open, max_wait_ms=7000)
-            return exponential_number(350, 1100, 1.2)
-        return None
+            except Exception:
+                return self._set_done("Not enough coins to pay foreman (need 2,500).")
+            bank.withdraw_item("Coins", withdraw_all=True)
+            wait_until(lambda: inventory.has_item("Coins", min_qty=2500), max_wait_ms=1200)
+            if not inventory.has_item("Coins", min_qty=2500):
+                return self._set_done("Failed to withdraw enough coins to pay foreman (need 2,500).")
+            return exponential_number(250, 800, 1.2)
+        bank.close_bank()
+        wait_until(bank.is_closed, min_wait_ms=exponential_number(350, 1200, 1), max_wait_ms=3000)
+        if not npc.click_npc_action_simple_prefer_no_camera("Blast Furnace Foreman", "Pay"):
+            return exponential_number(450, 1200, 1.2)
+        wait_until(lambda: chat.can_choose_option())
+        sleep_exponential(0.35, 1.2, 1)
+        coins_before = inv_count("Coins")
+        chat.choose_option(1)
+        # Verify we actually paid (should consume 2,500 coins)
+        if not wait_until(lambda: inv_count("Coins") <= (coins_before - 2500), max_wait_ms=4000):
+            return exponential_number(450, 1200, 1.2)
+        self.state["foreman_paid"] = True
+        self.state["foreman_paid_ts"] = time.monotonic()
+        sleep_exponential(0.35, 1.2, 1)
+        objects.click_object_closest_by_distance_prefer_no_camera(
+            "Bank chest",
+            action="Use",
+            types=["GAME"],
+            exact_match_object=False,
+            exact_match_target_and_action=False,
+            require_action_on_object=True,
+        )
+        wait_until(bank.is_open, max_wait_ms=7000)
+        return exponential_number(350, 1100, 1.2)
 
     def coffer_coins(self, timeout: float = 0.35) -> int | None:
         """
@@ -243,7 +240,7 @@ class BlastFurnacePlan(Plan):
         # Deposit whatever stamina dose remains
         for nm in pot_names:
             if inventory.has_item(nm):
-                bank.deposit_item(nm)
+                bank.deposit_item(nm, deposit_all=True)
                 break
 
         return exponential_number(200, 650, 1.2)
@@ -293,6 +290,10 @@ class BlastFurnacePlan(Plan):
 
         # Withdraw coins (use your preferred bank flow)
         try:
+            # Deposit inventory before filling coffer to avoid full inventory issues
+            if bank.is_open() and not inventory.is_empty():
+                bank.deposit_inventory()
+                wait_until(lambda: inventory.is_empty(), max_wait_ms=1000)
             available = int(inv_count("Coins") or 0) + int(bank.get_item_count("Coins") or 0)
             if available < int(deposit_amt):
                 self._set_done(f"Not enough coins to top up coffer (need {deposit_amt}).")
@@ -404,20 +405,13 @@ class BlastFurnacePlan(Plan):
             wait_until(bank.is_open, max_wait_ms=7000)
             return exponential_number(350, 1100, 1.2)
 
-        # Clear inventory first so we have space to withdraw coins for foreman/coffer,
-        # BUT do not re-deposit if we're already holding coins (mid-payment/top-up flow).
-        # Also skip if we already have plenty of space.
-        if not inventory.has_item("Coins") and inventory.get_empty_slots_count() < 3:
-            if bank.deposit_inventory():
-                return exponential_number(200, 650, 1.2)
-
-        # Foreman: if Smithing < 60, pay once at the beginning.
+        # Foreman: pay every ~10 minutes (when <1 min remains)
         foreman_delay = self._pay_foreman_if_needed()
         if foreman_delay is not None:
             return foreman_delay
 
         # coffer guard
-        if not self.ensure_coffer_minimum(min_coins=5_000, top_up_to=25_000, bank_prefer="bank chest"):
+        if not self.ensure_coffer_minimum(min_coins=5_000, top_up_to=75_000, bank_prefer="bank chest"):
             return exponential_number(450, 1500, 1.2)
 
         # Stamina upkeep (after foreman+coffer, before withdrawing ores)
@@ -487,7 +481,7 @@ class BlastFurnacePlan(Plan):
             self.set_phase("SMELT")
             return exponential_number(250, 900, 1.2)
 
-        # Foreman: if Smithing < 60, re-pay every ~10 minutes (when <1 min remains)
+        # Foreman: re-pay every ~10 minutes (when <1 min remains)
         foreman_delay = self._pay_foreman_if_needed()
         if foreman_delay is not None:
             return foreman_delay
@@ -498,7 +492,7 @@ class BlastFurnacePlan(Plan):
             logging.info(f"[{self.id}] Coffer coins: {coins}")
 
         # Top up the coffer if low (tune thresholds as needed)
-        if not self.ensure_coffer_minimum(min_coins=5_000, top_up_to=25_000, bank_prefer="bank chest"):
+        if not self.ensure_coffer_minimum(min_coins=5_000, top_up_to=75_000, bank_prefer="bank chest"):
             return exponential_number(450, 1500, 1.2)
 
         # Stamina upkeep (after foreman+coffer, before withdrawing ores)
@@ -675,7 +669,9 @@ class BlastFurnacePlan(Plan):
                 self.set_phase("BANK_DEPOSIT")
             return exponential_number(0, 600, 1.1)
 
-        return exponential_number(250, 900, 1.2)
+        else:
+            self.set_phase("BANK_DEPOSIT")
+        return exponential_number(0, 600, 1.2)
 
     def _handle_bank_deposit(self) -> int:
         if not bank.is_open():
@@ -692,7 +688,7 @@ class BlastFurnacePlan(Plan):
 
         # Deposit ALL bars
         if inventory.has_item("Steel bar"):
-            bank.deposit_item("Steel bar")
+            bank.deposit_item("Steel bar", deposit_all=True)
             wait_until(lambda: not inventory.has_item("Steel bar"), max_wait_ms=1000)
             return 0
 

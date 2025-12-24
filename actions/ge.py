@@ -1484,7 +1484,7 @@ def withdraw_items_to_sell(required_items: list, item_requirements: dict, plan_i
             items_withdrawn = []
             for item, required_qty in missing_items:
                 if inventory.has_unnoted_item(item) or (bank.has_item(item) and inventory.has_item(item)):
-                    bank.deposit_item(item)
+                    bank.deposit_item(item, deposit_all=True)
                     if not wait_until(lambda: not inv.has_item(item)):
                         return {"status": "error", "error": f"Could not withdraw {item}"}
                 try:
@@ -1576,7 +1576,7 @@ def check_and_sell_required_items(required_items: list, item_requirements: dict,
             items_withdrawn = []
             for item, required_qty in missing_items:
                 if inventory.has_unnoted_item(item) or (bank.has_item(item) and inventory.has_item(item)):
-                    bank.deposit_item(item)
+                    bank.deposit_item(item, deposit_all=True)
                     if not wait_until(lambda: not inv.has_item(item)):
                         return False
                 try:

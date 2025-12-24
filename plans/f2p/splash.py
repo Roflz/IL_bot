@@ -21,9 +21,9 @@ from helpers.utils import sleep_exponential
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from .base import Plan
-from .utilities.bank_plan_simple import BankPlanSimple
-from .utilities.ge import GePlan
+from plans.base import Plan
+from plans.utilities.bank_plan_simple import BankPlanSimple
+from plans.utilities.ge import GePlan
 
 
 class SplashPlan(Plan):

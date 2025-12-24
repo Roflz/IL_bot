@@ -48,7 +48,7 @@ from pathlib import Path
 import sys
 
 from actions import close_ge
-from helpers.utils import exponential_number
+from helpers.utils import exponential_number, sleep_exponential
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -125,17 +125,20 @@ class BankPlanSimple(Plan):
         logged_in = player.logged_in()
         if not logged_in:
             player.login()
-            return self.loop_interval_ms
+            sleep_exponential(0.3, 0.8, 1.2)
+            return exponential_number(300, 800, 1.2)
         if ge.is_open():
             close_ge()
-            return
+            sleep_exponential(0.2, 0.5, 1.0)
+            return exponential_number(200, 500, 1.0)
         if bank.is_open() and phase == "TRAVEL_TO_BANK":
             self.set_phase("CHECK_ITEMS")
             phase = "CHECK_ITEMS"
 
         if not bank.is_open() and not phase == "SETUP_COMPLETE" and not phase == "TRAVEL_TO_BANK" and not phase == "OPEN_BANK":
             bank.open_bank()
-            return self.loop_interval_ms
+            sleep_exponential(0.3, 0.7, 1.2)
+            return exponential_number(300, 700, 1.2)
 
 
         match(phase):
@@ -161,7 +164,7 @@ class BankPlanSimple(Plan):
                 return self._handle_setup_complete()
 
         logging.warning(f"[{self.id}] Unknown phase: {phase}")
-        return self.loop_interval_ms
+        return exponential_number(300, 800, 1.2)
     
     def _handle_travel_to_bank(self) -> int:
         """Handle traveling to the bank."""
@@ -174,21 +177,23 @@ class BankPlanSimple(Plan):
             else:
                 logging.info(f"[{self.id}] Traveling to closest bank...")
                 travel.go_to_closest_bank()
-            return self.loop_interval_ms
+            sleep_exponential(0.5, 1.5, 1.3)
+            return exponential_number(500, 1500, 1.3)
         
         logging.info(f"[{self.id}] Near bank, opening...")
         self.set_phase("OPEN_BANK")
-        return self.loop_interval_ms
+        return exponential_number(200, 500, 1.0)
     
     def _handle_open_bank(self) -> int:
         """Handle opening the bank."""
         if not bank.is_open():
             bank.open_bank()
-            return self.loop_interval_ms
+            sleep_exponential(0.3, 0.7, 1.2)
+            return exponential_number(300, 700, 1.2)
         
         logging.info(f"[{self.id}] Bank opened, checking items...")
         self.set_phase("CHECK_ITEMS")
-        return self.loop_interval_ms
+        return exponential_number(200, 500, 1.0)
     
     def _handle_check_items(self) -> int:
         """Handle checking what items we have and need."""
@@ -246,13 +251,14 @@ class BankPlanSimple(Plan):
         
         logging.info(f"[{self.id}] All required items available, proceeding with setup...")
         self.set_phase("DEPOSIT_INVENTORY")
-        return 10
+        return exponential_number(100, 300, 1.0)
     
     def _handle_deposit_inventory(self) -> int:
         """Handle depositing inventory."""
         if self.deposit_all and not inventory.is_empty():
             logging.info(f"[{self.id}] Depositing inventory...")
             bank.deposit_inventory()
+            sleep_exponential(0.3, 0.7, 1.2)
             if not wait_until(inventory.is_empty, max_wait_ms=3000):
                 logging.error(f"[{self.id}] Failed to deposit inventory")
                 self.error_message = "Failed to deposit inventory"
@@ -264,7 +270,7 @@ class BankPlanSimple(Plan):
             self.set_phase("EQUIP_ITEMS")
         else:
             self.set_phase("WITHDRAW_ITEMS")
-        return self.loop_interval_ms
+        return exponential_number(200, 500, 1.0)
     
     def _handle_withdraw_items(self) -> int:
         """Handle withdrawing required items."""
@@ -272,6 +278,7 @@ class BankPlanSimple(Plan):
 
         if not inventory.is_empty():
             bank.deposit_inventory()
+            sleep_exponential(0.3, 0.7, 1.2)
             if not wait_until(lambda: inventory.is_empty, min_wait_ms=exponential_number(0.3, 0.6, 1)):
                 return self.ERROR
         
@@ -282,10 +289,12 @@ class BankPlanSimple(Plan):
                 
                 if quantity == -1:  # Withdraw all
                     bank.withdraw_item(item_name, withdraw_all=True)
+                    sleep_exponential(0.3, 0.7, 1.2)
                     if not wait_until(lambda: inventory.has_item(item_name), min_wait_ms=exponential_number(0.3, 0.8, 1)):
                         return self.ERROR
                 else:
                     bank.withdraw_item(item_name, quantity)
+                    sleep_exponential(0.3, 0.7, 1.2)
                     if not wait_until(lambda: inventory.has_item(item_name, quantity), min_wait_ms=exponential_number(0.3, 0.8, 1)):
                         return self.ERROR
                 
@@ -293,6 +302,7 @@ class BankPlanSimple(Plan):
             else:
                 # Simple string item (default quantity 1)
                 bank.withdraw_item(item, 1)
+                sleep_exponential(0.3, 0.7, 1.2)
                 logging.info(f"[{self.id}] Withdrew 1 {item}")
         
         # Verify that we have the expected items in inventory
@@ -344,10 +354,12 @@ class BankPlanSimple(Plan):
                     if bank.has_item(item_name) and not inventory.has_item(item_name):
                         logging.info(f"[{self.id}] Withdrawing {item_name} from bank...")
                         bank.withdraw_item(item_name, 1)
+                        sleep_exponential(0.3, 0.7, 1.2)
                         if not wait_until(lambda: inventory.has_item(item_name), min_wait_ms=exponential_number(0.6, 1.2, 1)):
                             return self.ERROR
                         logging.info(f"[{self.id}] Equipping {item_name} to {slot} slot...")
                         bank.equip_item(item_name, slot)
+                        sleep_exponential(0.3, 0.7, 1.2)
                         if not wait_until(lambda: equipment.has_equipped(item_name),
                                           min_wait_ms=exponential_number(0.3, 0.8, 1)):
                             return self.ERROR
@@ -358,6 +370,7 @@ class BankPlanSimple(Plan):
                     elif inventory.has_item(item_name):
                         logging.info(f"[{self.id}] Equipping {item_name} to {slot} slot...")
                         bank.equip_item(item_name, slot)
+                        sleep_exponential(0.3, 0.7, 1.2)
                         if not wait_until(lambda: equipment.has_equipped(item_name), min_wait_ms=exponential_number(0.3, 0.8, 1)):
                             return self.ERROR
                         equipped = True
@@ -369,18 +382,20 @@ class BankPlanSimple(Plan):
                 logging.warning(f"[{self.id}] No available items for {slot} slot: {items}")
 
         bank.deposit_inventory()
+        sleep_exponential(0.3, 0.7, 1.2)
         if not wait_until(inventory.is_empty, min_wait_ms=exponential_number(0.3, 0.8, 1.5)):
-            return self.loop_interval_ms
+            return exponential_number(300, 800, 1.2)
         self.set_phase("WITHDRAW_ITEMS")
-        return self.loop_interval_ms
+        return exponential_number(200, 500, 1.0)
     
     def _handle_setup_complete(self) -> int:
         """Handle setup completion."""
         logging.info(f"[{self.id}] Bank setup completed successfully!")
         if bank.is_open():
             bank.close_bank()
+            sleep_exponential(0.2, 0.5, 1.0)
             if not wait_until(bank.is_closed, max_wait_ms=3000):
-                return self.loop_interval_ms
+                return exponential_number(200, 500, 1.0)
         return self.SUCCESS
     
     def get_missing_items(self) -> List[Dict[str, Any]]:

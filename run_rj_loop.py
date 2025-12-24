@@ -170,9 +170,10 @@ def discover_plans():
                                 break
                     
                     if plan_class:
-                        # Use the subdirectory name as the plan key (e.g., "crafting")
-                        plans[subdir.name] = plan_class
-                        print(f"[PLAN_DISCOVERY] Registered plan: {subdir.name} -> {plan_class.__name__}")
+                        # Use composite key: subdirectory_name + plan_name (e.g., "p2p_cooking", "p2p_crafting")
+                        plan_key = f"{subdir.name}_{plan_name}"
+                        plans[plan_key] = plan_class
+                        print(f"[PLAN_DISCOVERY] Registered plan: {plan_key} -> {plan_class.__name__}")
                     else:
                         print(f"[PLAN_DISCOVERY] No plan class found in {subdir.name}.{plan_name}")
                         

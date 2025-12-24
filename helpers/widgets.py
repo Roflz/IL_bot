@@ -1,3 +1,4 @@
+import logging
 from helpers.rects import unwrap_rect
 from helpers.utils import rect_beta_xy
 from helpers.runtime_utils import ipc
@@ -320,4 +321,32 @@ def click_listener_on(widget_id: int) -> bool:
         
     except Exception as e:
         print(f"[ERROR] Failed to check click listener for widget {widget_id}: {e}")
+        return False
+
+
+def is_widget_highlighted(widget_id: int, highlighted_count: int) -> bool:
+    """
+    Check if a widget is highlighted by counting its children.
+    
+    Some widgets use child count to indicate highlight state (e.g., crafting widgets:
+    4 children = highlighted, 3 children = not highlighted).
+    
+    Args:
+        widget_id: The widget ID to check
+        highlighted_count: The child count that indicates the widget is highlighted
+        
+    Returns:
+        True if widget is highlighted (has the specified number of children), False otherwise
+    """
+    try:
+        from .runtime_utils import ipc
+        children_response = ipc.get_widget_children(widget_id)
+        if not children_response or not children_response.get('ok'):
+            return False
+        
+        child_count = children_response.get('count', 0)
+        return child_count == highlighted_count
+        
+    except Exception as e:
+        logging.error(f"[is_widget_highlighted] helpers/widgets.py: {e}")
         return False

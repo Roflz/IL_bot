@@ -20,10 +20,10 @@ from actions import wait_until
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from .base import Plan
-from .utilities.bank_plan_simple import BankPlanSimple
-from .utilities.ge import GePlan, create_ge_plan
-from .utilities.attack_npcs import AttackNpcsPlan, create_cow_attack_plan
+from plans.base import Plan
+from plans.utilities.bank_plan_simple import BankPlanSimple
+from plans.utilities.ge import GePlan, create_ge_plan
+from plans.utilities.attack_npcs import AttackNpcsPlan, create_cow_attack_plan
 
 
 class FaladorCows2Plan(Plan):

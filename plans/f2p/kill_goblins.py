@@ -22,8 +22,8 @@ from helpers.keyboard import press_spacebar
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from .base import Plan
-from .utilities.bank_plan_simple import BankPlanSimple
+from plans.base import Plan
+from plans.utilities.bank_plan_simple import BankPlanSimple
 from helpers import setup_camera_optimal
 from helpers import set_phase_with_camera
 from helpers.tab import is_tab_open

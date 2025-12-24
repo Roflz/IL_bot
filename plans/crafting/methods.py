@@ -90,6 +90,31 @@ class CraftingMethods:
             # Default to 27 rings if calculation fails
             return 27
     
+    def calculate_gold_bracelets_needed_for_level_20(self) -> int:
+        """Calculate how many gold bracelets are needed to reach level 20."""
+        try:
+            # Get current crafting level and experience
+            current_exp = player.get_skill_xp('crafting')
+            
+            # Calculate experience needed to reach level 20
+            exp_needed_for_level_20 = EXPERIENCE_TABLE[20] - current_exp
+            
+            # Each gold bracelet gives 11 experience
+            exp_per_bracelet = CRAFTING_EXP.get("gold_bracelet", 11.0)
+            
+            # Calculate bracelets needed (round up)
+            bracelets_needed = int(exp_needed_for_level_20 / exp_per_bracelet) + 1
+            
+            logging.info(f"[{self.id}] Current exp: {current_exp}, Need for level 20: {EXPERIENCE_TABLE[20]}, Exp needed: {exp_needed_for_level_20}")
+            logging.info(f"[{self.id}] Gold bracelets needed: {bracelets_needed} (each gives {exp_per_bracelet} exp)")
+            
+            return bracelets_needed
+            
+        except Exception as e:
+            logging.error(f"[{self.id}] Error calculating gold bracelets needed: {e}")
+            # Default to 36 bracelets if calculation fails (more needed since less XP per bracelet)
+            return 36
+    
     def calculate_leather_needed_for_ge(self) -> int:
         """Calculate how much leather is needed to reach level 5 for GE purchases."""
         try:
@@ -249,7 +274,7 @@ class CraftingMethods:
             materials = {}
             
             # Check for gems and gold bars
-            gem_types = ["Sapphire", "Emerald", "Ruby", "Diamond"]
+            gem_types = ["Sapphire", "Emerald", "Ruby", "Diamond", "Opal", "Jade", "Topaz"]
             for gem in gem_types:
                 count = bank.get_item_count(gem)
                 if count > 0:
@@ -344,11 +369,26 @@ class CraftingMethods:
         try:
             # Define jewelry options (no gold jewelry)
             jewelry_options = {
+                # Rings
                 "Sapphire ring": {"level": 20, "materials": {"Gold bar": 1, "Sapphire": 1}, "mould": "ring mould", "xp": 40},
-                "Sapphire necklace": {"level": 22, "materials": {"Gold bar": 1, "Sapphire": 1}, "mould": "necklace mould", "xp": 55},
                 "Emerald ring": {"level": 27, "materials": {"Gold bar": 1, "Emerald": 1}, "mould": "ring mould", "xp": 55},
+                "Ruby ring": {"level": 34, "materials": {"Gold bar": 1, "Ruby": 1}, "mould": "ring mould", "xp": 70},
+                "Diamond ring": {"level": 43, "materials": {"Gold bar": 1, "Diamond": 1}, "mould": "ring mould", "xp": 85},
+                "Opal ring": {"level": 16, "materials": {"Gold bar": 1, "Opal": 1}, "mould": "ring mould", "xp": 30},
+                "Jade ring": {"level": 13, "materials": {"Gold bar": 1, "Jade": 1}, "mould": "ring mould", "xp": 32},
+                "Topaz ring": {"level": 16, "materials": {"Gold bar": 1, "Topaz": 1}, "mould": "ring mould", "xp": 35},
+                # Necklaces
+                "Sapphire necklace": {"level": 22, "materials": {"Gold bar": 1, "Sapphire": 1}, "mould": "necklace mould", "xp": 55},
                 "Emerald necklace": {"level": 29, "materials": {"Gold bar": 1, "Emerald": 1}, "mould": "necklace mould", "xp": 60},
                 "Ruby necklace": {"level": 40, "materials": {"Gold bar": 1, "Ruby": 1}, "mould": "necklace mould", "xp": 75},
+                "Diamond necklace": {"level": 56, "materials": {"Gold bar": 1, "Diamond": 1}, "mould": "necklace mould", "xp": 90},
+                # Bracelets
+                "Sapphire bracelet": {"level": 23, "materials": {"Gold bar": 1, "Sapphire": 1}, "mould": "bracelet mould", "xp": 60},
+                "Emerald bracelet": {"level": 30, "materials": {"Gold bar": 1, "Emerald": 1}, "mould": "bracelet mould", "xp": 65},
+                "Ruby bracelet": {"level": 42, "materials": {"Gold bar": 1, "Ruby": 1}, "mould": "bracelet mould", "xp": 80},
+                "Opal bracelet": {"level": 18, "materials": {"Gold bar": 1, "Opal": 1}, "mould": "bracelet mould", "xp": 45},
+                "Jade bracelet": {"level": 16, "materials": {"Gold bar": 1, "Jade": 1}, "mould": "bracelet mould", "xp": 48},
+                "Topaz bracelet": {"level": 19, "materials": {"Gold bar": 1, "Topaz": 1}, "mould": "bracelet mould", "xp": 50},
             }
             
             # Filter by crafting level
@@ -475,11 +515,27 @@ class CraftingMethods:
             crafting_level = player.get_skill_level("crafting")
             # Define all possible crafting items with their requirements
             crafting_items = {
+                # Rings
                 "Sapphire ring": {"level": 20, "materials": {"Gold bar": 1, "Sapphire": 1}, "xp": 40},
-                "Sapphire necklace": {"level": 22, "materials": {"Gold bar": 1, "Sapphire": 1}, "xp": 55},
                 "Emerald ring": {"level": 27, "materials": {"Gold bar": 1, "Emerald": 1}, "xp": 55},
+                "Ruby ring": {"level": 34, "materials": {"Gold bar": 1, "Ruby": 1}, "xp": 70},
+                "Diamond ring": {"level": 43, "materials": {"Gold bar": 1, "Diamond": 1}, "xp": 85},
+                "Opal ring": {"level": 16, "materials": {"Gold bar": 1, "Opal": 1}, "xp": 30},
+                "Jade ring": {"level": 13, "materials": {"Gold bar": 1, "Jade": 1}, "xp": 32},
+                "Topaz ring": {"level": 16, "materials": {"Gold bar": 1, "Topaz": 1}, "xp": 35},
+                # Necklaces
+                "Sapphire necklace": {"level": 22, "materials": {"Gold bar": 1, "Sapphire": 1}, "xp": 55},
                 "Emerald necklace": {"level": 29, "materials": {"Gold bar": 1, "Emerald": 1}, "xp": 60},
                 "Ruby necklace": {"level": 40, "materials": {"Gold bar": 1, "Ruby": 1}, "xp": 75},
+                "Diamond necklace": {"level": 56, "materials": {"Gold bar": 1, "Diamond": 1}, "xp": 90},
+                # Bracelets
+                "Gold bracelet": {"level": 7, "materials": {"Gold bar": 1}, "xp": 11},
+                "Sapphire bracelet": {"level": 23, "materials": {"Gold bar": 1, "Sapphire": 1}, "xp": 60},
+                "Emerald bracelet": {"level": 30, "materials": {"Gold bar": 1, "Emerald": 1}, "xp": 65},
+                "Ruby bracelet": {"level": 42, "materials": {"Gold bar": 1, "Ruby": 1}, "xp": 80},
+                "Opal bracelet": {"level": 18, "materials": {"Gold bar": 1, "Opal": 1}, "xp": 45},
+                "Jade bracelet": {"level": 16, "materials": {"Gold bar": 1, "Jade": 1}, "xp": 48},
+                "Topaz bracelet": {"level": 19, "materials": {"Gold bar": 1, "Topaz": 1}, "xp": 50},
             }
             
             # Filter items by crafting level
@@ -767,11 +823,24 @@ class CraftingMethods:
             # Define jewelry items to check for
             jewelry_items = [
                 "Gold ring",
+                "Gold bracelet",
                 "Sapphire ring", 
                 "Sapphire necklace",
+                "Sapphire bracelet",
                 "Emerald ring",
-                "Emerald necklace", 
-                "Ruby necklace"
+                "Emerald necklace",
+                "Emerald bracelet",
+                "Ruby ring",
+                "Ruby necklace",
+                "Ruby bracelet",
+                "Diamond ring",
+                "Diamond necklace",
+                "Opal ring",
+                "Opal bracelet",
+                "Jade ring",
+                "Jade bracelet",
+                "Topaz ring",
+                "Topaz bracelet"
             ]
             
             # Check each item in both bank and inventory
@@ -805,11 +874,26 @@ class CraftingMethods:
             
             # Define jewelry options (no gold jewelry)
             jewelry_options = {
+                # Rings
                 "Sapphire ring": {"level": 20, "materials": {"Gold bar": 1, "Sapphire": 1}, "mould": "ring mould", "xp": 40},
-                "Sapphire necklace": {"level": 22, "materials": {"Gold bar": 1, "Sapphire": 1}, "mould": "necklace mould", "xp": 55},
                 "Emerald ring": {"level": 27, "materials": {"Gold bar": 1, "Emerald": 1}, "mould": "ring mould", "xp": 55},
+                "Ruby ring": {"level": 34, "materials": {"Gold bar": 1, "Ruby": 1}, "mould": "ring mould", "xp": 70},
+                "Diamond ring": {"level": 43, "materials": {"Gold bar": 1, "Diamond": 1}, "mould": "ring mould", "xp": 85},
+                "Opal ring": {"level": 16, "materials": {"Gold bar": 1, "Opal": 1}, "mould": "ring mould", "xp": 30},
+                "Jade ring": {"level": 13, "materials": {"Gold bar": 1, "Jade": 1}, "mould": "ring mould", "xp": 32},
+                "Topaz ring": {"level": 16, "materials": {"Gold bar": 1, "Topaz": 1}, "mould": "ring mould", "xp": 35},
+                # Necklaces
+                "Sapphire necklace": {"level": 22, "materials": {"Gold bar": 1, "Sapphire": 1}, "mould": "necklace mould", "xp": 55},
                 "Emerald necklace": {"level": 29, "materials": {"Gold bar": 1, "Emerald": 1}, "mould": "necklace mould", "xp": 60},
                 "Ruby necklace": {"level": 40, "materials": {"Gold bar": 1, "Ruby": 1}, "mould": "necklace mould", "xp": 75},
+                "Diamond necklace": {"level": 56, "materials": {"Gold bar": 1, "Diamond": 1}, "mould": "necklace mould", "xp": 90},
+                # Bracelets
+                "Sapphire bracelet": {"level": 23, "materials": {"Gold bar": 1, "Sapphire": 1}, "mould": "bracelet mould", "xp": 60},
+                "Emerald bracelet": {"level": 30, "materials": {"Gold bar": 1, "Emerald": 1}, "mould": "bracelet mould", "xp": 65},
+                "Ruby bracelet": {"level": 42, "materials": {"Gold bar": 1, "Ruby": 1}, "mould": "bracelet mould", "xp": 80},
+                "Opal bracelet": {"level": 18, "materials": {"Gold bar": 1, "Opal": 1}, "mould": "bracelet mould", "xp": 45},
+                "Jade bracelet": {"level": 16, "materials": {"Gold bar": 1, "Jade": 1}, "mould": "bracelet mould", "xp": 48},
+                "Topaz bracelet": {"level": 19, "materials": {"Gold bar": 1, "Topaz": 1}, "mould": "bracelet mould", "xp": 50},
             }
             
             # Filter by crafting level and available materials

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from typing import Optional, List, Dict, Any
+import logging
 from helpers.runtime_utils import dispatch, ipc
 from helpers.widgets import widget_exists, get_widget_info
 from helpers.utils import sleep_exponential, rect_beta_xy
@@ -671,3 +672,54 @@ def click_chat_continue() -> Optional[dict]:
         "target": {"domain": "widget", "name": f"chat_continue_{widget_id}"},
     }
     return dispatch(step)
+
+
+def click_widget_or_spacebar(
+    widget_id: int,
+    highlighted_count: int = 4,
+    spacebar_probability: float = 0.85,
+    spacebar_probability_range: tuple[float, float] = (0.80, 0.90)
+) -> Optional[dict]:
+    """
+    Click a widget or press spacebar based on highlight state and probability.
+    
+    If widget is highlighted (has highlighted_count children), uses spacebar with given probability.
+    Otherwise, always clicks the widget.
+    
+    Args:
+        widget_id: The widget ID to interact with
+        highlighted_count: The child count that indicates the widget is highlighted (default: 4)
+        spacebar_probability: Fixed probability to use spacebar if highlighted (overrides range if provided)
+        spacebar_probability_range: Range for random probability (min, max) - used if spacebar_probability not provided
+        
+    Returns:
+        Dispatch result or None if failed
+    """
+    try:
+        import random
+        from helpers.widgets import is_widget_highlighted
+        from helpers.keyboard import press_spacebar
+        
+        # Check if widget is highlighted
+        is_highlighted = is_widget_highlighted(widget_id, highlighted_count)
+        
+        # Determine if we should use spacebar
+        use_spacebar = False
+        if is_highlighted:
+            if spacebar_probability is not None:
+                use_spacebar = random.random() < spacebar_probability
+            else:
+                prob = random.uniform(spacebar_probability_range[0], spacebar_probability_range[1])
+                use_spacebar = random.random() < prob
+        
+        if use_spacebar:
+            # Press spacebar (only works when widget is highlighted)
+            result = press_spacebar()
+            return result
+        else:
+            # Click the widget (always works, and will highlight it for next time)
+            return click_widget(widget_id)
+            
+    except Exception as e:
+        logging.error(f"[click_widget_or_spacebar] actions/widgets.py: {e}")
+        return None

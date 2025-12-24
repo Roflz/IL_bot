@@ -1824,7 +1824,7 @@ def click_object_closest_by_distance_simple_no_camera(
         idx = action_index(target.get("actions"), want_action) if want_action else None
         world_coords = {"x": target.get("world", {}).get("x"), "y": target.get("world", {}).get("y"), "p": target.get("world", {}).get("p", 0)}
 
-        click_action = None if not want_action else (None if idx == 0 else want_action)
+        click_action = None if not want_action else want_action
         return click_object_no_camera(
             object_name=str(name),
             action=click_action,

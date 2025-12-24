@@ -269,7 +269,7 @@ class BankPlan(Plan):
         coin_count = 0
         try:
             if inventory.has_item("coins"):
-                bank.deposit_item("coins")
+                bank.deposit_item("coins", deposit_all=True)
                 if not wait_until(lambda: not inventory.has_item("coins"), min_wait_ms=600, max_wait_ms=3000):
                     return False
             coin_count = bank.get_item_count("Coins")

@@ -431,7 +431,11 @@ EXPERIENCE_TABLE = {
 CRAFTING_EXP = {
     "leather_gloves": 13.8,  # Experience per leather (leather gloves)
     "gold_ring": 15.0,       # Experience per gold ring
-    "sapphire_ring": 40.0    # Experience per sapphire ring
+    "gold_bracelet": 11.0,   # Experience per gold bracelet
+    "sapphire_ring": 40.0,   # Experience per sapphire ring
+    "opal_ring": 30.0,       # Experience per opal ring
+    "jade_ring": 32.0,       # Experience per jade ring
+    "topaz_ring": 35.0,      # Experience per topaz ring
 }
 
 # Jewelry Crafting Widget IDs
@@ -442,9 +446,9 @@ JEWELRY_CRAFTING_WIDGETS = {
     "EMERALD_RING": 29229066,     # S 446.10 CraftingGold.EMERALD_RING
     "RUBY_RING": 29229067,        # S 446.11 CraftingGold.RUBY_RING
     "DIAMOND_RING": 29229068,     # S 446.12 CraftingGold.DIAMOND_RING
-    "DRAGON_RING": 29229069,      # S 446.13 CraftingGold.DRAGON_RING
-    "ONYX_RING": 29229070,        # S 446.14 CraftingGold.ONYX_RING
-    "ZENYTE_RING": 29229071,      # S 446.15 CraftingGold.ZENYTE_RING
+    "OPAL_RING": 393223,      # S 446.13 CraftingGold.DRAGON_RING
+    "JADE_RING": 393224,        # S 446.14 CraftingGold.ONYX_RING
+    "TOPAZ_RING": 393225,      # S 446.15 CraftingGold.ZENYTE_RING
     
     # Necklace crafting options (Id 29229079 - Id 29229086)
     "GOLD_NECKLACE": 29229079,    # S 446.23 CraftingGold.GOLD_NECKLACE
@@ -452,7 +456,30 @@ JEWELRY_CRAFTING_WIDGETS = {
     "EMERALD_NECKLACE": 29229081,  # S 446.25 CraftingGold.EMERALD_NECKLACE
     "RUBY_NECKLACE": 29229082,     # S 446.26 CraftingGold.RUBY_NECKLACE
     "DIAMOND_NECKLACE": 29229083,  # S 446.27 CraftingGold.DIAMOND_NECKLACE
-    "DRAGON_NECKLACE": 29229084,   # S 446.28 CraftingGold.DRAGON_NECKLACE
-    "ONYX_NECKLACE": 29229085,     # S 446.29 CraftingGold.ONYX_NECKLACE
-    "ZENYTE_NECKLACE": 29229086,   # S 446.30 CraftingGold.ZENYTE_NECKLACE
+    "OPAL_NECKLACE": 393227,   # S 446.28 CraftingGold.DRAGON_NECKLACE
+    "JADE_NECKLACE": 393228,     # S 446.29 CraftingGold.ONYX_NECKLACE
+    "TOPAZ_NECKLACE": 393229,   # S 446.30 CraftingGold.ZENYTE_NECKLACE
+    
+    # Bracelet crafting options (Id 29229072 - Id 29229078)
+    "GOLD_BRACELET": 29229106,     # S 446.16 CraftingGold.GOLD_BRACELET
+    "OPAL_BRACELET": 393235,     # S 446.17 CraftingGold.OPAL_BRACELET
+    "JADE_BRACELET": 393236,     # S 446.18 CraftingGold.JADE_BRACELET
+    "TOPAZ_BRACELET": 393237,    # S 446.19 CraftingGold.TOPAZ_BRACELET
+    "SAPPHIRE_BRACELET": 29229108, # S 446.20 CraftingGold.SAPPHIRE_BRACELET
+    "EMERALD_BRACELET": 29229109,  # S 446.21 CraftingGold.EMERALD_BRACELET
+    "RUBY_BRACELET": 29229110,     # S 446.22 CraftingGold.RUBY_BRACELET
+
+    # Bracelet crafting options (Id 29229072 - Id 29229078)
+    "GOLD_AMULET": 29229093,     # S 446.16 CraftingGold.GOLD_AMULET
+    "OPAL_AMULET": 393231,     # S 446.17 CraftingGold.OPAL_AMULET
+    "JADE_AMULET": 393232,     # S 446.18 CraftingGold.JADE_AMULET
+    "TOPAZ_AMULET": 393233,    # S 446.19 CraftingGold.TOPAZ_AMULET
+    "SAPPHIRE_AMULET": 29229094, # S 446.20 CraftingGold.SAPPHIRE_AMULET
+    "EMERALD_AMULET": 29229095,  # S 446.21 CraftingGold.EMERALD_AMULET
+    "RUBY_AMULET": 29229096,     # S 446.22 CraftingGold.RUBY_AMULET
+    
+    # Opal/Jade/Topaz ring crafting options (TODO: Verify widget IDs - these may be in a different range)
+    "OPAL_RING": 0,                # TODO: Find correct widget ID for opal ring
+    "JADE_RING": 0,                # TODO: Find correct widget ID for jade ring
+    "TOPAZ_RING": 0,               # TODO: Find correct widget ID for topaz ring
 }

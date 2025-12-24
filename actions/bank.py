@@ -16,6 +16,7 @@ from helpers.utils import clean_rs, exponential_number, rect_beta_xy, sleep_expo
 from helpers.keyboard import press_enter, type_text
 from helpers.widgets import widget_exists
 from helpers.bank_inventory import find_bank_inventory_item
+from helpers.inventory import inv_count
 
 
 def is_open() -> bool:
@@ -81,9 +82,15 @@ def inv_has(name: str, min_qty: int = 1) -> bool:
         logging.error(f"[inv_has] actions/bank.py: {e}")
         return False
 
-def open_bank(prefer: str | None = None) -> dict | None:
+def open_bank(prefer: str | None = None, randomize_closest: int | None = None, prefer_no_camera: bool = False) -> dict | None:
     """
     Open a bank using the new IPC system with proper response handling.
+    
+    Args:
+        prefer: Preferred bank type ("bank booth", "banker", "bank chest", etc.)
+        randomize_closest: If set to an integer X, randomly selects between the X closest booths/bankers/chests.
+                          Uses weighted probability favoring the closest. Default None (no randomization).
+        prefer_no_camera: If True, attempts to click without moving the camera. Default False (uses camera).
     """
     prefer = (prefer or "").strip().lower()
     want_booth = prefer in ("bank booth", "grand exchange booth")
@@ -126,52 +133,103 @@ def open_bank(prefer: str | None = None) -> dict | None:
                 return i
         return None
 
+    # Helper function to select from closest X items with randomization
+    def select_from_closest(items, count: int | None = None):
+        """Select from the closest items, optionally randomizing between the first X."""
+        if not items:
+            return None
+        
+        # Sort by distance
+        sorted_items = sorted(items, key=lambda x: x.get("distance", float('inf')))
+        
+        if count is not None and len(sorted_items) >= count:
+            # Randomize between first X items
+            import random
+            # Generate weights that favor closest but look random
+            weights = []
+            for i in range(count):
+                # Weight decreases for later items
+                base_weight = 1.0 / (1.0 + i * random.uniform(0.23, 0.41))
+                weights.append(base_weight)
+            
+            # Normalize weights
+            total_weight = sum(weights)
+            weights = [w / total_weight for w in weights]
+            
+            selected = random.choices(sorted_items[:count], weights=weights, k=1)[0]
+            return selected
+        else:
+            # Just return the closest
+            return sorted_items[0]
+
     # Prefer bank chest when requested
     if want_chest and chests:
+        valid_chests = []
         for chest in chests:
             actions = chest.get("actions", [])
             bank_idx = find_bank_action(actions)
             if bank_idx is not None:
-                target = chest
+                valid_chests.append(chest)
+        
+        if valid_chests:
+            selected_chest = select_from_closest(valid_chests, randomize_closest)
+            if selected_chest:
+                target = selected_chest
                 target_type = "object"
-                break
 
     # Try to find booth first (unless specifically wanting banker)
     if target is None and (not want_banker) and booths:
+        # Collect all valid booths with bank actions
+        valid_booths = []
         for booth in booths:
             name = booth.get("name", "").lower()
             actions = booth.get("actions", [])
             bank_idx = find_bank_action(actions)
-
+            
             if bank_idx is not None and ("bank booth" in name or "grand exchange booth" in name):
-                logging.info(f"[OPEN_BANK] Selected booth: {booth.get('name')}")
-                target = booth
+                valid_booths.append(booth)
+        
+        if valid_booths:
+            selected_booth = select_from_closest(valid_booths, randomize_closest)
+            if selected_booth:
+                logging.info(f"[OPEN_BANK] Selected booth: {selected_booth.get('name')} (distance: {selected_booth.get('distance', 'unknown')})")
+                target = selected_booth
                 target_type = "object"
-                break
 
     # Try any booth if no specific booth found
     if target is None and not want_banker and booths:
+        # Collect all valid booths with bank actions
+        valid_booths = []
         for booth in booths:
             actions = booth.get("actions", [])
             bank_idx = find_bank_action(actions)
             if bank_idx is not None:
-                logging.info(f"[OPEN_BANK] Selected any booth: {booth.get('name')}")
-                target = booth
+                valid_booths.append(booth)
+        
+        if valid_booths:
+            selected_booth = select_from_closest(valid_booths, randomize_closest)
+            if selected_booth:
+                logging.info(f"[OPEN_BANK] Selected any booth: {selected_booth.get('name')} (distance: {selected_booth.get('distance', 'unknown')})")
+                target = selected_booth
                 target_type = "object"
-                break
 
     # Try banker if no booth or specifically wanting banker
     if target is None and not want_booth and bankers:
+        valid_bankers = []
         for banker in bankers:
             name = banker.get("name", "").lower()
             actions = banker.get("actions", [])
             bank_idx = find_bank_action(actions)
 
             if bank_idx is not None and ("banker" in name or want_banker):
-                logging.info(f"[OPEN_BANK] Selected banker: {banker.get('name')}")
-                target = banker
+                valid_bankers.append(banker)
+        
+        if valid_bankers:
+            selected_banker = select_from_closest(valid_bankers, randomize_closest)
+            if selected_banker:
+                logging.info(f"[OPEN_BANK] Selected banker: {selected_banker.get('name')} (distance: {selected_banker.get('distance', 'unknown')})")
+                target = selected_banker
                 target_type = "npc"
-                break
 
     if target is None:
         logging.warning(f"[OPEN_BANK] No suitable bank target found")
@@ -207,25 +265,42 @@ def open_bank(prefer: str | None = None) -> dict | None:
     if bank_idx is not None and bank_idx < len(actions):
         action = actions[bank_idx]
 
-    # Use click_with_camera methods for both objects and NPCs
+    # Use click methods based on prefer_no_camera setting
     world_coords_dict = {"x": gx, "y": gy, "p": 0}
 
     if target_type == "object":
-        from services.click_with_camera import click_object_with_camera
-        result = click_object_with_camera(
-            object_name=name,
-            action=action,
-            world_coords=world_coords_dict,
-            aim_ms=420
-        )
+        if prefer_no_camera:
+            from actions.objects import click_object_no_camera
+            result = click_object_no_camera(
+                object_name=name,
+                action=action,
+                world_coords=world_coords_dict,
+                aim_ms=420
+            )
+        else:
+            from services.click_with_camera import click_object_with_camera
+            result = click_object_with_camera(
+                object_name=name,
+                action=action,
+                world_coords=world_coords_dict,
+                aim_ms=420
+            )
     else:  # NPC
-        from services.click_with_camera import click_npc_with_camera
-        result = click_npc_with_camera(
-            npc_name=name,
-            action=action,
-            world_coords=world_coords_dict,
-            aim_ms=420
-        )
+        if prefer_no_camera:
+            from actions.npc import click_npc_action_simple_prefer_no_camera
+            result = click_npc_action_simple_prefer_no_camera(
+                name=name,
+                action=action,
+                exact_match=False
+            )
+        else:
+            from services.click_with_camera import click_npc_with_camera
+            result = click_npc_with_camera(
+                npc_name=name,
+                action=action,
+                world_coords=world_coords_dict,
+                aim_ms=420
+            )
 
     if result:
         logging.info(f"[OPEN_BANK] Click successful, waiting for bank interface")
@@ -302,6 +377,36 @@ def withdraw_item(
     cx, cy = rect_beta_xy((rect.get("x", 0), rect.get("x", 0) + rect.get("width", 0),
                            rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)), alpha=2.0, beta=2.0)
     item_name = str(name).strip()
+
+    # --- Early exit: if bank_item_count <= withdraw_x and mode would withdraw more than available, just left-click ---
+    if withdraw_x is not None and not withdraw_all:
+        bank_item_count = get_item_count(item_name)
+        if bank_item_count is not None and bank_item_count > 0:
+            if bank_item_count <= withdraw_x:
+                mode = get_bank_quantity_mode()
+                mode_quantity = None
+                
+                if mode.get("mode") == 0:  # "1"
+                    mode_quantity = 1
+                elif mode.get("mode") == 1:  # "5"
+                    mode_quantity = 5
+                elif mode.get("mode") == 2:  # "10"
+                    mode_quantity = 10
+                elif mode.get("mode") == 3:  # "X" (custom)
+                    mode_quantity = mode.get("x")
+                elif mode.get("mode") == 4:  # "All"
+                    # "All" would withdraw exactly bank_item_count, not more, so skip this optimization
+                    mode_quantity = -1
+                
+                # If mode would withdraw more than available, just do simple left-click
+                if mode_quantity == -1 or mode_quantity > bank_item_count:
+                    step = {
+                        "action": "withdraw-item",
+                        "click": {"type": "point", "x": cx, "y": cy},
+                        "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
+                        "postconditions": [f"inventory contains '{item_name}'"],
+                    }
+                    return dispatch(step)
 
     # --- Withdraw-All (prefer Quantity: All + left-click) ---
     if withdraw_all:
@@ -732,15 +837,407 @@ def interact_inventory(item_name: str, action: str) -> dict | None:
         return None
 
 
-def deposit_item(item_name: str) -> dict | None:
+def deposit_item_from_slot(
+    item_name: str, 
+    slot: dict,
+    deposit_x: int = None,
+    deposit_all: bool = False
+) -> dict | None:
     """
-    Deposit an item from player's inventory to the bank.
-    Automatically chooses the appropriate deposit method based on quantity:
-    - If quantity = 1: Uses left-click (Deposit-1)
-    - If quantity > 1: Uses context-click (Deposit-All)
-
+    Deposit an item from a specific inventory slot.
+    Replicates the withdrawal logic for intelligent deposit method selection.
+    
     Args:
         item_name: Name of the item to deposit
+        slot: Slot dict from bank widget children containing the item
+        deposit_x: Specific quantity to deposit (1, 5, 10, or custom X)
+        deposit_all: If True, deposit all of this item
+        
+    Returns:
+        Result of the interaction, or None if failed
+    """
+    try:
+        bounds = slot.get("bounds")
+        canvas_location = slot.get("canvasLocation")
+        
+        if not bounds or not canvas_location:
+            return None
+        
+        # Check quantity from inventory data
+        inv_quantity = inv_count(item_name)
+        
+        if inv_quantity <= 0:
+            return None
+        
+        cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
+                               bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
+        
+        # --- Early exit: Check bank quantity mode vs inventory count ---
+        mode = get_bank_quantity_mode()
+        mode_quantity = None
+        
+        if mode.get("mode") == 0:  # "1"
+            mode_quantity = 1
+        elif mode.get("mode") == 1:  # "5"
+            mode_quantity = 5
+        elif mode.get("mode") == 2:  # "10"
+            mode_quantity = 10
+        elif mode.get("mode") == 3:  # "X" (custom)
+            mode_quantity = mode.get("x")
+        elif mode.get("mode") == 4:  # "All"
+            mode_quantity = 9999  # Effectively unlimited
+        
+        # If bank quantity mode >= inventory count, just do simple left-click
+        if mode_quantity is not None and mode_quantity >= inv_quantity:
+            step = {
+                "action": "bank-deposit-item-single",
+                "click": {"type": "point", "x": cx, "y": cy},
+                "target": {
+                    "domain": "bank-player-inventory",
+                    "name": item_name,
+                    "bounds": bounds
+                },
+                "postconditions": [],
+            }
+            return dispatch(step)
+        
+        # --- Early exit: if inv_quantity <= deposit_x, just use Deposit-All ---
+        if deposit_x is not None and not deposit_all:
+            if inv_quantity <= deposit_x:
+                # We want to deposit all (or more than we have), so use Deposit-All
+                step = {
+                    "action": "bank-deposit-item-all",
+                    "option": "Deposit-All",
+                    "click": {
+                        "type": "context-select",
+                        "target": item_name.lower(),
+                        "x": cx,
+                        "y": cy,
+                        "open_delay_ms": 120
+                    },
+                    "target": {
+                        "domain": "bank-player-inventory",
+                        "name": item_name,
+                        "bounds": bounds
+                    },
+                    "postconditions": [],
+                }
+                return dispatch(step)
+        
+        # --- Deposit-All ---
+        if deposit_all or (deposit_x is None and inv_quantity > 1):
+            step = {
+                "action": "bank-deposit-item-all",
+                "option": "Deposit-All",
+                "click": {
+                    "type": "context-select",
+                    "target": item_name.lower(),
+                    "x": cx,
+                    "y": cy,
+                    "open_delay_ms": 120
+                },
+                "target": {
+                    "domain": "bank-player-inventory",
+                    "name": item_name,
+                    "bounds": bounds
+                },
+                "postconditions": [],
+            }
+            return dispatch(step)
+        
+        # --- Deposit-5 ---
+        if deposit_x == 5:
+            step = {
+                "action": "bank-deposit-item-5",
+                "option": "Deposit-5",
+                "click": {
+                    "type": "context-select",
+                    "target": item_name.lower(),
+                    "x": cx,
+                    "y": cy,
+                    "open_delay_ms": 120
+                },
+                "target": {
+                    "domain": "bank-player-inventory",
+                    "name": item_name,
+                    "bounds": bounds
+                },
+                "postconditions": [],
+            }
+            return dispatch(step)
+        
+        # --- Deposit-10 ---
+        if deposit_x == 10:
+            step = {
+                "action": "bank-deposit-item-10",
+                "option": "Deposit-10",
+                "click": {
+                    "type": "context-select",
+                    "target": item_name.lower(),
+                    "x": cx,
+                    "y": cy,
+                    "open_delay_ms": 120
+                },
+                "target": {
+                    "domain": "bank-player-inventory",
+                    "name": item_name,
+                    "bounds": bounds
+                },
+                "postconditions": [],
+            }
+            return dispatch(step)
+        
+        # --- Deposit-1 ---
+        if deposit_x == 1 or (deposit_x is None and inv_quantity == 1):
+            step = {
+                "action": "bank-deposit-item-single",
+                "option": "Deposit-1",
+                "click": {
+                    "type": "context-select",
+                    "target": item_name.lower(),
+                    "x": cx,
+                    "y": cy,
+                    "open_delay_ms": 120
+                },
+                "target": {
+                    "domain": "bank-player-inventory",
+                    "name": item_name,
+                    "bounds": bounds
+                },
+                "postconditions": [],
+            }
+            return dispatch(step)
+        
+        # --- Deposit-X (custom amount) ---
+        if deposit_x is not None and deposit_x > 10:
+            step = {
+                "action": "bank-deposit-item-x",
+                "option": "Deposit-X",
+                "click": {
+                    "type": "context-select",
+                    "target": item_name.lower(),
+                    "x": cx,
+                    "y": cy,
+                    "open_delay_ms": 120
+                },
+                "target": {
+                    "domain": "bank-player-inventory",
+                    "name": item_name,
+                    "bounds": bounds
+                },
+                "postconditions": [],
+            }
+            result = dispatch(step)
+            if result:
+                # Type the amount after Deposit-X is selected
+                from helpers.keyboard import type_text, press_enter
+                from helpers.utils import sleep_exponential, exponential_number
+                from .timing import wait_until
+                sleep_exponential(0.3, 0.8, 1.2)
+                type_text(str(deposit_x))
+                min_wait = int(exponential_number(400, 800, 1.0, "int"))
+                # Wait for input to be typed (no specific check available for deposit, just wait)
+                sleep_exponential(0.1, 0.3, 1.5)
+                press_enter()
+                sleep_exponential(0.3, 0.8, 1.2)
+            return result
+        
+        # --- Default: use context-click with appropriate option ---
+        if inv_quantity == 1:
+            step = {
+                "action": "bank-deposit-item-single",
+                "option": "Deposit-1",
+                "click": {
+                    "type": "context-select",
+                    "target": item_name.lower(),
+                    "x": cx,
+                    "y": cy,
+                    "open_delay_ms": 120
+                },
+                "target": {
+                    "domain": "bank-player-inventory",
+                    "name": item_name,
+                    "bounds": bounds
+                },
+                "postconditions": [],
+            }
+        else:
+            step = {
+                "action": "bank-deposit-item-all",
+                "option": "Deposit-All",
+                "click": {
+                    "type": "context-select",
+                    "target": item_name.lower(),
+                    "x": cx,
+                    "y": cy,
+                    "open_delay_ms": 120
+                },
+                "target": {
+                    "domain": "bank-player-inventory",
+                    "name": item_name,
+                    "bounds": bounds
+                },
+                "postconditions": [],
+            }
+        
+        return dispatch(step)
+    except Exception as e:
+        logging.error(f"[deposit_item_from_slot] actions/bank.py: {e}")
+        return None
+
+
+def _select_random_slot_for_item(item_name: str, bias_earlier: bool = True) -> dict | None:
+    """
+    Select a random slot for an item from the bank inventory widget.
+    If bias_earlier is True, earlier slots have higher probability.
+    
+    Args:
+        item_name: Name of the item to find
+        bias_earlier: If True, weight selection toward earlier slots
+        
+    Returns:
+        Slot dict if found, None otherwise
+    """
+    try:
+        widget_data = ipc.get_widget_children(983043)
+        if not widget_data or not widget_data.get("ok"):
+            return None
+        
+        children = widget_data.get("children", [])
+        search_name = norm_name(item_name)
+        
+        # Find all slots containing this item
+        matching_slots = []
+        for idx, child in enumerate(children):
+            child_name = child.get("name", "").strip()
+            if not child_name:
+                continue
+            
+            clean_child_name = clean_rs(child_name)
+            if norm_name(clean_child_name) == search_name:
+                matching_slots.append((idx, child))
+        
+        if not matching_slots:
+            return None
+        
+        if len(matching_slots) == 1:
+            return matching_slots[0][1]
+        
+        # Randomly select with bias toward earlier slots
+        if bias_earlier:
+            import random
+            weights = []
+            for i in range(len(matching_slots)):
+                # Weight decreases exponentially: first gets 1.0, second gets ~0.7, third gets ~0.5, etc.
+                weight = 1.0 / (1.0 + i * 0.4)
+                weights.append(weight)
+            
+            # Normalize weights
+            total_weight = sum(weights)
+            weights = [w / total_weight for w in weights]
+            
+            selected_slot = random.choices(matching_slots, weights=weights, k=1)[0][1]
+        else:
+            import random
+            selected_slot = random.choice(matching_slots)[1]
+        
+        return selected_slot
+    except Exception as e:
+        logging.error(f"[_select_random_slot_for_item] actions/bank.py: {e}")
+        return None
+
+
+def deposit_unwanted_items(required_items: list, max_unique_for_bulk: int = 3) -> dict | None:
+    """
+    Smart deposit logic: only deposit items that are not in the required items list.
+    If there are more than max_unique_for_bulk unique unwanted items, deposits all inventory.
+    Otherwise, deposits each unwanted item individually with randomized slot selection.
+    
+    Args:
+        required_items: List of item names that should be kept in inventory
+        max_unique_for_bulk: If more than this many unique unwanted items, deposit all (default: 3)
+        
+    Returns:
+        Result of the last deposit action, or None if no deposits were needed
+    """
+    try:
+        from helpers.inventory import inv_slots
+        from helpers.utils import norm_name
+        
+        # Check if we only have required items
+        if inventory.has_only_items(required_items):
+            return None
+        
+        # Get all items in inventory
+        slots = inv_slots()
+        required_normalized = {norm_name(name) for name in required_items}
+        
+        # Find unique unwanted items
+        unwanted_items = set()
+        for slot in slots:
+            if slot.get("quantity", 0) > 0:
+                item_name = slot.get("itemName", "")
+                item_normalized = norm_name(item_name)
+                if item_normalized not in required_normalized:
+                    unwanted_items.add(item_name)  # Use original name for deposit
+        
+        if not unwanted_items:
+            return None
+        
+        # If more than max_unique_for_bulk unique unwanted items, deposit all
+        if len(unwanted_items) > max_unique_for_bulk:
+            result = deposit_inventory()
+            if result:
+                from .timing import wait_until
+                wait_until(inventory.is_empty, max_wait_ms=2000)
+            return result
+        
+        # Deposit unwanted items individually with randomized slot selection
+        last_result = None
+        for item_name in unwanted_items:
+            if not inventory.has_item(item_name):
+                continue
+            
+            # Get inventory count for this item to pass to deposit methods
+            inv_quantity = inv_count(item_name)
+            if inv_quantity <= 0:
+                continue
+            
+            # Try to get a random slot for this item
+            selected_slot = _select_random_slot_for_item(item_name, bias_earlier=True)
+            
+            if selected_slot:
+                # Deposit all of this unwanted item using intelligent deposit logic
+                result = deposit_item_from_slot(item_name, selected_slot, deposit_all=True)
+            else:
+                # Fallback to standard deposit_item if slot selection fails
+                result = deposit_item(item_name, deposit_all=True)
+            
+            if result:
+                last_result = result
+                # Wait for this item to be deposited
+                from .timing import wait_until
+                wait_until(lambda name=item_name: not inventory.has_item(name), max_wait_ms=2000)
+        
+        return last_result
+    except Exception as e:
+        logging.error(f"[deposit_unwanted_items] actions/bank.py: {e}")
+        return None
+
+
+def deposit_item(
+    item_name: str,
+    deposit_x: int = None,
+    deposit_all: bool = False
+) -> dict | None:
+    """
+    Deposit an item from player's inventory to the bank.
+    Replicates the withdrawal logic for intelligent deposit method selection.
+    
+    Args:
+        item_name: Name of the item to deposit
+        deposit_x: Specific quantity to deposit (1, 5, 10, or custom X)
+        deposit_all: If True, deposit all of this item
 
     Returns:
         Result of the interaction, or None if failed
@@ -784,18 +1281,32 @@ def deposit_item(item_name: str) -> dict | None:
                 continue
 
             # Check quantity from inventory data
-            quantity = inv_count(item_name)
+            inv_quantity = inv_count(item_name)
 
-            if quantity <= 0:
+            if inv_quantity <= 0:
                 print(f"[BANK] Item '{item_name}' has no quantity to deposit")
                 continue
 
             cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
                                    bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
 
-            # Choose deposit method based on quantity
-            if quantity == 1:
-                # Use simple left-click for single items
+            # --- Early exit: Check bank quantity mode vs inventory count ---
+            mode = get_bank_quantity_mode()
+            mode_quantity = None
+            
+            if mode.get("mode") == 0:  # "1"
+                mode_quantity = 1
+            elif mode.get("mode") == 1:  # "5"
+                mode_quantity = 5
+            elif mode.get("mode") == 2:  # "10"
+                mode_quantity = 10
+            elif mode.get("mode") == 3:  # "X" (custom)
+                mode_quantity = mode.get("x")
+            elif mode.get("mode") == 4:  # "All"
+                mode_quantity = 9999  # Effectively unlimited
+            
+            # If bank quantity mode >= inventory count, just do simple left-click
+            if mode_quantity is not None and mode_quantity >= inv_quantity:
                 step = {
                     "action": "bank-deposit-item-single",
                     "click": {"type": "point", "x": cx, "y": cy},
@@ -806,9 +1317,39 @@ def deposit_item(item_name: str) -> dict | None:
                     },
                     "postconditions": [],
                 }
-                print(f"[BANK] Depositing single item '{item_name}' (left-click)")
-            else:
-                # Use context-click for multiple items
+                result = dispatch(step)
+                if result:
+                    return result
+                continue
+
+            # --- Early exit: if inv_quantity <= deposit_x, just use Deposit-All ---
+            if deposit_x is not None and not deposit_all:
+                if inv_quantity <= deposit_x:
+                    # We want to deposit all (or more than we have), so use Deposit-All
+                    step = {
+                        "action": "bank-deposit-item-all",
+                        "option": "Deposit-All",
+                        "click": {
+                            "type": "context-select",
+                            "target": item_name.lower(),
+                            "x": cx,
+                            "y": cy,
+                            "open_delay_ms": 120
+                        },
+                        "target": {
+                            "domain": "bank-player-inventory",
+                            "name": item_name,
+                            "bounds": bounds
+                        },
+                        "postconditions": [],
+                    }
+                    result = dispatch(step)
+                    if result:
+                        return result
+                    continue
+
+            # --- Deposit-All ---
+            if deposit_all or (deposit_x is None and inv_quantity > 1):
                 step = {
                     "action": "bank-deposit-item-all",
                     "option": "Deposit-All",
@@ -826,26 +1367,166 @@ def deposit_item(item_name: str) -> dict | None:
                     },
                     "postconditions": [],
                 }
-                print(f"[BANK] Depositing all items '{item_name}' (quantity: {quantity})")
+                result = dispatch(step)
+                if result:
+                    # Check if the correct interaction was performed
+                    from helpers.ipc import get_last_interaction
+                    last_interaction = get_last_interaction()
+                    expected_action = "deposit-all"
+                    expected_target = item_name
+                    if (last_interaction and
+                        expected_action in last_interaction.get("action").lower() and
+                        clean_rs(last_interaction.get("target", "")).lower() == expected_target.lower()):
+                        return result
+                continue
 
-            result = dispatch(step)
-
-            if result:
-                # Check if the correct interaction was performed
-                from helpers.ipc import get_last_interaction
-                last_interaction = get_last_interaction()
-
-                expected_action = "deposit-" if quantity == 1 else "deposit-all"
-                expected_target = item_name
-
-                if (last_interaction and
-                    expected_action in last_interaction.get("action").lower() and
-                    clean_rs(last_interaction.get("target", "")).lower() == expected_target.lower()):
-                    print(f"[CLICK] {expected_target} - interaction verified")
+            # --- Deposit-5 ---
+            if deposit_x == 5:
+                step = {
+                    "action": "bank-deposit-item-5",
+                    "option": "Deposit-5",
+                    "click": {
+                        "type": "context-select",
+                        "target": item_name.lower(),
+                        "x": cx,
+                        "y": cy,
+                        "open_delay_ms": 120
+                    },
+                    "target": {
+                        "domain": "bank-player-inventory",
+                        "name": item_name,
+                        "bounds": bounds
+                    },
+                    "postconditions": [],
+                }
+                result = dispatch(step)
+                if result:
                     return result
-                else:
-                    print(f"[CLICK] {expected_target} - incorrect interaction, retrying...")
-                    continue
+                continue
+
+            # --- Deposit-10 ---
+            if deposit_x == 10:
+                step = {
+                    "action": "bank-deposit-item-10",
+                    "option": "Deposit-10",
+                    "click": {
+                        "type": "context-select",
+                        "target": item_name.lower(),
+                        "x": cx,
+                        "y": cy,
+                        "open_delay_ms": 120
+                    },
+                    "target": {
+                        "domain": "bank-player-inventory",
+                        "name": item_name,
+                        "bounds": bounds
+                    },
+                    "postconditions": [],
+                }
+                result = dispatch(step)
+                if result:
+                    return result
+                continue
+
+            # --- Deposit-1 ---
+            if deposit_x == 1 or (deposit_x is None and inv_quantity == 1):
+                step = {
+                    "action": "bank-deposit-item-single",
+                    "option": "Deposit-1",
+                    "click": {
+                        "type": "context-select",
+                        "target": item_name.lower(),
+                        "x": cx,
+                        "y": cy,
+                        "open_delay_ms": 120
+                    },
+                    "target": {
+                        "domain": "bank-player-inventory",
+                        "name": item_name,
+                        "bounds": bounds
+                    },
+                    "postconditions": [],
+                }
+                result = dispatch(step)
+                if result:
+                    return result
+                continue
+
+            # --- Deposit-X (custom amount) ---
+            if deposit_x is not None and deposit_x > 10:
+                step = {
+                    "action": "bank-deposit-item-x",
+                    "option": "Deposit-X",
+                    "click": {
+                        "type": "context-select",
+                        "target": item_name.lower(),
+                        "x": cx,
+                        "y": cy,
+                        "open_delay_ms": 120
+                    },
+                    "target": {
+                        "domain": "bank-player-inventory",
+                        "name": item_name,
+                        "bounds": bounds
+                    },
+                    "postconditions": [],
+                }
+                result = dispatch(step)
+                if result:
+                    # Type the amount after Deposit-X is selected
+                    from helpers.keyboard import type_text, press_enter
+                    from helpers.utils import sleep_exponential, exponential_number
+                    from .timing import wait_until
+                    sleep_exponential(0.3, 0.8, 1.2)
+                    type_text(str(deposit_x))
+                    min_wait = int(exponential_number(400, 800, 1.0, "int"))
+                    sleep_exponential(0.1, 0.3, 1.5)
+                    press_enter()
+                    sleep_exponential(0.3, 0.8, 1.2)
+                    return result
+                continue
+
+            # --- Default: use context-click with appropriate option ---
+            if inv_quantity == 1:
+                step = {
+                    "action": "bank-deposit-item-single",
+                    "option": "Deposit-1",
+                    "click": {
+                        "type": "context-select",
+                        "target": item_name.lower(),
+                        "x": cx,
+                        "y": cy,
+                        "open_delay_ms": 120
+                    },
+                    "target": {
+                        "domain": "bank-player-inventory",
+                        "name": item_name,
+                        "bounds": bounds
+                    },
+                    "postconditions": [],
+                }
+            else:
+                step = {
+                    "action": "bank-deposit-item-all",
+                    "option": "Deposit-All",
+                    "click": {
+                        "type": "context-select",
+                        "target": item_name.lower(),
+                        "x": cx,
+                        "y": cy,
+                        "open_delay_ms": 120
+                    },
+                    "target": {
+                        "domain": "bank-player-inventory",
+                        "name": item_name,
+                        "bounds": bounds
+                    },
+                    "postconditions": [],
+                }
+            
+            result = dispatch(step)
+            if result:
+                return result
 
         return None
 
@@ -1535,3 +2216,84 @@ def equip_item(item_name: str, slot: str) -> bool:
     except Exception as e:
         logging.error(f"[equip_item] actions/bank.py: Error equipping {item_name} to {slot}: {e}")
         return False
+
+
+def has_materials_available(item_names: list[str]) -> dict[str, bool]:
+    """
+    Check if materials are available in either bank OR inventory.
+    
+    Useful for determining if a plan can continue before attempting to withdraw items.
+    Checks both bank and inventory for each item.
+    
+    Args:
+        item_names: List of item names to check for
+        
+    Returns:
+        Dictionary mapping item names to availability (True if available in bank or inventory, False otherwise)
+    """
+    try:
+        availability = {}
+        
+        for item_name in item_names:
+            # Check bank
+            bank_count = get_item_count(item_name)
+            bank_has_item = bank_count is not None and int(bank_count) > 0
+            
+            # Check inventory
+            inv_count_val = inv_count(item_name)
+            inventory_has_item = inv_count_val is not None and int(inv_count_val) > 0
+            
+            # Available if in either bank or inventory
+            availability[item_name] = bank_has_item or inventory_has_item
+        
+        return availability
+        
+    except Exception as e:
+        logging.error(f"[has_materials_available] actions/bank.py: {e}")
+        return {name: False for name in item_names}
+
+
+def close_bank_or_click_object(
+    object_name: str,
+    action: str,
+    click_probability_range: tuple[float, float] = (0.2347, 0.3891),
+    prefer_no_camera: bool = False
+) -> dict | None:
+    """
+    Randomly choose between closing bank normally or clicking an object directly.
+    
+    Sometimes clicks the object directly (which auto-closes bank), other times closes bank first.
+    Adds human-like variance to bank closing behavior.
+    
+    Args:
+        object_name: Name of the object to potentially click
+        action: Action to perform on the object (e.g., "Smelt", "Use")
+        click_probability_range: Tuple of (min, max) probability to click object directly (default: ~23-39%)
+        prefer_no_camera: If True, uses prefer_no_camera variant for object click
+        
+    Returns:
+        Result of the action taken, or None if failed
+    """
+    try:
+        import random
+        from actions import objects
+        
+        # Randomly decide whether to click object directly
+        click_probability = random.uniform(click_probability_range[0], click_probability_range[1])
+        click_object_directly = random.random() < click_probability
+        
+        if click_object_directly:
+            # Click object directly (will auto-close bank)
+            if prefer_no_camera:
+                result = objects.click_object_closest_by_distance_simple_prefer_no_camera(object_name, prefer_action=action)
+            else:
+                result = objects.click_object_closest_by_distance_simple(object_name, prefer_action=action)
+            return result
+        else:
+            # Close bank normally
+            return close_bank()
+            
+    except Exception as e:
+        logging.error(f"[close_bank_or_click_object] actions/bank.py: {e}")
+        # Fallback to normal bank close
+        return close_bank()

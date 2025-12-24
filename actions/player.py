@@ -12,6 +12,7 @@ from constants import PLAYER_ANIMATIONS
 from helpers.utils import sleep_exponential
 from helpers.keyboard import press_spacebar
 from helpers.utils import random_number
+import time
 
 
 def get_player_plane(default=None):
@@ -777,5 +778,56 @@ def logout() -> bool:
             
     except Exception as e:
         print(f"[LOGOUT] Error during logout: {e}")
+        return False
+
+
+def is_activity_active(
+    animation_name: str,
+    last_seen_ts_key: str,
+    idle_threshold_seconds: float,
+    state: dict
+) -> bool:
+    """
+    Check if an activity is currently active using hybrid timer + state approach.
+    
+    Tracks when we last saw a specific animation and handles brief idle moments.
+    Useful for activities that have brief animation gaps (e.g., crafting, smithing).
+    
+    Args:
+        animation_name: The animation name to check for (e.g., "SMELTING")
+        last_seen_ts_key: Key in state dict to store the last seen timestamp
+        idle_threshold_seconds: Maximum seconds since last animation to consider still active (default: 1.0)
+        state: State dictionary to track timestamps
+        
+    Returns:
+        True if activity is active (currently animating or recently animated), False otherwise
+    """
+    try:
+        now = time.time()
+        current_animation = get_player_animation()
+        
+        if current_animation == animation_name:
+            # Currently active - update last seen timestamp
+            state[last_seen_ts_key] = now
+            return True
+        else:
+            # Animation is not active - check if we saw it recently
+            last_seen_ts = state.get(last_seen_ts_key)
+            if last_seen_ts is not None:
+                time_since_last = now - float(last_seen_ts)
+                if time_since_last < idle_threshold_seconds:
+                    # Saw animation recently - still in activity cycle (brief idle), update timestamp
+                    state[last_seen_ts_key] = now
+                    return True
+                else:
+                    # Haven't seen animation in threshold time - activity is done, clear timer
+                    state[last_seen_ts_key] = None
+                    return False
+            else:
+                # Never saw animation or timer was cleared - not active
+                return False
+                
+    except Exception as e:
+        logging.error(f"[is_activity_active] actions/player.py: {e}")
         return False
 

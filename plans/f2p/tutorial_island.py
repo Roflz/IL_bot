@@ -18,7 +18,7 @@ from actions import equipment, spellbook
 from actions import wait_until
 from actions import can_click_continue_widget, click_continue_widget
 from actions import type_tutorial_name, click_tutorial_set_name
-from .base import Plan
+from plans.base import Plan
 from helpers.widgets import get_widget_text, rect_center_from_widget, get_all_character_design_buttons, widget_exists
 from helpers.utils import clean_rs, sleep_exponential
 from helpers.keyboard import press_esc, press_backspace, press_spacebar

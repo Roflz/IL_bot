@@ -683,3 +683,34 @@ def select_quantityall() -> dict | None:
     except Exception as e:
         logging.error(f"[select_quantityall] helpers/bank.py: {e}")
         return None
+
+
+def randomize_item_order(items: list, reverse_probability_range: tuple[float, float] = (0.2834, 0.4167)) -> list:
+    """
+    Randomly reverse the order of items with weighted probability.
+    
+    Creates a copy of the items list and randomly decides whether to reverse it,
+    using a random-looking percentage within the specified range for variance.
+    
+    Args:
+        items: List of items to potentially reorder
+        reverse_probability_range: Tuple of (min, max) probability to reverse order (default: ~28-42%)
+        
+    Returns:
+        List of items (potentially reversed)
+    """
+    import random
+    
+    if not items or len(items) <= 1:
+        return list(items)
+    
+    # Create a copy
+    items_copy = list(items)
+    
+    # Randomly decide whether to reverse the order
+    reverse_probability = random.uniform(reverse_probability_range[0], reverse_probability_range[1])
+    
+    if random.random() < reverse_probability:
+        items_copy.reverse()
+    
+    return items_copy

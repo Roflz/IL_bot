@@ -29,9 +29,9 @@ from helpers import set_phase_with_camera
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from .base import Plan
-from .utilities.bank_plan_simple import BankPlanSimple
-from .utilities.ge import GePlan, create_ge_plan
+from plans.base import Plan
+from plans.utilities.bank_plan_simple import BankPlanSimple
+from plans.utilities.ge import GePlan, create_ge_plan
 from actions import objects, player, chat, inventory, equipment, bank, ge
 from actions import wait_until
 from helpers.utils import exponential_number
