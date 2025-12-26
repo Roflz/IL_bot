@@ -492,7 +492,7 @@ class BlastFurnacePlan(Plan):
             logging.info(f"[{self.id}] Coffer coins: {coins}")
 
         # Top up the coffer if low (tune thresholds as needed)
-        if not self.ensure_coffer_minimum(min_coins=5_000, top_up_to=75_000, bank_prefer="bank chest"):
+        if not self.ensure_coffer_minimum(min_coins=5_000, top_up_to=25_000, bank_prefer="bank chest"):
             return exponential_number(450, 1500, 1.2)
 
         # Stamina upkeep (after foreman+coffer, before withdrawing ores)

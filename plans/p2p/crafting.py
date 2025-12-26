@@ -132,6 +132,8 @@ class CraftingPlan(Plan):
         phase = self.state.get("phase", "BANK")
         logged_in = player.logged_in()
         if not logged_in and not phase == "DONE":
+
+
             player.login()
             return exponential_number(600, 1600, 1.2)
 
