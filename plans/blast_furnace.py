@@ -139,7 +139,7 @@ class BlastFurnacePlan(Plan):
         self.state["foreman_paid"] = True
         self.state["foreman_paid_ts"] = time.monotonic()
         sleep_exponential(0.35, 1.2, 1)
-        objects.click_object_closest_by_distance_prefer_no_camera(
+        objects.click_object_closest_by_distance_no_camera(
             "Bank chest",
             action="Use",
             types=["GAME"],
@@ -264,9 +264,13 @@ class BlastFurnacePlan(Plan):
         if cur >= int(min_coins):
             return True
 
-        # Deposit a flat amount when topping up (simpler/consistent behavior).
-        deposit_amt = int(top_up_to)
-        if deposit_amt <= 0:
+        # Calculate how much we want to deposit to reach top_up_to
+        target_coffer = int(top_up_to)
+        if target_coffer <= 0:
+            return True
+        
+        desired_deposit = target_coffer - cur
+        if desired_deposit <= 0:
             return True
 
         from helpers.keyboard import type_text, press_enter
@@ -274,7 +278,7 @@ class BlastFurnacePlan(Plan):
 
         if not bank.is_open():
             if (bank_prefer or "").strip().lower() == "bank chest":
-                objects.click_object_closest_by_distance_prefer_no_camera(
+                objects.click_object_closest_by_distance_no_camera(
                     "Bank chest",
                     action="Use",
                     types=["GAME"],
@@ -291,15 +295,21 @@ class BlastFurnacePlan(Plan):
         # Withdraw coins (use your preferred bank flow)
         try:
             # Deposit inventory before filling coffer to avoid full inventory issues
-            if bank.is_open() and not inventory.is_empty():
+            while bank.is_open() and not inventory.is_empty():
                 bank.deposit_inventory()
                 wait_until(lambda: inventory.is_empty(), max_wait_ms=1000)
             available = int(inv_count("Coins") or 0) + int(bank.get_item_count("Coins") or 0)
-            if available < int(deposit_amt):
-                self._set_done(f"Not enough coins to top up coffer (need {deposit_amt}).")
+            
+            # Calculate minimum needed to meet min_coins requirement
+            min_needed = int(min_coins) - cur
+            if available < min_needed:
+                self._set_done(f"Not enough coins to meet minimum coffer requirement (need {min_needed}, have {available}).")
                 return False
-        except Exception:
-            self._set_done(f"Not enough coins to top up coffer (need {deposit_amt}).")
+            
+            # Use available coins if less than desired, otherwise use desired amount
+            deposit_amt = min(available, desired_deposit)
+        except Exception as e:
+            self._set_done(f"Error checking coins: {e}")
             return False
         bank.withdraw_item("Coins", withdraw_all=True)
         wait_until(lambda: inventory.has_item("Coins"), max_wait_ms=3000)
@@ -310,7 +320,7 @@ class BlastFurnacePlan(Plan):
         bank.close_bank()
         wait_until(bank.is_closed, max_wait_ms=4000)
 
-        objects.click_object_closest_by_distance_prefer_no_camera(
+        objects.click_object_closest_by_distance_no_camera(
             "Coffer",
             action="Use",
             types=["GAME"],
@@ -339,7 +349,7 @@ class BlastFurnacePlan(Plan):
         wait_until(lambda: (self.coffer_coins() or 0) >= int(cur) + 1, max_wait_ms=6000)
 
         if (bank_prefer or "").strip().lower() == "bank chest":
-            objects.click_object_closest_by_distance_prefer_no_camera(
+            objects.click_object_closest_by_distance_no_camera(
                 "Bank chest",
                 action="Use",
                 types=["GAME"],
@@ -355,11 +365,12 @@ class BlastFurnacePlan(Plan):
         return (self.coffer_coins() or 0) >= int(min_coins)
 
     def loop(self, ui) -> int:
-        if not player.logged_in():
+        phase = self.state.get("phase", "BANK")
+        if not player.logged_in() and phase != "DONE":
             player.login()
             return exponential_number(600, 1600, 1.2)
 
-        phase = self.state.get("phase", "BANK")
+
         match phase:
             case "INITIAL_BANK":
                 return self._handle_initial_bank()
@@ -372,7 +383,11 @@ class BlastFurnacePlan(Plan):
             case "BANK_DEPOSIT":
                 return self._handle_bank_deposit()
             case "DONE":
-                # Stay idle; user can stop the plan in the GUI.
+                if bank.is_open():
+                    bank.close_bank()
+                    return exponential_number(1000, 7000, 1.2)
+                if not player.get_y() > 10000:
+                    objects.click_object_closest_by_distance_simple_no_camera("Stairs", "Climb-up")
                 return exponential_number(3000, 7000, 1.2)
 
         logging.warning(f"[{self.id}] Unknown phase: {phase}")
@@ -394,7 +409,7 @@ class BlastFurnacePlan(Plan):
             return exponential_number(350, 1100, 1.2)
 
         if not bank.is_open():
-            objects.click_object_closest_by_distance_prefer_no_camera(
+            objects.click_object_closest_by_distance_no_camera(
                 "Bank chest",
                 action="Use",
                 types=["GAME"],
@@ -420,9 +435,24 @@ class BlastFurnacePlan(Plan):
             return stamina_delay
 
         # DONE conditions: missing Ice gloves / Coal bag
+        # Require 3 consecutive confirmations before marking as done
         if (not equipment.has_equipped("Ice gloves")) and (not inventory.has_item("Ice gloves")):
             if int(bank.get_item_count("Ice gloves") or 0) <= 0:
-                return self._set_done("Missing Ice gloves.")
+                # Increment missing count
+                missing_count = self.state.get("ice_gloves_missing_count", 0) + 1
+                self.state["ice_gloves_missing_count"] = missing_count
+                
+                if missing_count >= 3:
+                    return self._set_done("Missing Ice gloves.")
+                else:
+                    logging.warning(f"[{self.id}] Ice gloves missing (check {missing_count}/3)")
+                    return exponential_number(450, 1400, 1.2)
+            else:
+                # Ice gloves found in bank, reset counter
+                self.state["ice_gloves_missing_count"] = 0
+        else:
+            # Ice gloves found (equipped or in inventory), reset counter
+            self.state["ice_gloves_missing_count"] = 0
 
         # equipment guard
         if not equipment.ensure_only_equipped(["Ice gloves"], bank_prefer="bank chest", keep_bank_open=True):
@@ -450,7 +480,7 @@ class BlastFurnacePlan(Plan):
     def _handle_bank(self) -> int:
         # Open bank (use reusable bank logic; now supports bank chest)
         if not bank.is_open():
-            objects.click_object_closest_by_distance_prefer_no_camera(
+            objects.click_object_closest_by_distance_no_camera(
                 "Bank chest",
                 action="Use",
                 types=["GAME"],
@@ -492,7 +522,7 @@ class BlastFurnacePlan(Plan):
             logging.info(f"[{self.id}] Coffer coins: {coins}")
 
         # Top up the coffer if low (tune thresholds as needed)
-        if not self.ensure_coffer_minimum(min_coins=5_000, top_up_to=25_000, bank_prefer="bank chest"):
+        if not self.ensure_coffer_minimum(min_coins=5_000, top_up_to=75_000, bank_prefer="bank chest"):
             return exponential_number(450, 1500, 1.2)
 
         # Stamina upkeep (after foreman+coffer, before withdrawing ores)
@@ -501,9 +531,24 @@ class BlastFurnacePlan(Plan):
             return stamina_delay
 
         # DONE conditions: missing Ice gloves / Coal bag / ores
+        # Require 3 consecutive confirmations before marking as done
         if (not equipment.has_equipped("Ice gloves")) and (not inventory.has_item("Ice gloves")):
             if int(bank.get_item_count("Ice gloves") or 0) <= 0:
-                return self._set_done("Missing Ice gloves.")
+                # Increment missing count
+                missing_count = self.state.get("ice_gloves_missing_count", 0) + 1
+                self.state["ice_gloves_missing_count"] = missing_count
+                
+                if missing_count >= 3:
+                    return self._set_done("Missing Ice gloves.")
+                else:
+                    logging.warning(f"[{self.id}] Ice gloves missing (check {missing_count}/3)")
+                    return exponential_number(450, 1400, 1.2)
+            else:
+                # Ice gloves found in bank, reset counter
+                self.state["ice_gloves_missing_count"] = 0
+        else:
+            # Ice gloves found (equipped or in inventory), reset counter
+            self.state["ice_gloves_missing_count"] = 0
 
         # Enforce ONLY Ice gloves equipped (reusable helper; keeps bank open)
         if not equipment.ensure_only_equipped(["Ice gloves"], bank_prefer="bank chest", keep_bank_open=True):
@@ -516,23 +561,63 @@ class BlastFurnacePlan(Plan):
             return exponential_number(0, 650, 1.2)
 
         # Ensure coal bag is present
+        # Require 3 consecutive confirmations before marking as done
         if not inventory.has_item("Coal bag"):
             if int(bank.get_item_count("Coal bag") or 0) <= 0:
-                return self._set_done("Missing Coal bag.")
+                # Increment missing count
+                missing_count = self.state.get("coal_bag_missing_count", 0) + 1
+                self.state["coal_bag_missing_count"] = missing_count
+                
+                if missing_count >= 3:
+                    return self._set_done("Missing Coal bag.")
+                else:
+                    logging.warning(f"[{self.id}] Coal bag missing (check {missing_count}/3)")
+                    return exponential_number(450, 1400, 1.2)
+            else:
+                # Coal bag found in bank, reset counter
+                self.state["coal_bag_missing_count"] = 0
             bank.withdraw_item("Coal bag", withdraw_x=1)
             wait_until(lambda: inventory.has_item("Coal bag"), max_wait_ms=1000)
             return exponential_number(0, 650, 1.2)
+        else:
+            # Coal bag found in inventory, reset counter
+            self.state["coal_bag_missing_count"] = 0
 
         # Slight randomness: sometimes Fill coal bag before withdrawing iron.
         did_fill = bool(self.state.get("did_fill_coal_bag"))
 
         if not inventory.has_item("Iron ore"):
+            # Require 3 consecutive confirmations before marking as done
             if int(bank.get_item_count("Iron ore") or 0) <= 0:
-                return self._set_done("Out of Iron ore.")
+                # Increment missing count
+                missing_count = self.state.get("iron_ore_missing_count", 0) + 1
+                self.state["iron_ore_missing_count"] = missing_count
+                
+                if missing_count >= 3:
+                    return self._set_done("Out of Iron ore.")
+                else:
+                    logging.warning(f"[{self.id}] Iron ore missing (check {missing_count}/3)")
+                    return exponential_number(450, 1400, 1.2)
+            else:
+                # Iron ore found in bank, reset counter
+                self.state["iron_ore_missing_count"] = 0
+            
             # 35% of the time, fill first (human-ish ordering variance)
             if (not did_fill) and (random.random() < 0.3744):
+                # Require 3 consecutive confirmations before marking as done
                 if int(bank.get_item_count("Coal") or 0) <= 0:
-                    return self._set_done("Out of Coal.")
+                    # Increment missing count
+                    missing_count = self.state.get("coal_missing_count", 0) + 1
+                    self.state["coal_missing_count"] = missing_count
+                    
+                    if missing_count >= 3:
+                        return self._set_done("Out of Coal.")
+                    else:
+                        logging.warning(f"[{self.id}] Coal missing (check {missing_count}/3)")
+                        return exponential_number(450, 1400, 1.2)
+                else:
+                    # Coal found in bank, reset counter
+                    self.state["coal_missing_count"] = 0
                 # Get coal count before filling to verify the fill succeeds
                 coal_before = int(bank.get_item_count("Coal") or 0)
                 bank.interact("Coal bag", "Fill")
@@ -541,16 +626,33 @@ class BlastFurnacePlan(Plan):
                     logging.warning(f"[{self.id}] Coal bag fill may have failed (coal count did not decrease)")
                     return exponential_number(200, 600, 1.2)
                 self.state["did_fill_coal_bag"] = True
+                # Coal was successfully used, reset counter
+                self.state["coal_missing_count"] = 0
                 return exponential_number(300, 650, 1.2)
 
             bank.withdraw_item("Iron ore", withdraw_all=True)
             wait_until(lambda: inventory.has_item("Iron ore"), max_wait_ms=1000)
             return exponential_number(0, 650, 1.2)
+        else:
+            # Iron ore found in inventory, reset counter
+            self.state["iron_ore_missing_count"] = 0
 
         # Fill coal bag (once per BANK cycle)
         if not did_fill:
+            # Require 3 consecutive confirmations before marking as done
             if int(bank.get_item_count("Coal") or 0) <= 0:
-                return self._set_done("Out of Coal.")
+                # Increment missing count
+                missing_count = self.state.get("coal_missing_count", 0) + 1
+                self.state["coal_missing_count"] = missing_count
+                
+                if missing_count >= 3:
+                    return self._set_done("Out of Coal.")
+                else:
+                    logging.warning(f"[{self.id}] Coal missing (check {missing_count}/3)")
+                    return exponential_number(450, 1400, 1.2)
+            else:
+                # Coal found in bank, reset counter
+                self.state["coal_missing_count"] = 0
             # Get coal count before filling to verify the fill succeeds
             coal_before = int(bank.get_item_count("Coal") or 0)
             bank.interact("Coal bag", "Fill")
@@ -559,10 +661,20 @@ class BlastFurnacePlan(Plan):
                 logging.warning(f"[{self.id}] Coal bag fill may have failed (coal count did not decrease)")
                 return exponential_number(200, 600, 1.2)
             self.state["did_fill_coal_bag"] = True
+            # Coal was successfully used, reset counter
+            self.state["coal_missing_count"] = 0
             sleep_exponential(0.3, 0.6, 1)
 
-        # Close bank and move to smelt
-        bank.close_bank()
+        # Close bank and potentially click an object without camera
+        result = bank.close_bank_no_camera(object_name="Conveyor belt", object_action="Put-ore-on", click_object_probability=0)
+        if result is None:
+            return exponential_number(250, 900, 1.2)
+        if result["action"] == "object_click":
+            wait_until(lambda: not inventory.has_item("Iron ore"), max_wait_ms=10000)
+            self.state.pop("did_fill_coal_bag", None)
+            self.set_phase("SMELT")
+            return exponential_number(0, 400, 1.2)
+
         wait_until(bank.is_closed, max_wait_ms=3000)
         self.state.pop("did_fill_coal_bag", None)
         self.set_phase("SMELT")
@@ -582,7 +694,7 @@ class BlastFurnacePlan(Plan):
                     require_action_on_object=True,
                 )
             else:
-                objects.click_object_closest_by_distance_prefer_no_camera(
+                objects.click_object_closest_by_distance_no_camera(
                     "Conveyor belt",
                     action="Put-ore-on",
                     types=["GAME"],
@@ -596,24 +708,24 @@ class BlastFurnacePlan(Plan):
             return exponential_number(350, 1000, 1.2)
 
         if inventory.has_item("Iron ore"):
-            if random.random() < 0.0321:
-                objects.click_object_closest_by_distance(
-                    "Conveyor belt",
-                    action="Put-ore-on",
-                    types=["GAME"],
-                    exact_match_object=False,
-                    exact_match_target_and_action=False,
-                    require_action_on_object=True,
-                )
-            else:
-                objects.click_object_closest_by_distance_prefer_no_camera(
-                    "Conveyor belt",
-                    action="Put-ore-on",
-                    types=["GAME"],
-                    exact_match_object=False,
-                    exact_match_target_and_action=False,
-                    require_action_on_object=True,
-                )
+            # if random.random() < 0.0321:
+            #     objects.click_object_closest_by_distance(
+            #         "Conveyor belt",
+            #         action="Put-ore-on",
+            #         types=["GAME"],
+            #         exact_match_object=False,
+            #         exact_match_target_and_action=False,
+            #         require_action_on_object=True,
+            #     )
+            # else:
+            objects.click_object_closest_by_distance_no_camera(
+                "Conveyor belt",
+                action="Put-ore-on",
+                types=["GAME"],
+                exact_match_object=False,
+                exact_match_target_and_action=False,
+                require_action_on_object=True,
+            )
             wait_until(lambda: not inventory.has_item("Iron ore"), max_wait_ms=10000)
             return exponential_number(0, 400, 1.2)
 
@@ -626,7 +738,7 @@ class BlastFurnacePlan(Plan):
 
         if inventory.has_item("Coal"):
             # Put coal on the conveyor belt (must have Put-ore-on action)
-            objects.click_object_closest_by_distance_prefer_no_camera(
+            objects.click_object_closest_by_distance_no_camera(
                 "Conveyor belt",
                 action="Put-ore-on",
                 types=["GAME"],
@@ -643,7 +755,7 @@ class BlastFurnacePlan(Plan):
     def _handle_collect_bars(self) -> int:
         # Collect bars
         if not inventory.has_item("Steel bar"):
-            objects.click_object_closest_by_distance_prefer_no_camera(
+            objects.click_object_closest_by_distance_no_camera(
                 "Bar dispenser",
                 action=["Take", "Check"],
                 exact_match_object=False,
@@ -655,7 +767,7 @@ class BlastFurnacePlan(Plan):
                 if chat.can_continue():
                     press_spacebar()
                 elif objects.object_has_action("Bar dispenser", "Take", types=["GAME"], exact_match_object=False):
-                    objects.click_object_closest_by_distance_prefer_no_camera(
+                    objects.click_object_closest_by_distance_no_camera(
                         "Bar dispenser",
                         action="Take",
                         exact_match_object=False,
@@ -675,7 +787,7 @@ class BlastFurnacePlan(Plan):
 
     def _handle_bank_deposit(self) -> int:
         if not bank.is_open():
-            objects.click_object_closest_by_distance_prefer_no_camera(
+            objects.click_object_closest_by_distance_no_camera(
                 "Bank chest",
                 action="Use",
                 types=["GAME"],

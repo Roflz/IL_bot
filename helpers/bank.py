@@ -178,6 +178,105 @@ def near_any_bank(destination_area: str) -> bool:
         logging.error(f"[near_any_bank] helpers/bank.py: {e}")
         return False
 
+def _has_interactable_bank_in_area(bank_area: str, max_distance: int = 20) -> bool:
+    """
+    Check if there's an interactable bank (booth, chest, or banker) within the target area
+    that is within interaction distance of the player, regardless of whether the player
+    is currently in that area.
+    
+    Args:
+        bank_area: Area name to check for bank facilities (e.g., "FALADOR_BANK", "CLOSEST_BANK")
+        max_distance: Maximum distance in tiles from player to consider interactable (default: 20)
+    
+    Returns:
+        True if there's an interactable bank in the target area within max_distance, False otherwise
+    """
+    try:
+        # Handle special case for CLOSEST_BANK
+        if bank_area == "CLOSEST_BANK" or not bank_area:
+            from helpers.navigation import closest_bank_key
+            actual_bank_area = closest_bank_key()
+            bank_area = actual_bank_area
+        
+        # Get area bounds
+        from helpers.navigation import get_nav_rect
+        area_rect = get_nav_rect(bank_area)
+        if not area_rect or len(area_rect) != 4:
+            return False
+        
+        min_x, max_x, min_y, max_y = area_rect
+        
+        # Get player position for distance checking
+        player_data = ipc.get_player()
+        if not player_data or not player_data.get("ok"):
+            return False
+        
+        player = player_data.get("player", {})
+        player_x = player.get("worldX")
+        player_y = player.get("worldY")
+        player_plane = player.get("plane", 0)
+        
+        if not isinstance(player_x, int) or not isinstance(player_y, int):
+            return False
+        
+        # Helper function to find bank action index
+        def find_bank_action(actions):
+            if not actions:
+                return None
+            for i, action in enumerate(actions):
+                if action and ("bank" in action.lower() or "use" in action.lower()):
+                    return i
+            return None
+        
+        # Get all banks (booths, chests, bankers)
+        booth_resp = ipc.get_objects("bank booth", ["GAME"])
+        chest_resp = ipc.get_objects("bank chest", ["GAME"])
+        banker_resp = ipc.get_npcs("banker")
+        
+        booths = booth_resp.get("objects", []) if booth_resp and booth_resp.get("ok") else []
+        chests = chest_resp.get("objects", []) if chest_resp and chest_resp.get("ok") else []
+        bankers = banker_resp.get("npcs", []) if banker_resp and banker_resp.get("ok") else []
+        
+        # Check all banks to see if any are in the target area and within interaction distance
+        all_banks = []
+        all_banks.extend(booths)
+        all_banks.extend(chests)
+        all_banks.extend(bankers)
+        
+        for bank in all_banks:
+            # Get bank world coordinates
+            world = bank.get("world", {})
+            bank_x = world.get("x")
+            bank_y = world.get("y")
+            bank_plane = world.get("p", world.get("plane", 0))
+            
+            if not isinstance(bank_x, int) or not isinstance(bank_y, int):
+                continue
+            
+            # Check if bank is in the target area
+            if bank_x < min_x or bank_x > max_x or bank_y < min_y or bank_y > max_y:
+                continue
+            
+            # Check if bank is on the same plane
+            if int(bank_plane) != int(player_plane):
+                continue
+            
+            # Check if bank has a valid bank action
+            actions = bank.get("actions", [])
+            if find_bank_action(actions) is None:
+                continue
+            
+            # Check distance from player
+            distance = bank.get("distance", float('inf'))
+            if isinstance(distance, (int, float)) and distance <= max_distance:
+                return True
+        
+        return False
+        
+    except Exception as e:
+        logging.error(f"[_has_interactable_bank_in_area] helpers/bank.py: {e}")
+        return False
+
 def get_bank_tabs() -> list[dict]:
     """Get all bank organization tabs."""
     try:

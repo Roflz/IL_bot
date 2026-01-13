@@ -26,10 +26,12 @@ This is intentionally scaffolded and conservative: it does one action per loop a
 import logging
 import re
 import time
+import random
 
-from actions import bank, inventory, player, wait_until, objects, equipment
+from actions import bank, inventory, player, wait_until, objects, equipment, tab
 from actions.chat import can_continue
-from actions.travel import in_area, go_to
+from actions.travel import in_area, go_to, go_to_bank
+from actions.tab import is_tab_open
 from helpers.keyboard import press_spacebar
 from helpers.utils import sleep_exponential, exponential_number
 from helpers.runtime_utils import ipc
@@ -37,6 +39,16 @@ from helpers.runtime_utils import ipc
 from .base import Plan
 from helpers import setup_camera_optimal
 from helpers import set_phase_with_camera
+from services.camera_integration import (
+    set_camera_state,
+    set_interaction_object,
+    set_camera_recording,
+    CAMERA_STATE_IDLE_ACTIVITY,
+    CAMERA_STATE_OBJECT_INTERACTION,
+    CAMERA_STATE_LONG_TRAVEL,
+    CAMERA_STATE_AREA_ACTIVITY,
+    CAMERA_STATE_PHASE_TRANSITION
+)
 
 
 class MotherlodeMinePlan(Plan):
@@ -45,17 +57,17 @@ class MotherlodeMinePlan(Plan):
     DONE = 0
 
     # ---- State keys ----
-    _S_LAST_MLM_TS = "last_mlm_mining_ts"
-    _S_LAST_MINE_CLICK_TS = "last_mine_click_ts"
-    _S_CUR_VEIN_TILE = "current_ore_vein_tile"          # actual (inferred during mining)
-    _S_LAST_TARGET_VEIN_TILE = "last_target_ore_vein_tile"  # intended click
     _S_DEPOSIT_RETRY = "deposit_retry"
-    _S_MINE_PROGRESS_TS = "mine_progress_ts"
-    _S_MINE_LIMBO_COUNT = "mine_limbo_count"
+    _S_CUR_VEIN_TILE = "cur_vein_tile"
+    
+    # Water wheel constants
+    WATER_WHEEL_RUNNING_ID = 26671
+    WATER_WHEEL_NOT_RUNNING_ID = 26672
+    BROKEN_STRUT_ID = 26670
 
     def __init__(self):
         # Start by going to MLM (per your request)
-        self.state = {"phase": "BANK"}
+        self.state = {"phase": "BANK", "last_mlm_mining_ts": None}
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
 
@@ -68,7 +80,7 @@ class MotherlodeMinePlan(Plan):
         # - mlm_area: the overall MLM working area (where we mine/deposit/collect)
         # - mlm_bank_area: a small rect around the MLM bank chest inside the mine
         self.mlm_area = "MOTHERLODE_MINE"
-        self.mlm_bank_area = (3753, 3761, 5664, 5668)
+        self.mlm_bank_area = "MLM_BANK_CHEST"
 
         # Bank chest config (MLM uses a bank chest, not a banker/booth)
         self.bank_chest_names = ["Bank chest"]
@@ -109,22 +121,60 @@ class MotherlodeMinePlan(Plan):
         # Mine ore veins ONLY within this fixed area (your requested consolidation).
         # Format: (min_x, max_x, min_y, max_y)
         self.ore_vein_area = (3729, 3757, 5645, 5673)
+        
+        # Calculate area center for camera state (AREA_ACTIVITY)
+        min_x, max_x, min_y, max_y = self.ore_vein_area
+        self.area_center = {
+            "x": (min_x + max_x) // 2,
+            "y": (min_y + max_y) // 2
+        }
+        
+        # Configure camera states for MLM
+        self.camera_states = {
+            CAMERA_STATE_IDLE_ACTIVITY: {
+                "zoom_preference": "area_wide",
+                "yaw_behavior": "point_to_area_center",
+                "movement_frequency": "idle",
+                "idle_probability": 0.85,  # 85% chance to skip adjustments - camera should stay stable
+                "zoom_range": (550, 650),  # Zoom out more for MLM area
+                "pitch_range": (250, 400),  # Medium-high pitch to see character and objects
+            },
+            CAMERA_STATE_OBJECT_INTERACTION: {
+                "zoom_preference": "medium",
+                "yaw_behavior": "point_to_object",
+                "pitch_behavior": "auto",
+                "movement_frequency": "active",
+                "idle_probability": 0.0,  # Always adjust for object interactions
+                "zoom_range": (450, 550),
+                "pitch_range": (300, 500),
+            },
+            CAMERA_STATE_LONG_TRAVEL: {
+                "zoom_preference": "area_wide",
+                "yaw_behavior": "follow_path",
+                "pitch_behavior": "auto",
+                "movement_frequency": "moderate",
+                "idle_probability": 0.3,
+                "zoom_range": (500, 600),
+                "pitch_range": (150, 350),
+            },
+            CAMERA_STATE_AREA_ACTIVITY: {
+                "zoom_preference": "area_wide",
+                "yaw_behavior": "point_to_area_center",
+                "pitch_behavior": "auto",
+                "movement_frequency": "idle",
+                "idle_probability": 0.6,
+                "zoom_range": (500, 600),
+                "pitch_range": (200, 400),
+            },
+        }
 
         # Optional: recovery area to walk to if repeated hopper clicks don't register.
         # Defaults to the mining/working area, but you can make this a tight rect around the Hopper.
         self.hopper_area = self.ore_vein_area
 
-        # Mining animation "jitter" compensation:
-        # sometimes the player briefly idles between swings while still mining the same vein.
-        # If we saw MLM_MINING within this window, treat the player as still mining.
-        self.mining_anim_grace_s = 1.4
-        self.state.setdefault(self._S_LAST_MLM_TS, None)  # monotonic timestamp
-        self.state.setdefault(self._S_LAST_MINE_CLICK_TS, None)
-        self.state.setdefault(self._S_CUR_VEIN_TILE, None)
-        self.state.setdefault(self._S_LAST_TARGET_VEIN_TILE, None)
+        # Mining animation grace period for is_activity_active()
+        self.mining_anim_grace_s = 2
         self.state.setdefault(self._S_DEPOSIT_RETRY, 0)
-        self.state.setdefault(self._S_MINE_PROGRESS_TS, None)
-        self.state.setdefault(self._S_MINE_LIMBO_COUNT, 0)
 
         logging.info(f"[{self.id}] Plan initialized")
 
@@ -155,71 +205,10 @@ class MotherlodeMinePlan(Plan):
             "Uncut diamond",
         ]
 
-    # --- Generic helpers ---
-    def _player_world(self) -> dict | None:
-        """
-        Return the IPC player dict or None.
-        """
-        resp = ipc.get_player() or {}
-        if not resp.get("ok"):
-            return None
-        pl = resp.get("player") or {}
-        return pl if isinstance(pl, dict) else None
-
-    def _player_tile(self) -> tuple[int, int, int] | None:
-        """
-        Return (x, y, plane) for the local player, or None.
-        """
-        pl = self._player_world()
-        if not pl:
-            return None
-        px, py = pl.get("worldX"), pl.get("worldY")
-        if not (isinstance(px, int) and isinstance(py, int)):
-            return None
-        pp = pl.get("plane", pl.get("worldP", 0))
-        try:
-            p = int(pp) if pp is not None else 0
-        except Exception:
-            p = 0
-        return int(px), int(py), int(p)
-
-    def _open_bank_chest(self, *, max_wait_ms: int = 4000) -> bool:
-        """
-        Ensure the bank chest interface is open.
-        Returns True if bank is open (or became open), else False.
-        """
-        if bank.is_open():
-            return True
-        opened = objects.click_object_closest_by_distance_prefer_no_camera(
-            "Bank chest",
-            action="Use",
-            exact_match_object=False,
-            exact_match_target_and_action=False,
-        )
-        if opened:
-            wait_until(bank.is_open, max_wait_ms=max_wait_ms)
-        return bank.is_open()
-
-    # --- Motherlode HUD helpers (keep these simple and reuse everywhere) ---
-    def _widget_text(self, widget_id: int) -> str | None:
-        """
-        Best-effort widget text fetch via IPC.
-        """
-        try:
-            resp = ipc.get_widget_info(int(widget_id)) or {}
-            if not resp.get("ok"):
-                return None
-            w = resp.get("widget") or {}
-            txt = w.get("text")
-            return txt if isinstance(txt, str) else None
-        except Exception:
-            return None
-
-    def _widget_int(self, widget_id: int) -> int | None:
-        """
-        Extract the first integer from a widget's text (e.g. '87' or 'Space: 21').
-        """
-        txt = self._widget_text(widget_id)
+    # --- Motherlode HUD helpers ---
+    def _sack_paydirt_remaining(self) -> int | None:
+        from actions.widgets import get_widget_text
+        txt = get_widget_text(self.sack_paydirt_widget_id)
         if not txt:
             return None
         m = re.search(r"(\d+)", txt)
@@ -230,103 +219,344 @@ class MotherlodeMinePlan(Plan):
         except Exception:
             return None
 
-    def _sack_paydirt_remaining(self) -> int | None:
-        return self._widget_int(self.sack_paydirt_widget_id)
-
     def _hopper_space_left(self) -> int | None:
         # "Space: N"
-        return self._widget_int(self.sack_space_widget_id)
-
-    # --- Mining helpers ---
-    @staticmethod
-    def _is_other_player_mlm_mining(anim: object) -> bool:
-        """
-        Treat any 67xx animation as MLM mining for other players (pickaxe-dependent).
-        """
-        try:
-            a = int(anim)
-        except Exception:
-            return False
-        return 6700 <= a < 6800
-
-    @staticmethod
-    def _is_local_mlm_mining(anim_val: object) -> bool:
-        """
-        Local player: accept string aliases ("MLM_MINING"/"MINING") and 67xx ids.
-        """
-        if anim_val == "MLM_MINING" or anim_val == "MINING":
-            return True
-        try:
-            a = int(anim_val)
-        except Exception:
-            return False
-        return 6700 <= a < 6800
-
-    def _tile_has_exact_action(self, tile: tuple[int, int, int], object_name: str, action_name: str) -> bool:
-        """
-        True if the specified tile contains an object with EXACT name match and EXACT action match.
-        (Avoids confusing "Mine" with "Examine" etc.)
-        """
-        tx, ty, tp = tile
-        resp = ipc.get_object_at_tile(x=int(tx), y=int(ty), plane=int(tp), name=None) or {}
-        if not resp.get("ok"):
-            return False
-        want_obj = (object_name or "").strip().lower()
-        want_act = (action_name or "").strip().lower()
-        for obj in (resp.get("objects") or []):
-            nm = (obj.get("name") or "").strip().lower()
-            if nm != want_obj:
-                continue
-            for a in (obj.get("actions") or []):
-                if (a or "").strip().lower() == want_act:
-                    return True
-        return False
-
-    def _infer_adjacent_ore_vein_tile(self) -> tuple[int, int, int] | None:
-        """
-        While we're actively mining, infer the actual vein by selecting the closest nearby "Ore vein"
-        adjacent to the player's tile. This avoids menu ambiguity when multiple "Mine" entries exist.
-        """
-        pt = self._player_tile()
-        if not pt:
+        from actions.widgets import get_widget_text
+        txt = get_widget_text(self.sack_space_widget_id)
+        if not txt:
             return None
-        px, py, plane = pt
-
-        resp = ipc.get_objects(self.ore_vein_names[0], types=["WALL"], radius=3) or {}
-        if not resp.get("ok"):
+        m = re.search(r"(\d+)", txt)
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except Exception:
             return None
 
-        best: tuple[int, int, int] | None = None
-        best_d = 999
-        for o in (resp.get("objects") or []):
-            w = o.get("world") or {}
-            ox, oy = w.get("x"), w.get("y")
-            op = w.get("p", w.get("plane", 0))
-            if not (isinstance(ox, int) and isinstance(oy, int)):
-                continue
-            try:
-                opi = int(op) if op is not None else 0
-            except Exception:
-                opi = 0
-            if opi != plane:
-                continue
+    def _has_broken_struts(self) -> bool:
+        """
+        Check if there are broken struts that need repair.
+        Returns True only if BOTH struts are broken (2 or more broken struts with 'Hammer' action).
+        """
+        try:
+            resp = ipc.get_objects("Broken strut", types=["GAME"], radius=26) or {}
+            if not resp.get("ok"):
+                return False
+            
+            objs = resp.get("objects", []) or []
+            min_x, max_x, min_y, max_y = self.ore_vein_area
+            broken_count = 0
+            
+            for o in objs:
+                w = o.get("world", {}) or {}
+                ox, oy = w.get("x"), w.get("y")
+                op = w.get("p", w.get("plane", 0)) or 0
+                if not (isinstance(ox, int) and isinstance(oy, int)):
+                    continue
+                
+                # Check if object is in our area
+                if ox < int(min_x) or ox > int(max_x) or oy < int(min_y) or oy > int(max_y):
+                    continue
+                
+                # Check if it has 'Hammer' action
+                if objects.object_at_tile_has_action(ox, oy, int(op), "Broken strut", "Hammer", types=["GAME"], exact_match_object=True):
+                    broken_count += 1
+            
+            # Only return True if both struts are broken (2 or more)
+            return broken_count >= 2
+        except Exception as e:
+            logging.warning(f"[{self.id}] Error checking for broken struts: {e}")
+            return False
 
-            dx = abs(int(ox) - int(px))
-            dy = abs(int(oy) - int(py))
-            if dx > 2 or dy > 2:
-                continue
-            d = dx + dy
-            if d < best_d:
-                best_d = d
-                best = (int(ox), int(oy), int(opi))
-        return best
+    def _repair_broken_struts(self) -> bool:
+        """
+        Repair broken struts by hammering them.
+        Returns True if repair was successful or no broken struts found.
+        """
+        try:
+            # Check if we have a hammer
+            if not inventory.has_item("Hammer"):
+                # Need to get hammer from bank
+                if not bank.is_open():
+                    result = go_to_bank(
+                        bank_area=self.mlm_bank_area,
+                        prefer="bank chest",
+                        prefer_no_camera=True
+                    )
+                    if not result or not bank.is_open():
+                        return False
 
+                sleep_exponential(0.3, 1.1, 1.5)
+                # Withdraw hammer
+                if not bank.has_item("Hammer"):
+                    logging.warning(f"[{self.id}] No hammer in bank!")
+                    return False
+                
+                bank.withdraw_item("Hammer", withdraw_x=1)
+                wait_until(lambda: inventory.has_item("Hammer"), max_wait_ms=2500)
+                if not inventory.has_item("Hammer"):
+                    return False
+
+                sleep_exponential(0.1, 1.1, 1.5)
+                bank.close_bank()
+                wait_until(bank.is_closed, max_wait_ms=3000)
+            
+            # Find and click broken struts
+            resp = ipc.get_objects("Broken strut", types=["GAME"], radius=26) or {}
+            if not resp.get("ok"):
+                return True  # No broken struts found, consider it success
+            
+            objs = resp.get("objects", []) or []
+            min_x, max_x, min_y, max_y = self.ore_vein_area
+            repaired_count = 0
+            
+            for o in objs:
+                w = o.get("world", {}) or {}
+                ox, oy = w.get("x"), w.get("y")
+                op = w.get("p", w.get("plane", 0)) or 0
+
+                # Check if it has 'Hammer' action
+                if objects.object_at_tile_has_action(ox, oy, int(op), "Broken strut", "Hammer", types=["GAME"], exact_match_object=True):
+                    # Click the broken strut to repair it
+                    res = objects.click_object_in_area_action_auto_prefer_no_camera(
+                        "Broken strut",
+                        area=(ox, ox, oy, oy),
+                        prefer_action="Hammer",
+                        types=["GAME"],
+                        exact_match_object=True,
+                        exact_match_target_and_action=True,
+                    )
+                    if res:
+                        repaired_count += 1
+                        # Wait a bit for repair animation
+                        wait_until(lambda: player.get_player_animation() == "MLM_STRUT_REPAIR" or not objects.object_at_tile_has_action(ox, oy, int(op), "Broken strut", "Hammer", types=["GAME"], exact_match_object=True))
+                        wait_until(lambda: not objects.object_at_tile_has_action(ox, oy, int(op), "Broken strut", "Hammer", types=["GAME"], exact_match_object=True), max_wait_ms=30000)
+                        sleep_exponential(0, 1.0, 1.2)
+            
+            # If we repaired at least one, wait a moment and verify
+            if repaired_count > 0:
+                sleep_exponential(0, 1.1, 1.2)
+                # Check if struts are still broken
+                return not self._has_broken_struts()
+            
+            return True  # No broken struts to repair
+        except Exception as e:
+            logging.warning(f"[{self.id}] Error repairing broken struts: {e}")
+            return False
+
+    # --- Pickaxe helpers (reused in BANK and after COLLECT deposits) ---
     def _clear_current_vein(self) -> None:
+        old_vein = self.state.get(self._S_CUR_VEIN_TILE)
         self.state[self._S_CUR_VEIN_TILE] = None
+        if old_vein:
+            logging.info(f"[{self.id}] Cleared tracked vein: {old_vein}")
 
     def _set_current_vein(self, tile: tuple[int, int, int] | None) -> None:
         if tile:
-            self.state[self._S_CUR_VEIN_TILE] = (int(tile[0]), int(tile[1]), int(tile[2]))
+            old_vein = self.state.get(self._S_CUR_VEIN_TILE)
+            new_vein = (int(tile[0]), int(tile[1]), int(tile[2]))
+            self.state[self._S_CUR_VEIN_TILE] = new_vein
+            if old_vein != new_vein:
+                logging.info(f"[{self.id}] Set tracked vein: {new_vein} (was: {old_vein})")
+        else:
+            self._clear_current_vein()
+
+    def _detect_current_mining_vein(self) -> tuple[int, int, int] | None:
+        """
+        Detect which ore vein we're currently mining based on player orientation.
+        Returns (x, y, plane) of the vein we're facing, or None if not found.
+        """
+        try:
+            resp = ipc.get_player() or {}
+            if not resp.get("ok"):
+                return None
+            pl = resp.get("player") or {}
+            if not isinstance(pl, dict):
+                return None
+                return None
+            
+            px = pl.get("worldX")
+            py = pl.get("worldY")
+            pp = pl.get("plane", pl.get("worldP", 0))
+            orientation = pl.get("orientation")
+            
+            if not (isinstance(px, int) and isinstance(py, int) and isinstance(orientation, int)):
+                return None
+            
+            # Get nearby ore veins
+            resp = ipc.get_objects(self.ore_vein_names[0], types=["WALL"], radius=3) or {}
+            if not resp.get("ok"):
+                return None
+            
+            objs = resp.get("objects", []) or []
+            if not objs:
+                return None
+            
+            # Find vein in the direction we're facing
+            # Orientation: 0 = south, 512 = west, 1024 = north, 1536 = east
+            from constants import ORIENTATION_SOUTH, ORIENTATION_WEST, ORIENTATION_NORTH, ORIENTATION_EAST
+            # Calculate expected direction based on orientation
+            if orientation < 256 or orientation >= 1792:  # South (0-256 or 1792-2047)
+                expected_dir = (0, -1)  # South
+            elif 256 <= orientation < 768:  # West
+                expected_dir = (-1, 0)  # West
+            elif 768 <= orientation < 1280:  # North
+                expected_dir = (0, 1)  # North
+            else:  # East (1280-1792)
+                expected_dir = (1, 0)  # East
+            
+            # Find adjacent vein in the expected direction
+            best_vein = None
+            best_dist = 999
+            
+            for o in objs:
+                w = o.get("world", {}) or {}
+                ox, oy = w.get("x"), w.get("y")
+                op = w.get("p", w.get("plane", 0)) or 0
+                
+                if not (isinstance(ox, int) and isinstance(oy, int)):
+                    continue
+                if int(op) != int(pp):
+                    continue
+                
+                # Check if adjacent (distance <= 1)
+                dx = abs(ox - px)
+                dy = abs(oy - py)
+                if dx > 1 or dy > 1:
+                    continue
+                
+                # Check if in the direction we're facing
+                dir_x = ox - px
+                dir_y = oy - py
+                
+                # Check if direction matches expected direction
+                if (expected_dir[0] == 0 and dir_x == 0 and (dir_y > 0) == (expected_dir[1] > 0)) or \
+                   (expected_dir[1] == 0 and dir_y == 0 and (dir_x > 0) == (expected_dir[0] > 0)):
+                    dist = dx + dy
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_vein = (int(ox), int(oy), int(op))
+            
+            return best_vein
+        except Exception as e:
+            logging.warning(f"[{self.id}] Error detecting current mining vein: {e}")
+            return None
+
+
+    def _get_non_busy_veins(self) -> list[tuple[int, int, int]]:
+        """
+        Get list of non-busy ore veins in the mining area.
+        
+        Returns:
+            List of (x, y, plane) tuples for non-busy veins
+        """
+        try:
+            obj_resp = ipc.get_objects(self.ore_vein_names[0], types=["WALL"], radius=26) or {}
+            objs = obj_resp.get("objects", []) if obj_resp.get("ok") else []
+            
+            min_x, max_x, min_y, max_y = self.ore_vein_area
+            non_busy_veins = []
+            
+            for o in objs:
+                w = o.get("world", {}) or {}
+                ox, oy = w.get("x"), w.get("y")
+                op = w.get("p", w.get("plane", 0)) or 0
+                if not (isinstance(ox, int) and isinstance(oy, int)):
+                    continue
+                if ox < int(min_x) or ox > int(max_x) or oy < int(min_y) or oy > int(max_y):
+                    continue
+                
+                # Check if vein is busy
+                if not self._is_vein_busy(ox, oy, int(op)):
+                    non_busy_veins.append((ox, oy, int(op)))
+            
+            return non_busy_veins
+        except Exception as e:
+            logging.warning(f"[{self.id}] Error getting non-busy veins: {e}")
+            return []
+
+    def _is_vein_busy(self, vein_x: int, vein_y: int, vein_plane: int) -> bool:
+        """
+        Check if a vein is busy (being mined by another player).
+        
+        A vein is considered busy if a player is:
+        - Adjacent to the vein (distance <= 1)
+        - Oriented towards the vein
+        - Has animation between 6700-6800
+        """
+        try:
+            players_resp = ipc.get_players() or {}
+            if not players_resp.get("ok"):
+                return False
+            
+            players = players_resp.get("players", []) or []
+            if not players:
+                return False
+            
+            for p in players:
+                # Skip local player
+                if p.get("isLocalPlayer"):
+                    continue
+                
+                px = p.get("worldX")
+                py = p.get("worldY")
+                pp = p.get("plane", p.get("worldP", 0))
+                anim = p.get("animation")
+                orientation = p.get("orientation")  # May be None if not in IPC response
+                
+                if not (isinstance(px, int) and isinstance(py, int)):
+                    continue
+                
+                # Check if on same plane
+                if int(pp) != int(vein_plane):
+                    continue
+                
+                # Check if adjacent (Chebyshev distance <= 1)
+                dx = abs(px - vein_x)
+                dy = abs(py - vein_y)
+                if dx > 1 or dy > 1:
+                    continue
+                
+                # Check if has mining animation (6700-6800)
+                if not isinstance(anim, int) or anim < 6700 or anim > 6800:
+                    continue
+                
+                # Check if oriented towards vein
+                # Orientation: 0 = south, 512 = west, 1024 = north, 1536 = east
+                if orientation is not None and isinstance(orientation, int):
+                    from constants import ORIENTATION_SOUTH, ORIENTATION_WEST, ORIENTATION_NORTH, ORIENTATION_EAST
+                    # Calculate direction from player to vein
+                    dir_x = vein_x - px
+                    dir_y = vein_y - py
+                    
+                    # Convert direction to expected orientation
+                    # 0 = south (dir_y < 0), 512 = west (dir_x < 0), 1024 = north (dir_y > 0), 1536 = east (dir_x > 0)
+                    expected_orientation = None
+                    if abs(dir_x) > abs(dir_y):
+                        # More horizontal
+                        expected_orientation = ORIENTATION_EAST if dir_x > 0 else ORIENTATION_WEST
+                    else:
+                        # More vertical
+                        expected_orientation = ORIENTATION_NORTH if dir_y > 0 else ORIENTATION_SOUTH
+                    
+                    # Check if orientation is roughly towards vein (within 256 degrees, which is 90 degrees)
+                    orientation_diff = abs(orientation - expected_orientation)
+                    if orientation_diff > 1024:
+                        orientation_diff = 2048 - orientation_diff
+                    if orientation_diff > 256:
+                        continue  # Not oriented towards vein, skip this player
+                else:
+                    # If orientation is not available, skip orientation check but still check other conditions
+                    # This allows the check to work even if orientation data is missing
+                    pass
+                
+                # All conditions met - vein is busy
+                return True
+            
+            return False
+        except Exception as e:
+            logging.warning(f"[{self.id}] Error checking if vein is busy: {e}")
+            return False
 
     # --- Pickaxe helpers (reused in BANK and after COLLECT deposits) ---
     def _best_pickaxe(self, *, bank_open: bool) -> tuple[str, int, bool] | None:
@@ -390,6 +620,28 @@ class MotherlodeMinePlan(Plan):
             wait_until(lambda: equipment.has_equipped(nm), max_wait_ms=2500)
 
     def set_phase(self, phase: str, camera_setup: bool = True):
+        # Set camera state based on phase
+        if phase == "GO_TO_MLM":
+            set_camera_state(CAMERA_STATE_LONG_TRAVEL, self.camera_states.get(CAMERA_STATE_LONG_TRAVEL))
+        elif phase == "BANK":
+            # Will use OBJECT_INTERACTION when clicking bank chest
+            set_camera_state(CAMERA_STATE_OBJECT_INTERACTION, self.camera_states.get(CAMERA_STATE_OBJECT_INTERACTION))
+        elif phase == "MINE":
+            # Use IDLE_ACTIVITY with area center for mining
+            set_camera_state(
+                CAMERA_STATE_IDLE_ACTIVITY, 
+                self.camera_states.get(CAMERA_STATE_IDLE_ACTIVITY),
+                area_center=self.area_center
+            )
+        elif phase == "DEPOSIT":
+            set_camera_state(CAMERA_STATE_OBJECT_INTERACTION, self.camera_states.get(CAMERA_STATE_OBJECT_INTERACTION))
+        elif phase == "COLLECT":
+            set_camera_state(CAMERA_STATE_OBJECT_INTERACTION, self.camera_states.get(CAMERA_STATE_OBJECT_INTERACTION))
+        elif phase == "DONE":
+            # Clear camera state for done phase
+            from services.camera_integration import clear_camera_state
+            clear_camera_state()
+        
         return set_phase_with_camera(self, phase, camera_setup)
 
     def loop(self, ui) -> int:
@@ -404,6 +656,7 @@ class MotherlodeMinePlan(Plan):
                 return self._handle_go_to_mlm()
             case "BANK":
                 return self._handle_bank(ui)
+
             case "MINE":
                 return self._handle_mine()
             case "DEPOSIT":
@@ -417,48 +670,53 @@ class MotherlodeMinePlan(Plan):
         return self.loop_interval_ms
 
     def _handle_bank(self, ui) -> int:
-        # Ensure we are near the MLM bank chest area first.
-        if not in_area(self.mlm_bank_area):
-            go_to(self.mlm_bank_area)
-            return exponential_number(350, 2500, 0.5)
+        # Continuous camera adjustment
+        from services.camera_integration import adjust_camera_continuous
+        adjust_camera_continuous()
+        
+        # Travel to bank and open it using go_to_bank()
+        if not bank.is_open():
+            result = go_to_bank(
+                bank_area=self.mlm_bank_area,
+                prefer="bank chest",
+                prefer_no_camera=True
+            )
+            if not result or not bank.is_open():
+                return exponential_number(600, 2000, 0.8)
 
-        # Open bank by clicking the bank chest (NOT actions.bank.open_bank(), which prefers booths/bankers).
-        if not self._open_bank_chest(max_wait_ms=4000):
-            return exponential_number(600, 2000, 0.8)
-
-        # We are in bank (bank chest).
-        # 1) Ensure we have the best pickaxe for our mining level, and equip it if possible.
+        # Ensure we have the best pickaxe for our mining level
         pickaxe_info = self._ensure_best_pickaxe(bank_open=True)
-        if pickaxe_info:
-            nm, _att_req, can_equip = pickaxe_info
-            if can_equip and (not equipment.has_equipped(nm)) and inventory.has_item(nm):
-                # Close bank before equipping (more reliable than interacting through bank UI).
-                bank.close_bank()
-                wait_until(bank.is_closed, max_wait_ms=3000)
-                self._equip_pickaxe_if_possible(pickaxe_info)
-                self.set_phase("MINE")
-                return self.loop_interval_ms
-
-        # 2) Withdraw any other required items (optional).
-        for it in (self.required_items or []):
-            if not isinstance(it, dict):
-                continue
-            nm = it.get("name")
-            qty = int(it.get("quantity", 1) or 1)
-            if not nm:
-                continue
-            if qty > 0 and inventory.inv_count(nm) >= qty:
-                continue
-            if qty == -1:
-                bank.withdraw_item(nm, withdraw_all=True)
-            else:
-                need = max(0, qty - inventory.inv_count(nm))
-                for _ in range(need):
-                    bank.withdraw_item(nm, withdraw_x=1)
-
-        # Close and continue loop.
-        bank.close_bank()
+        if not pickaxe_info:
+            # No pickaxe available - close bank and stay in BANK phase to retry
+            bank.close_bank()
+            wait_until(bank.is_closed, max_wait_ms=3000)
+            return exponential_number(600, 2000, 0.8)
+        
+        pickaxe_name, _att_req, can_equip = pickaxe_info
+        
+        # Deposit unwanted items (everything except pickaxe and pay-dirt)
+        # Pay-dirt cannot be deposited, so we include it in the exception list
+        required_items = [pickaxe_name, self.paydirt_name]
+        bank.deposit_unwanted_items(required_items, max_unique_for_bulk=3)
+        wait_until(lambda: inventory.has_only_items(required_items), max_wait_ms=3000)
+        
+        # Equip pickaxe if possible (while bank is still open)
+        if can_equip and inventory.has_item(pickaxe_name) and not equipment.has_equipped(pickaxe_name):
+            inventory.interact(pickaxe_name, "Wield")
+            if not wait_until(lambda: equipment.has_equipped(pickaxe_name), max_wait_ms=2500):
+                inventory.interact(pickaxe_name, "Wear")
+                wait_until(lambda: equipment.has_equipped(pickaxe_name), max_wait_ms=2500)
+        
+        # Close bank (sometimes click ore vein directly instead of closing normally)
+        bank.close_bank(
+            object_name=self.ore_vein_names[0],
+            object_action=self.ore_vein_action,
+            prefer_no_camera=True
+        )
         wait_until(bank.is_closed, max_wait_ms=3000)
+        
+        # Transition to MINE phase
+        self.state["last_mlm_mining_ts"] = None
         self.set_phase("MINE")
         return self.loop_interval_ms
 
@@ -470,14 +728,48 @@ class MotherlodeMinePlan(Plan):
         self.set_phase("BANK")
         return self.loop_interval_ms
 
+    def _maybe_tab_switch(self) -> None:
+        """
+        Occasionally switch to either SKILLS or INVENTORY (human-like tab switching).
+        """
+        if bank.is_open():
+            return
+
+        now = time.time()
+        nxt = self.state.get("next_tab_switch_ts")
+        if not isinstance(nxt, (int, float)):
+            self.state["next_tab_switch_ts"] = now + exponential_number(60.0, 1800.0, 0.5, output_type="float")
+            return
+
+        if now < float(nxt):
+            return
+
+        if is_tab_open("INVENTORY"):
+            tab.open_tab("SKILLS")
+        elif is_tab_open("SKILLS"):
+            tab.open_tab("INVENTORY")
+        else:
+            tab.open_tab("INVENTORY")
+
+        self.state["next_tab_switch_ts"] = now + float(exponential_number(60.0, 1800.0, 0.5, output_type="float"))
+
     def _handle_mine(self) -> int:
+        # Occasionally switch tabs
+        self._maybe_tab_switch()
+        
+        # Continuous camera adjustment - runs every loop
+        from services.camera_integration import adjust_camera_continuous
+        adjust_camera_continuous()
+
         if can_continue():
+            self.state["last_mlm_mining_ts"] = None
             press_spacebar()
             return exponential_number(200, 2000, 1)
 
         # Hard guard: if the sack is full, the game blocks further mining until you collect.
         sack_pd = self._sack_paydirt_remaining()
         if isinstance(sack_pd, int) and sack_pd >= int(self.sack_full_pay_dirt):
+            self.state["last_mlm_mining_ts"] = None
             self.set_phase("COLLECT")
             return self.loop_interval_ms
 
@@ -489,136 +781,59 @@ class MotherlodeMinePlan(Plan):
         # - inventory is full, OR
         # - pay-dirt in inventory >= hopper remaining space (Space: N)
         if inventory.is_full() or (isinstance(space_left, int) and space_left >= 0 and paydirt_in_inv > 0 and paydirt_in_inv >= space_left):
+            self.state["last_mlm_mining_ts"] = None
             self.set_phase("DEPOSIT")
             return self.loop_interval_ms
 
-        anim = player.get_player_animation()
-        now = time.monotonic()
-        pl_now = self._player_world() or {}
-        is_interacting_now = bool(pl_now.get("isInteracting"))
-
-        # Track "progress" so we can recover from any limbo state.
-        # Progress means: we are mining, or we are currently interacting with something.
-        if self._is_local_mlm_mining(anim) or is_interacting_now:
-            self.state[self._S_MINE_PROGRESS_TS] = now
-            self.state[self._S_MINE_LIMBO_COUNT] = 0
-
-        # If already mining, idle a bit (and keep the "last mining" timestamp fresh).
-        if self._is_local_mlm_mining(anim):
-            self.state[self._S_LAST_MLM_TS] = now
-            self._set_current_vein(self._infer_adjacent_ore_vein_tile())
-            return exponential_number(150, 6000, 1)
-
-        # Jitter compensation: if the animation briefly drops out but we were mining very recently,
-        # don't try to re-click a vein yet.
-        last_ts = self.state.get(self._S_LAST_MLM_TS)
-        if isinstance(last_ts, (int, float)) and (now - float(last_ts)) < float(self.mining_anim_grace_s):
-            return exponential_number(150, 1200, 1.2)
-
-        # Extra guard against spam-clicking: if we recently clicked a vein, don't click again immediately.
-        last_click_ts = self.state.get(self._S_LAST_MINE_CLICK_TS)
-        if isinstance(last_click_ts, (int, float)) and (now - float(last_click_ts)) < 2.5:
-            return exponential_number(180, 1200, 1.2)
-
-        # If we have a current *actual* vein tile remembered (set only while in mining anim),
-        # and we're still adjacent + interacting, wait a bit instead of re-clicking.
-        cur_tile = self.state.get(self._S_CUR_VEIN_TILE)
-        if isinstance(cur_tile, (tuple, list)) and len(cur_tile) == 3:
-            try:
-                ct = (int(cur_tile[0]), int(cur_tile[1]), int(cur_tile[2]))
-                px, py = pl_now.get("worldX"), pl_now.get("worldY")
-
-                if not (isinstance(px, int) and isinstance(py, int)):
-                    self._clear_current_vein()
-                elif abs(int(px) - ct[0]) > 2 or abs(int(py) - ct[1]) > 2:
-                    self._clear_current_vein()
-                elif is_interacting_now and self._tile_has_exact_action(ct, self.ore_vein_names[0], self.ore_vein_action):
-                    # We are still interacting and this is still a mineable vein; don't spam new clicks.
-                    return exponential_number(220, 1600, 1.25)
+        # Check if already mining using is_activity_active()
+        if player.is_activity_active("MLM_MINING", "last_mlm_mining_ts", self.mining_anim_grace_s, self.state):
+            # Detect and save current mining vein if not already saved
+            cur_vein = self.state.get(self._S_CUR_VEIN_TILE)
+            if not cur_vein:
+                logging.info(f"[{self.id}] Mining active but no tracked vein - detecting current vein...")
+                detected_vein = self._detect_current_mining_vein()
+                if detected_vein:
+                    logging.info(f"[{self.id}] Detected and set current vein: {detected_vein}")
+                    self._set_current_vein(detected_vein)
+                    # Update camera interaction object
+                    set_interaction_object({"x": detected_vein[0], "y": detected_vein[1], "plane": detected_vein[2]})
+                    return 0
                 else:
+                    logging.info(f"[{self.id}] Could not detect current mining vein (may be too far or orientation unclear)")
+                    return 0
+            else:
+                # Check if our current vein still has 'Mine' action
+                if isinstance(cur_vein, (tuple, list)) and len(cur_vein) >= 3:
+                    vein_x, vein_y, vein_plane = int(cur_vein[0]), int(cur_vein[1]), int(cur_vein[2])
+                    logging.info(f"[{self.id}] Mining active, checking tracked vein at ({vein_x}, {vein_y}, {vein_plane})...")
+                    # Check if vein at specific tile still has 'Mine' action
+                    if not objects.object_at_tile_has_action(vein_x, vein_y, vein_plane, self.ore_vein_names[0], "Mine", types=["WALL"], exact_match_object=True):
+                        # Vein no longer has 'Mine' action - clear it and allow clicking new vein
+                        logging.info(f"[{self.id}] Tracked vein at ({vein_x}, {vein_y}, {vein_plane}) no longer has 'Mine' action - clearing and allowing new vein click")
+                        self.state["last_mlm_mining_ts"] = None
+                        self._clear_current_vein()
+                        set_interaction_object(None)  # Clear interaction object
+                        # Fall through to click new vein
+                    else:
+                        # Still mining the same vein - update interaction object
+                        set_interaction_object({"x": vein_x, "y": vein_y, "plane": vein_plane})
+                        logging.info(f"[{self.id}] Still mining tracked vein at ({vein_x}, {vein_y}, {vein_plane}) - waiting")
+                        return 0
+                else:
+                    logging.warning(f"[{self.id}] Tracked vein has invalid format: {cur_vein} - clearing")
                     self._clear_current_vein()
-            except Exception:
-                self._clear_current_vein()
+                    set_interaction_object(None)
+            return 0
 
-        # Watchdog: if we're idle/not interacting for too long, force a reset so we can't get stuck.
-        prog_ts = self.state.get(self._S_MINE_PROGRESS_TS)
-        idle_s = (now - float(prog_ts)) if isinstance(prog_ts, (int, float)) else None
-        if (idle_s is not None) and idle_s > 18.0:
-            self._clear_current_vein()
-            # Allow clicking again immediately (override click cooldown if we were stuck).
-            self.state[self._S_LAST_MINE_CLICK_TS] = None
-            self.state[self._S_LAST_MLM_TS] = None
-            self.state[self._S_MINE_PROGRESS_TS] = now
-            cnt = int(self.state.get(self._S_MINE_LIMBO_COUNT) or 0) + 1
-            self.state[self._S_MINE_LIMBO_COUNT] = cnt
+        # Clear current vein when not mining
+        logging.info(f"[{self.id}] Mining NOT active - clearing tracked vein and allowing new vein click")
+        self._clear_current_vein()
+        set_interaction_object(None)  # Clear interaction object
 
-            # Escalate: on repeated limbo, re-walk into the mining area to re-acquire objects.
-            if cnt >= 2:
-                go_to(self.ore_vein_area)
-                return exponential_number(450, 1800, 1.2)
-            return exponential_number(220, 1200, 1.25)
-
-        # Mine ore veins only within the configured area, but try to avoid veins
-        # another player is already mining.
-        #
-        # Heuristic:
-        # - Get nearby WALL ore veins from IPC and keep only those inside ore_vein_area.
-        # - Get nearby players; if any non-local player is adjacent to a vein AND is in a mining animation,
-        #   treat that vein as "busy" and skip it.
-        # - Click the nearest non-busy vein; if none found, fall back to the generic in-area click.
-        chosen_tile = None
-        try:
-            obj_resp = ipc.get_objects(self.ore_vein_names[0], types=["WALL"], radius=26) or {}
-            objs = obj_resp.get("objects", []) if obj_resp.get("ok") else []
-
-            min_x, max_x, min_y, max_y = self.ore_vein_area
-            candidates = []
-            for o in objs:
-                w = o.get("world", {}) or {}
-                ox, oy = w.get("x"), w.get("y")
-                if not (isinstance(ox, int) and isinstance(oy, int)):
-                    continue
-                if ox < int(min_x) or ox > int(max_x) or oy < int(min_y) or oy > int(max_y):
-                    continue
-                candidates.append(o)
-
-            def _dist(o):
-                try:
-                    return float(o.get("distance", 9999))
-                except Exception:
-                    return 9999.0
-            candidates.sort(key=_dist)
-
-            players_resp = ipc.get_players() or {}
-            players = players_resp.get("players", []) if players_resp.get("ok") else []
-
-            def _is_busy(ox: int, oy: int) -> bool:
-                for p in players:
-                    if p.get("isLocalPlayer"):
-                        continue
-                    anim = p.get("animation")
-                    if not self._is_other_player_mlm_mining(anim):
-                        continue
-                    px, py = p.get("worldX"), p.get("worldY")
-                    if not (isinstance(px, int) and isinstance(py, int)):
-                        continue
-                    if abs(int(px) - int(ox)) <= 1 and abs(int(py) - int(oy)) <= 1:
-                        return True
-                return False
-
-            for o in candidates:
-                w = o.get("world", {}) or {}
-                ox, oy = int(w.get("x")), int(w.get("y"))
-                op = int(w.get("p", w.get("plane", 0)) or 0)
-                if _is_busy(ox, oy):
-                    continue
-                chosen_tile = (ox, oy, op)
-                break
-        except Exception:
-            chosen_tile = None
-
-        if chosen_tile:
-            ox, oy, op = chosen_tile
+        # Get non-busy veins and click first one if available
+        non_busy_veins = self._get_non_busy_veins()
+        if non_busy_veins:
+            ox, oy, op = non_busy_veins[0]
             res = objects.click_object_in_area_action_auto_prefer_no_camera(
                 self.ore_vein_names[0],
                 area=(ox, ox, oy, oy),
@@ -627,22 +842,36 @@ class MotherlodeMinePlan(Plan):
                 exact_match_object=True,
                 exact_match_target_and_action=True,
             )
-        else:
-            res = objects.click_object_in_area_action_auto_prefer_no_camera(
-                self.ore_vein_names[0],
-                area=self.ore_vein_area,
-                prefer_action=self.ore_vein_action,
-                types=["WALL"],
-                exact_match_object=True,
-                exact_match_target_and_action=True,
-            )
+            if res:
+                # Wait for mining animation to start, then update timestamp and detect vein
+                if wait_until(lambda: player.get_player_animation() == "MLM_MINING", max_wait_ms=10000):
+                    self.state["last_mlm_mining_ts"] = time.time()
+                    # Detect which vein we're mining based on orientation
+                    detected_vein = self._detect_current_mining_vein()
+                    if detected_vein:
+                        self._set_current_vein(detected_vein)
+                        set_interaction_object({"x": detected_vein[0], "y": detected_vein[1], "plane": detected_vein[2]})
+                    return 0
+            return self.loop_interval_ms
+        
+        # Fallback: click any ore vein in area
+        res = objects.click_object_in_area_action_auto_prefer_no_camera(
+            self.ore_vein_names[0],
+            area=self.ore_vein_area,
+            prefer_action=self.ore_vein_action,
+            types=["WALL"],
+            exact_match_object=True,
+            exact_match_target_and_action=True,
+        )
         if res:
-            self.state[self._S_LAST_MINE_CLICK_TS] = now
-            if chosen_tile:
-                self.state[self._S_LAST_TARGET_VEIN_TILE] = chosen_tile
-            # A successful click counts as progress (even if animation starts slightly later).
-            self.state[self._S_MINE_PROGRESS_TS] = now
-            wait_until(lambda: self._is_local_mlm_mining(player.get_player_animation()), max_wait_ms=7000)
+            # Wait for mining animation to start, then update timestamp and detect vein
+            if wait_until(lambda: player.get_player_animation() == "MLM_MINING", max_wait_ms=10000):
+                self.state["last_mlm_mining_ts"] = time.time()
+                # Detect which vein we're mining based on orientation
+                detected_vein = self._detect_current_mining_vein()
+                if detected_vein:
+                    self._set_current_vein(detected_vein)
+                return 0
         return self.loop_interval_ms
 
     def _handle_deposit(self) -> int:
@@ -650,9 +879,14 @@ class MotherlodeMinePlan(Plan):
         Deposit Pay-dirt into the Hopper.
         This is a placeholder: MLM typically uses the hopper to process pay-dirt.
         """
+        # Continuous camera adjustment
+        from services.camera_integration import adjust_camera_continuous
+        adjust_camera_continuous()
+        
         # If we somehow have no pay-dirt, go collect (maybe sack is ready) or mine again.
         if not inventory.has_item(self.paydirt_name):
             self.state[self._S_DEPOSIT_RETRY] = 0
+            self.state["last_mlm_mining_ts"] = None
             self.set_phase("MINE")
             # self.set_phase("COLLECT")
             return self.loop_interval_ms
@@ -687,9 +921,18 @@ class MotherlodeMinePlan(Plan):
         # Successful deposit: reset retry counter.
         self.state[self._S_DEPOSIT_RETRY] = 0
 
+        # Check if water wheels need repair (broken struts present)
+        if self._has_broken_struts():
+            # Repair broken struts
+            if not self._repair_broken_struts():
+                # Repair failed, retry next loop
+                return exponential_number(400, 1100, 1.2)
+            # Repair successful, continue with normal flow
+
         # If that deposit filled the sack, go collect immediately (mining will be blocked otherwise).
         sack_pd = self._sack_paydirt_remaining()
         if isinstance(sack_pd, int) and sack_pd >= int(self.sack_full_pay_dirt):
+            self.state["last_mlm_mining_ts"] = None
             self.set_phase("COLLECT")
             return self.loop_interval_ms
 
@@ -697,53 +940,103 @@ class MotherlodeMinePlan(Plan):
         # Widget 25034758 example: "Space: 21"
         space_left = self._hopper_space_left()
         if isinstance(space_left, int) and space_left < 27:
+            self.state["last_mlm_mining_ts"] = None
             self.set_phase("COLLECT")
+            return self.loop_interval_ms
 
-        # self.set_phase("COLLECT")
+        # Return to mining
+        self.state["last_mlm_mining_ts"] = None
+        self.set_phase("MINE")
         return self.loop_interval_ms
 
     def _handle_collect(self) -> int:
         """
         Collect processed ores from the Sack.
         """
-        # --- Simple Collect logic (per your request) ---
-        # 1) If inventory has ores/gems/nuggets, bank them.
-        # 2) Else, if sack still has pay-dirt remaining, search the sack.
-        # 3) Else (no pay-dirt remaining AND no ores in inventory), go back to mining.
-
-        has_ores = inventory.has_any_items(self.collect_bank_item_names)
-        if has_ores:
-            if not self._open_bank_chest(max_wait_ms=7000):
-                # If bank chest isn't clickable from here, walk to the chest area and try again.
-                if not in_area(self.mlm_bank_area):
-                    go_to(self.mlm_bank_area)
-                return exponential_number(450, 1800, 1.2)
-
+        # Continuous camera adjustment
+        from services.camera_integration import adjust_camera_continuous
+        adjust_camera_continuous()
+        
+        # Guard 1: Bank ores if we have any
+        if inventory.has_any_items(self.collect_bank_item_names):
+            if not bank.is_open():
+                result = go_to_bank(
+                    bank_area=self.mlm_bank_area,
+                    prefer="bank chest",
+                    prefer_no_camera=True
+                )
+                if not result or not bank.is_open():
+                    return exponential_number(450, 1800, 1.2)
             bank.deposit_inventory()
             wait_until(lambda: not inventory.has_any_items(self.collect_bank_item_names), max_wait_ms=3000)
-            sleep_exponential(0.35, 1.5, 1)
-
-            # Only re-withdraw the pickaxe on the FINAL banking pass before we return to mining.
-            # (If pay-dirt remaining is 0, we're done collecting and the next phase is MINE.)
-            pickaxe_info = None
             sack_pd = self._sack_paydirt_remaining()
             if isinstance(sack_pd, int) and sack_pd <= 0:
-                pickaxe_info = self._ensure_best_pickaxe(bank_open=True)
+                # Sack empty - go to BANK phase to bank and prepare inventory
+                self.state["last_mlm_mining_ts"] = None
+                self.set_phase("BANK")
+                return exponential_number(400, 1100, 1.2)
+            # Close bank (sometimes click sack directly instead of closing normally)
+            close_result = bank.close_bank(
+                object_name=self.sack_names[0],
+                object_action=self.sack_action,
+                prefer_no_camera=True
+            )
+            
+            if close_result:
+                action_taken = close_result.get("action")
+                
+                if action_taken == "object_click":
+                    # Bank was closed by clicking sack directly - wait for bank to close, then items to be collected
+                    wait_until(bank.is_closed, max_wait_ms=3000)
+                    wait_until(lambda: inventory.has_any_items(self.collect_bank_item_names), max_wait_ms=10000)
+                elif action_taken == "ground_click":
+                    # Bank was closed by clicking ground to move toward sack - wait for bank to close and movement
+                    wait_until(bank.is_closed, max_wait_ms=3000)
+                    # Movement will happen, then code will continue to Guard 5 which will click the sack
+                else:  # "normal_close"
+                    # Bank was closed normally with ESC - wait for bank to close, then code will continue to Guard 5
+                    wait_until(bank.is_closed, max_wait_ms=3000)
+            else:
+                # Bank wasn't open or close failed - just wait a bit
+                wait_until(bank.is_closed, max_wait_ms=1000)
+            
+            # If we clicked the object, we're done here (items should be collected)
+            # Otherwise, the code will continue to Guard 5 which will handle clicking the sack
+            if close_result and close_result.get("action") == "object_click":
+                return exponential_number(0, 1100, 1.2)
+            
+            # Continue to next guard (will click sack if needed)
+            return exponential_number(0, 1100, 1.2)
 
-            bank.close_bank()
-            wait_until(bank.is_closed, max_wait_ms=3000)
+        # Guard 2: Deposit pay-dirt into hopper if we have it and there's space
+        paydirt_in_inv = inventory.inv_count(self.paydirt_name)
+        space_left = self._hopper_space_left()
+        
+        if paydirt_in_inv > 0 and isinstance(space_left, int) and space_left > 0:
+            # We have pay-dirt and hopper has space - deposit it
+            res = objects.click_object_in_area_action_auto_prefer_no_camera(
+                "Hopper",
+                area=self.ore_vein_area,
+                prefer_action="Deposit",
+                exact_match_object=True,
+                exact_match_target_and_action=True,
+            )
+            if res:
+                # Wait for pay-dirt to decrease
+                before = paydirt_in_inv
+                if wait_until(lambda: inventory.inv_count(self.paydirt_name) < before, max_wait_ms=12000):
+                    return exponential_number(400, 1100, 1.2)
+            return exponential_number(400, 1100, 1.2)
 
-            # Optional: equip it if we can (prevents accidental banking next time).
-            self._equip_pickaxe_if_possible(pickaxe_info)
-            return self.loop_interval_ms
-
-        # Determine whether there's still pay-dirt in the sack.
+        # Guard 3: Check if sack is empty - transition to BANK
         sack_pd = self._sack_paydirt_remaining()
         if isinstance(sack_pd, int) and sack_pd <= 0:
-            self.set_phase("MINE")
-            return self.loop_interval_ms
+            # Sack empty - go to BANK phase to bank and prepare inventory
+            self.state["last_mlm_mining_ts"] = None
+            self.set_phase("BANK")
+            return exponential_number(400, 1100, 1.2)
 
-        # Search the sack (we believe pay-dirt remains, or widget is unknown).
+        # Guard 5: Collect from sack
         before_slots = inventory.get_empty_slots_count()
         res = objects.click_object_closest_by_distance_prefer_no_camera(
             "Sack",
@@ -755,12 +1048,11 @@ class MotherlodeMinePlan(Plan):
         if not res:
             return exponential_number(0.35, 1.1, 1.3)
 
-        got_items = wait_until(lambda: inventory.get_empty_slots_count() != before_slots, max_wait_ms=6000)
-        if not got_items:
-            # No change after searching: likely empty or already collected, return to mining.
-            # (We still rely on the pay-dirt widget as the authoritative source.)
-            self.set_phase("MINE")
-        return self.loop_interval_ms
+        # Guard 6: Verify items collected
+        if not wait_until(lambda: inventory.get_empty_slots_count() != before_slots, max_wait_ms=6000):
+            return exponential_number(0, 1.1, 1.3)
+        
+        return exponential_number(0.35, 1.1, 1.3)
 
     def _handle_done(self) -> int:
         sleep_exponential(2.0, 6.0, 1.2)

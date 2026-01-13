@@ -350,3 +350,38 @@ def is_widget_highlighted(widget_id: int, highlighted_count: int) -> bool:
     except Exception as e:
         logging.error(f"[is_widget_highlighted] helpers/widgets.py: {e}")
         return False
+
+
+def is_point_in_blocking_widget(x: int, y: int) -> bool:
+    """
+    Check if a point (x, y) is within any blocking UI widget.
+    These widgets block game elements behind them, so clicks within their bounds should be avoided.
+    
+    Args:
+        x: X coordinate of the point
+        y: Y coordinate of the point
+        
+    Returns:
+        True if point is within any blocking widget, False otherwise
+    """
+    from constants import BLOCKING_UI_WIDGETS
+    from actions.widgets import get_widget_bounds
+    
+    # Check each blocking widget
+    
+    for widget_name, widget_id in BLOCKING_UI_WIDGETS.items():
+        bounds = get_widget_bounds(widget_id)
+        if not bounds:
+            continue  # Widget not visible or doesn't exist
+        
+        bounds_x = bounds.get("x", 0)
+        bounds_y = bounds.get("y", 0)
+        bounds_width = bounds.get("width", 0)
+        bounds_height = bounds.get("height", 0)
+        
+        # Check if point is within widget bounds
+        if (bounds_x <= x <= bounds_x + bounds_width and 
+            bounds_y <= y <= bounds_y + bounds_height):
+            return True
+    
+    return False

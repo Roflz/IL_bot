@@ -1,12 +1,24 @@
 from typing import Optional, List, Dict, Any
+import random
 
-from actions.travel import _first_blocking_door_from_waypoints
+from actions.travel import (
+    _first_blocking_door_from_waypoints, 
+    go_to_tile, 
+    _get_player_movement_state, 
+    _calculate_click_location,
+    _is_moving_toward_path,
+    _verify_click_path,
+    _should_click_again,
+    _calculate_distance,
+    _is_tile_on_path
+)
 from constants import BANK_REGIONS, REGIONS
 from helpers.rects import unwrap_rect
 from helpers.runtime_utils import ipc, dispatch
 from helpers.ipc import get_last_interaction
 from helpers.utils import rect_beta_xy, clean_rs
 from services.click_with_camera import click_object_with_camera
+from actions import player
 
 
 def _normalize_object_names(name_or_names: str | List[str]) -> List[str]:
@@ -115,6 +127,356 @@ def object_has_action(
         return _has_exact_action(obj, action)
     except Exception:
         return False
+
+
+def object_at_tile_has_action(
+    x: int,
+    y: int,
+    plane: int,
+    name: str | List[str],
+    action: str,
+    *,
+    types: List[str] | None = None,
+    exact_match_object: bool = False,
+) -> bool:
+    """
+    Check if an object at a specific tile has the given action.
+    
+    Args:
+        x: World X coordinate
+        y: World Y coordinate
+        plane: World plane
+        name: Object name(s) to match
+        action: Action to check for
+        types: Object types to filter by (default: ["GAME"])
+        exact_match_object: Whether to use exact name matching
+    
+    Returns:
+        True if the object at the specified tile has the action, False otherwise
+    """
+    try:
+        if isinstance(name, list):
+            name_to_check = name[0] if name else None
+        else:
+            name_to_check = name
+        
+        resp = ipc.get_object_at_tile(x, y, plane, name=name_to_check, types=(types or ["GAME"]))
+        if not resp.get("ok"):
+            return False
+        
+        objects_list = resp.get("objects", []) or []
+        for obj in objects_list:
+            obj_name = obj.get("name", "")
+            # Check name match
+            if exact_match_object:
+                if obj_name != name_to_check:
+                    continue
+            else:
+                if isinstance(name, list):
+                    if not any(n.lower() in obj_name.lower() for n in name):
+                        continue
+                else:
+                    if name.lower() not in obj_name.lower():
+                        continue
+            
+            # Check if it has the action
+            if _has_exact_action(obj, action):
+                return True
+        
+        return False
+    except Exception:
+        return False
+
+
+# Movement state tracking for object interactions (separate from go_to movement state)
+_object_movement_state = {
+    "last_object_tile": None,  # {"x": int, "y": int} - Last object we were moving toward
+    "last_clicked_tile": None,  # {"x": int, "y": int} - Last tile clicked when moving toward object
+    "current_path": None,  # List of waypoints from last click to object
+    "intended_path": None,  # List of waypoints from player to object
+    "is_moving": False,  # Whether we're currently moving toward an object
+    "last_movement_check_ts": None,  # Timestamp of last movement check
+}
+
+def _clear_object_movement_state():
+    """Clear object movement state (call when switching to a different object)."""
+    global _object_movement_state
+    _object_movement_state = {
+        "last_object_tile": None,
+        "last_clicked_tile": None,
+        "current_path": None,
+        "intended_path": None,
+        "is_moving": False,
+        "last_movement_check_ts": None,
+    }
+
+def _move_toward_object_if_needed(
+    obj_world_coords: dict,
+    click_coords: dict,
+    click_rect: dict = None,
+    pre_calculated_path: list = None,
+    path_radius: int = 5,
+    path_center_bias: float = 0.7,
+    # Running parameters
+    running_min_path: int = 5,
+    running_mid_path: int = 10,
+    running_max_path: int = 20,
+    running_min_click_prob: float = 0.1,
+    running_mid_click_prob: float = 0.8,
+    running_max_click_prob: float = 1.0,
+    # Walking parameters
+    walking_min_path: int = 3,
+    walking_mid_path: int = 12,
+    walking_max_path: int = 15,
+    walking_min_click_prob: float = 0.2,
+    walking_mid_click_prob: float = 0.2,
+    walking_max_click_prob: float = 1.0,
+    # Stationary parameters (same as running by default)
+    stationary_min_path: int = 5,
+    stationary_mid_path: int = 10,
+    stationary_max_path: int = 20,
+    stationary_min_click_prob: float = 0.1,
+    stationary_mid_click_prob: float = 0.8,
+    stationary_max_click_prob: float = 1.0,
+    # Manhattan distance guard
+    manhattan_cutoff_min: float = 20.0,
+    manhattan_cutoff_max: float = 25.0,
+    # Probability variance
+    probability_variance: float = 0.05
+) -> bool:
+    """
+    Move toward an object using sophisticated movement system with movement-state-aware probability.
+    
+    Uses path distance (waypoint count) with movement-state-aware probability to decide whether to:
+    - Path toward the object (using normal distribution around target)
+    - Click the object directly (with movement compensation)
+    
+    Further from object = more likely to path, closer = more likely to click directly.
+    Running allows clicking directly from further away than walking.
+    
+    Args:
+        obj_world_coords: World coordinates of the object {"x": int, "y": int, "p": int}
+        click_coords: Canvas click coordinates (will be adjusted with movement compensation)
+        click_rect: Optional rectangle bounds for the object
+        path_radius: Radius around target when pathing (for normal distribution)
+        path_center_bias: Center bias for normal distribution when pathing
+        running_min_path: Below this path distance, always click directly (running)
+        running_mid_path: Midpoint for probability curve (running)
+        running_max_path: Above this, use min_click_prob (running)
+        running_min_click_prob: Minimum click-directly probability at max_path (running)
+        running_mid_click_prob: Click-directly probability at mid_path (running)
+        running_max_click_prob: Maximum click-directly probability at min_path (running)
+        walking_min_path: Below this path distance, always click directly (walking)
+        walking_mid_path: Midpoint for probability curve (walking)
+        walking_max_path: Above this, use min_click_prob (walking)
+        walking_min_click_prob: Minimum click-directly probability at max_path (walking)
+        walking_mid_click_prob: Click-directly probability at mid_path (walking)
+        walking_max_click_prob: Maximum click-directly probability at min_path (walking)
+        stationary_min_path: Below this path distance, always click directly (stationary)
+        stationary_mid_path: Midpoint for probability curve (stationary)
+        stationary_max_path: Above this, use min_click_prob (stationary)
+        stationary_min_click_prob: Minimum click-directly probability at max_path (stationary)
+        stationary_mid_click_prob: Click-directly probability at mid_path (stationary)
+        stationary_max_click_prob: Maximum click-directly probability at min_path (stationary)
+        manhattan_cutoff_min: Minimum Manhattan distance for always-path guard
+        manhattan_cutoff_max: Maximum Manhattan distance for always-path guard
+        probability_variance: Variance to add to probability values (e.g., 0.05 = ±5%)
+    
+    Returns:
+        True if we moved/pathing (and should retry clicking), False if we're ready to click directly
+    """
+    from actions.travel import (
+        _should_path_toward_target_with_movement_state,
+        _calculate_path_click_location_for_target,
+        _verify_click_path,
+        _get_player_movement_state,
+        go_to_tile
+    )
+    
+    obj_x = obj_world_coords.get("x")
+    obj_y = obj_world_coords.get("y")
+    
+    if not isinstance(obj_x, int) or not isinstance(obj_y, int):
+        return False
+    
+    # Get player position
+    player_x = player.get_x()
+    player_y = player.get_y()
+    
+    if not isinstance(player_x, int) or not isinstance(player_y, int):
+        return False
+    
+    # Calculate Manhattan distance to object (for guard check)
+    dx = obj_x - player_x
+    dy = obj_y - player_y
+    manhattan_distance = abs(dx) + abs(dy)
+    
+    # Get path distance (waypoint count) to object
+    # Reuse pre-calculated path if provided (e.g., from door checking)
+    if pre_calculated_path is not None:
+        intended_path = pre_calculated_path
+        path_distance = len(intended_path) if intended_path else 999
+    else:
+        rect = (obj_x - 1, obj_x + 1, obj_y - 1, obj_y + 1)
+        intended_path, _ = ipc.path(rect=rect, visualize=False)
+        path_distance = len(intended_path) if intended_path else 999  # Use 999 if no path
+    
+    # Get movement state
+    movement_state = _get_player_movement_state()
+    
+    # STEP 1: Check if we're already moving toward the object (similar to go_to_tile logic)
+    if movement_state and movement_state.get("is_moving"):
+        from actions.travel import _is_moving_toward_path, _movement_state
+        final_dest = {"x": obj_x, "y": obj_y}
+        
+        # Reuse intended_path as path_to_dest to avoid recalculation
+        path_to_dest = intended_path if intended_path else None
+        
+        # Check if we're already moving toward this object (reuse intended_path)
+        if _is_moving_toward_path(movement_state, _movement_state.get("current_path"), final_dest, 
+                                   path_to_clicked=None, path_to_dest=path_to_dest):
+            # Already moving toward object - don't click again
+            print(f"[OBJECT_MOVEMENT] Already moving toward object at ({obj_x}, {obj_y}), skipping click")
+            return True  # Return True to signal we're moving (retry later)
+        
+        # Check if we're close to last clicked tile (path distance) - if so, might need to click again
+        last_clicked = _movement_state.get("last_clicked_tile")
+        path_to_clicked = None
+        if last_clicked:
+            clicked_x = last_clicked.get("x")
+            clicked_y = last_clicked.get("y")
+            if clicked_x is not None and clicked_y is not None:
+                # Get path from current position to last clicked tile
+                rect_clicked = (clicked_x - 1, clicked_x + 1, clicked_y - 1, clicked_y + 1)
+                path_to_clicked, _ = ipc.path(rect=rect_clicked, visualize=False)
+                
+                if path_to_clicked and len(path_to_clicked) > 0:
+                    path_length = len(path_to_clicked)
+                    is_running = movement_state.get("is_running", False)
+                    
+                    # Dynamic thresholds based on movement speed (same as go_to_tile)
+                    if is_running:
+                        threshold = random.randint(8, 10)
+                    else:
+                        threshold = random.randint(3, 4)
+                    
+                    if path_length > threshold:
+                        # Not close to last clicked tile - check if we're moving toward object
+                        # Reuse both paths to avoid recalculation
+                        if _is_moving_toward_path(movement_state, _movement_state.get("current_path"), final_dest,
+                                                   path_to_clicked=path_to_clicked, path_to_dest=path_to_dest):
+                            # Paths converge - we're moving correctly, don't click
+                            return True
+    
+    # STEP 2: Decide whether to path toward target or click directly using movement-state-aware probability
+    should_path = _should_path_toward_target_with_movement_state(
+        path_distance=path_distance,
+        manhattan_distance=manhattan_distance,
+        movement_state=movement_state,
+        running_min_path=running_min_path,
+        running_mid_path=running_mid_path,
+        running_max_path=running_max_path,
+        running_min_click_prob=running_min_click_prob,
+        running_mid_click_prob=running_mid_click_prob,
+        running_max_click_prob=running_max_click_prob,
+        walking_min_path=walking_min_path,
+        walking_mid_path=walking_mid_path,
+        walking_max_path=walking_max_path,
+        walking_min_click_prob=walking_min_click_prob,
+        walking_mid_click_prob=walking_mid_click_prob,
+        walking_max_click_prob=walking_max_click_prob,
+        stationary_min_path=stationary_min_path,
+        stationary_mid_path=stationary_mid_path,
+        stationary_max_path=stationary_max_path,
+        stationary_min_click_prob=stationary_min_click_prob,
+        stationary_mid_click_prob=stationary_mid_click_prob,
+        stationary_max_click_prob=stationary_max_click_prob,
+        manhattan_cutoff_min=manhattan_cutoff_min,
+        manhattan_cutoff_max=manhattan_cutoff_max,
+        probability_variance=probability_variance
+    )
+    
+    if should_path:
+        # Path toward target using sophisticated movement
+        # Calculate click location using normal distribution around target
+        click_location = _calculate_path_click_location_for_target(
+            player_x, player_y, obj_x, obj_y, path_radius, path_center_bias
+        )
+        
+        # Use the intended_path we already calculated above
+        if intended_path:
+            # Verify the click location paths correctly
+            # Note: We don't have clicked_path pre-calculated, so _verify_click_path will calculate it
+            # But we're reusing intended_path which is good
+            final_dest = {"x": obj_x, "y": obj_y}
+            if _verify_click_path(click_location, final_dest, intended_path, clicked_path=None):
+                # Click location is valid - use go_to_tile with sophisticated movement
+                print(f"[OBJECT_MOVEMENT] Pathing toward object (path_distance: {path_distance}, manhattan: {manhattan_distance}), clicking at ({click_location.get('x')}, {click_location.get('y')})")
+                result = go_to_tile(click_location["x"], click_location["y"], arrive_radius=0)
+                if result:
+                    return True  # Successfully moved - retry
+                # Movement failed - fall through to direct click
+            else:
+                # Click location doesn't path correctly - fall back to direct click
+                print(f"[OBJECT_MOVEMENT] Calculated click location doesn't path correctly, clicking object directly")
+        else:
+            # Can't get path - fall back to direct click
+            should_path = False
+    
+    if not should_path:
+        # Click target directly - apply movement compensation to click coordinates
+        movement_state = _get_player_movement_state()
+        
+        if movement_state and movement_state.get("is_moving"):
+            movement_dir = movement_state.get("movement_direction")
+            is_running = movement_state.get("is_running", False)
+            
+            if movement_dir:
+                dx_dir = movement_dir.get("dx", 0)
+                dy_dir = movement_dir.get("dy", 0)
+                
+                # Calculate compensation based on movement speed
+                if is_running:
+                    compensation = 0.4
+                else:
+                    compensation = 0.2
+                
+                # Adjust click position opposite to movement direction
+                try:
+                    # Get object's world tile projection
+                    proj = ipc.project_world_tile(obj_x, obj_y)
+                    if proj and proj.get("ok") and proj.get("canvas"):
+                        canvas_x = proj["canvas"].get("x")
+                        canvas_y = proj["canvas"].get("y")
+                        
+                        if isinstance(canvas_x, (int, float)) and isinstance(canvas_y, (int, float)):
+                            # Adjust canvas coordinates opposite to movement direction
+                            if dx_dir != 0:
+                                canvas_x = int(canvas_x - (dx_dir / abs(dx_dir)) * compensation * 50)
+                            if dy_dir != 0:
+                                canvas_y = int(canvas_y - (dy_dir / abs(dy_dir)) * compensation * 50)
+                            
+                            click_coords["x"] = canvas_x
+                            click_coords["y"] = canvas_y
+                            print(f"[OBJECT_MOVEMENT] Clicking object directly (path_distance: {path_distance}, manhattan: {manhattan_distance}), applied movement compensation: ({canvas_x}, {canvas_y})")
+                except Exception as e:
+                    print(f"[OBJECT_MOVEMENT] Failed to apply movement compensation: {e}")
+        
+        # Track the object click in movement state (so we can verify we're moving toward it)
+        from actions.travel import _movement_state
+        import time
+        _movement_state["last_clicked_tile"] = {"x": obj_x, "y": obj_y}
+        _movement_state["final_destination"] = {"x": obj_x, "y": obj_y}
+        if intended_path:
+            _movement_state["current_path"] = intended_path
+            _movement_state["intended_path"] = intended_path
+        _movement_state["is_moving"] = True
+        _movement_state["last_movement_check_ts"] = time.time()
+        
+        # Ready to click directly
+        return False
+    
+    return False
 
 
 def _get_path_distance_to_object(obj: Dict[str, Any]) -> int:
@@ -389,7 +751,7 @@ def _find_closest_object_by_path(name: str | List[str], types: List[str] | None 
                     best_object = fallback
                     best_path_distance = pd
             continue
-
+        
         # Deduplicate objects by world coordinates (fix for Java bug)
         seen_locations = set()
         unique_objects = []
@@ -403,7 +765,7 @@ def _find_closest_object_by_path(name: str | List[str], types: List[str] | None 
 
         if max_objects is not None and len(objects) > int(max_objects):
             objects = objects[: int(max_objects)]
-
+        
         # Score by path distance
         for obj in objects:
             pd = _get_path_distance_to_object(obj)
@@ -416,7 +778,7 @@ def _find_closest_object_by_path(name: str | List[str], types: List[str] | None 
     if best_object:
         print(f"[FIND_OBJECT] Best match '{best_object.get('name')}' at path distance {best_path_distance} waypoints")
         return best_object
-
+    
     return None
 
 
@@ -460,6 +822,8 @@ def click_object_closest_by_path_distance(
     types: List[str] | None = None,
     exact_match_object: bool = False,
     exact_match_target_and_action: bool = False,
+    path_waypoints: list = None,
+    movement_state: dict = None,
 ) -> Optional[dict]:
     """
     Click a specific action on an object by auto-selecting:
@@ -537,6 +901,15 @@ def click_object_closest_by_path_distance(
         else:
             continue  # Try next attempt
         
+        # Use path from door handling if available, otherwise use provided path_waypoints
+        obj_path = path_waypoints if path_waypoints is not None else (wps if 'wps' in locals() else None)
+        
+        # Check if we need to move closer to the object before clicking
+        # Reuse path from door checking if available
+        if _move_toward_object_if_needed(world_coords, click_coords, click_rect, pre_calculated_path=obj_path):
+            # We moved - retry the click attempt
+            continue
+        
         if idx == 0:
             # Desired action is default → use click_object_with_camera with no action
             print(f"[OBJECT_ACTION] Using left-click for action at index 0")
@@ -547,7 +920,9 @@ def click_object_closest_by_path_distance(
                 click_coords=click_coords,
                 click_rect=click_rect,
                 aim_ms=420,
-                exact_match=exact_match_target_and_action
+                exact_match=exact_match_target_and_action,
+                path_waypoints=obj_path,
+                movement_state=movement_state
             )
         else:
             # Need context menu → use click_object_with_camera with action and index
@@ -559,7 +934,9 @@ def click_object_closest_by_path_distance(
                 click_coords=click_coords,
                 click_rect=click_rect,
                 aim_ms=420,
-                exact_match=exact_match_target_and_action
+                exact_match=exact_match_target_and_action,
+                path_waypoints=obj_path,
+                movement_state=movement_state
             )
         
         print(f"[OBJECT_ACTION] Click result: {result}")
@@ -656,9 +1033,18 @@ def click_object_closest_by_path_distance_no_camera(
                 alpha=2.0,
                 beta=2.0,
             )
+            click_coords = {"x": cx, "y": cy}
+            click_rect = rect
         elif isinstance(fresh_obj.get("canvas", {}).get("x"), (int, float)) and isinstance(fresh_obj.get("canvas", {}).get("y"), (int, float)):
             cx, cy = int(fresh_obj["canvas"]["x"]), int(fresh_obj["canvas"]["y"])
+            click_coords = {"x": cx, "y": cy}
+            click_rect = None
         else:
+            continue
+
+        # Check if we need to move closer to the object before clicking
+        if _move_toward_object_if_needed(world_coords, click_coords, click_rect):
+            # We moved - retry the click attempt
             continue
 
         # Same behavior as original: idx==0 -> left click, else context menu action.
@@ -669,6 +1055,7 @@ def click_object_closest_by_path_distance_no_camera(
             world_coords=world_coords,
             door_plan=None,
             exact_match=exact_match_target_and_action,
+            click_coords=click_coords,
         )
         if result:
             return result
@@ -684,6 +1071,8 @@ def click_object_closest_by_distance(
     exact_match_object: bool = False,
     exact_match_target_and_action: bool = False,
     require_action_on_object: bool = False,
+    path_waypoints: list = None,
+    movement_state: dict = None,
 ) -> Optional[dict]:
     """
     Click a specific action on an object by auto-selecting:
@@ -724,8 +1113,12 @@ def click_object_closest_by_distance(
 
         # 1) Check for doors on the path to the object
         gx, gy = fresh_obj.get("world", {}).get("x"), fresh_obj.get("world", {}).get("y")
+        obj_path = path_waypoints
         if isinstance(gx, int) and isinstance(gy, int):
             wps, dbg_path = ipc.path(goal=(gx, gy))
+            # Use path from door handling if path_waypoints not provided
+            if obj_path is None:
+                obj_path = wps
             door_plan = _first_blocking_door_from_waypoints(wps)
             if door_plan:
                 # Handle door opening with retry logic and recently traversed door tracking
@@ -758,6 +1151,12 @@ def click_object_closest_by_distance(
         else:
             continue  # Try next attempt
 
+        # Check if we need to move closer to the object before clicking
+        # Reuse path from door checking if available
+        if _move_toward_object_if_needed(world_coords, click_coords, click_rect, pre_calculated_path=obj_path):
+            # We moved - retry the click attempt
+            continue
+
         result = click_object_with_camera(
             object_name=obj_name,
             action=chosen_action,
@@ -765,7 +1164,9 @@ def click_object_closest_by_distance(
             click_coords=click_coords,
             click_rect=click_rect,
             aim_ms=420,
-            exact_match=exact_match_target_and_action
+            exact_match=exact_match_target_and_action,
+            path_waypoints=obj_path,
+            movement_state=movement_state
         )
 
         print(f"[OBJECT_ACTION] Click result: {result}")
@@ -846,8 +1247,10 @@ def click_object_closest_by_distance_no_camera(
             continue
 
         gx, gy = fresh_obj.get("world", {}).get("x"), fresh_obj.get("world", {}).get("y")
+        obj_path_for_movement = None
         if isinstance(gx, int) and isinstance(gy, int):
             wps, _dbg_path = ipc.path(goal=(gx, gy))
+            obj_path_for_movement = wps  # Reuse for movement check
             door_plan = _first_blocking_door_from_waypoints(wps)
             if door_plan:
                 from .travel import _handle_door_opening
@@ -859,12 +1262,37 @@ def click_object_closest_by_distance_no_camera(
         if not world_coords or not isinstance(world_coords.get("x"), int) or not isinstance(world_coords.get("y"), int):
             continue
 
+        # Get click coordinates for movement check
+        rect = unwrap_rect(fresh_obj.get("clickbox")) or unwrap_rect(fresh_obj.get("bounds"))
+        if rect:
+            cx, cy = rect_beta_xy(
+                (rect.get("x", 0), rect.get("x", 0) + rect.get("width", 0), 
+                 rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)),
+                alpha=2.0,
+                beta=2.0,
+            )
+            click_coords = {"x": cx, "y": cy}
+            click_rect = rect
+        elif isinstance(fresh_obj.get("canvas", {}).get("x"), (int, float)) and isinstance(fresh_obj.get("canvas", {}).get("y"), (int, float)):
+            cx, cy = int(fresh_obj["canvas"]["x"]), int(fresh_obj["canvas"]["y"])
+            click_coords = {"x": cx, "y": cy}
+            click_rect = None
+        else:
+            continue
+
+        # Check if we need to move closer to the object before clicking
+        # Reuse path from door checking if available
+        # if _move_toward_object_if_needed(world_coords, click_coords, click_rect, pre_calculated_path=obj_path_for_movement):
+        #     # We moved - retry the click attempt
+        #     continue
+
         result = click_object_no_camera(
             object_name=str(obj_name),
             action=chosen_action,
             world_coords=world_coords,
             door_plan=None,
             exact_match=exact_match_target_and_action,
+            click_coords=click_coords,
         )
         if result:
             return result
@@ -872,7 +1300,14 @@ def click_object_closest_by_distance_no_camera(
     return None
 
 
-def click_object_closest_by_path_simple(name: str | List[str], prefer_action: str | None = None, exact_match_object: bool = False, exact_match_target_and_action: bool = False) -> dict | None:
+def click_object_closest_by_path_simple(
+    name: str | List[str], 
+    prefer_action: str | None = None, 
+    exact_match_object: bool = False, 
+    exact_match_target_and_action: bool = False,
+    path_waypoints: list = None,
+    movement_state: dict = None,
+) -> dict | None:
     """
     Click a game object by (partial) name using path-based distance calculation.
     Simplified version without door handling.
@@ -932,7 +1367,24 @@ def click_object_closest_by_path_simple(name: str | List[str], prefer_action: st
         else:
             continue  # Try next attempt
 
+        # Check if we need to move closer to the object before clicking
+        if _move_toward_object_if_needed(world_coords, click_coords, click_rect):
+            # We moved - retry the click attempt
+            continue
+
         # Use simplified click with camera function
+        # Get path to object if not provided
+        obj_path = path_waypoints
+        if obj_path is None:
+            try:
+                obj_x = world_coords.get("x")
+                obj_y = world_coords.get("y")
+                if isinstance(obj_x, int) and isinstance(obj_y, int):
+                    wps, _ = ipc.path(goal=(obj_x, obj_y), visualize=False)
+                    obj_path = wps
+            except Exception:
+                pass
+        
         return click_object_with_camera(
             object_name=name,
             action=want_action,
@@ -940,7 +1392,9 @@ def click_object_closest_by_path_simple(name: str | List[str], prefer_action: st
             click_coords=click_coords,
             click_rect=click_rect,
             aim_ms=420,
-            exact_match=exact_match_target_and_action
+            exact_match=exact_match_target_and_action,
+            path_waypoints=obj_path,
+            movement_state=movement_state
         )
 
     return None
@@ -1009,6 +1463,29 @@ def click_object_closest_by_path_simple_no_camera(
         idx = action_index(target.get("actions"), want_action) if want_action else None
         world_coords = {"x": target.get("world", {}).get("x"), "y": target.get("world", {}).get("y"), "p": target.get("world", {}).get("p", 0)}
 
+        # Get click coordinates for movement check
+        rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
+        if rect:
+            cx, cy = rect_beta_xy(
+                (rect.get("x", 0), rect.get("x", 0) + rect.get("width", 0), 
+                 rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)),
+                alpha=2.0,
+                beta=2.0,
+            )
+            click_coords = {"x": cx, "y": cy}
+            click_rect = rect
+        elif isinstance(target.get("canvas", {}).get("x"), (int, float)) and isinstance(target.get("canvas", {}).get("y"), (int, float)):
+            cx, cy = int(target["canvas"]["x"]), int(target["canvas"]["y"])
+            click_coords = {"x": cx, "y": cy}
+            click_rect = None
+        else:
+            continue
+
+        # Check if we need to move closer to the object before clicking
+        if _move_toward_object_if_needed(world_coords, click_coords, click_rect):
+            # We moved - retry the click attempt
+            continue
+
         # Keep behavior: if no prefer_action provided, do a left click.
         click_action = None if not want_action else (None if idx == 0 else want_action)
 
@@ -1018,12 +1495,21 @@ def click_object_closest_by_path_simple_no_camera(
             world_coords=world_coords,
             door_plan=None,
             exact_match=exact_match_target_and_action,
+            click_coords=click_coords,
         )
 
     return None
 
 
-def click_object_in_area_simple(name: str | List[str], area: str | tuple, action: str = None, exact_match_object: bool = False, exact_match_target_and_action: bool = False) -> dict | None:
+def click_object_in_area_simple(
+    name: str | List[str], 
+    area: str | tuple, 
+    action: str = None, 
+    exact_match_object: bool = False, 
+    exact_match_target_and_action: bool = False,
+    path_waypoints: list = None,
+    movement_state: dict = None,
+) -> dict | None:
     """
     Click an object within a specific area (simple version without door handling).
     Uses the efficient find_object_in_area command.
@@ -1087,7 +1573,24 @@ def click_object_in_area_simple(name: str | List[str], area: str | tuple, action
         print(f"[DEBUG] No valid click coordinates for object")
         return None
 
+    # Check if we need to move closer to the object before clicking
+    if _move_toward_object_if_needed(world_coords, click_coords, click_rect):
+        # We moved - return None to indicate we should retry
+        return None
+
     # Use click_object_with_camera function (simple version without door handling)
+    # Get path to object if not provided
+    obj_path = path_waypoints
+    if obj_path is None:
+        try:
+            obj_x = world_coords.get("x")
+            obj_y = world_coords.get("y")
+            if isinstance(obj_x, int) and isinstance(obj_y, int):
+                wps, _ = ipc.path(goal=(obj_x, obj_y), visualize=False)
+                obj_path = wps
+        except Exception:
+            pass
+    
     return click_object_with_camera(
         object_name=name,
         action=action,
@@ -1095,7 +1598,9 @@ def click_object_in_area_simple(name: str | List[str], area: str | tuple, action
         click_coords=click_coords,
         click_rect=click_rect,
         aim_ms=420,
-        exact_match=exact_match_target_and_action
+        exact_match=exact_match_target_and_action,
+        path_waypoints=obj_path,
+        movement_state=movement_state
     )
 
 
@@ -1107,6 +1612,8 @@ def click_object_in_area_simple_action_auto(
     types: List[str] | None = None,
     exact_match_object: bool = False,
     exact_match_target_and_action: bool = False,
+    path_waypoints: list = None,
+    movement_state: dict = None,
 ) -> dict | None:
     """
     In-area variant with auto-left-click behavior:
@@ -1184,6 +1691,23 @@ def click_object_in_area_simple_action_auto(
             continue
 
         obj_name = target.get("name") or (names[0] if names else name)
+        # Check if we need to move closer to the object before clicking
+        if _move_toward_object_if_needed(world_coords, click_coords, click_rect):
+            # We moved - retry the click attempt
+            continue
+        
+        # Get path to object if not provided
+        obj_path = path_waypoints
+        if obj_path is None:
+            try:
+                obj_x = world_coords.get("x")
+                obj_y = world_coords.get("y")
+                if isinstance(obj_x, int) and isinstance(obj_y, int):
+                    wps, _ = ipc.path(goal=(obj_x, obj_y), visualize=False)
+                    obj_path = wps
+            except Exception:
+                pass
+        
         return click_object_with_camera(
             object_name=str(obj_name),
             action=click_action,
@@ -1192,6 +1716,8 @@ def click_object_in_area_simple_action_auto(
             click_rect=click_rect,
             aim_ms=420,
             exact_match=exact_match_target_and_action,
+            path_waypoints=obj_path,
+            movement_state=movement_state
         )
 
     return None
@@ -1205,6 +1731,8 @@ def click_object_in_area_action_auto(
     types: List[str] | None = None,
     exact_match_object: bool = False,
     exact_match_target_and_action: bool = False,
+    path_waypoints: list = None,
+    movement_state: dict = None,
 ) -> dict | None:
     """
     Door-handling + in-area + auto-left-click behavior.
@@ -1256,9 +1784,13 @@ def click_object_in_area_action_auto(
             continue
 
         # Door handling on the path to the object
+        obj_path = path_waypoints
         gx, gy = world_coords.get("x"), world_coords.get("y")
         if isinstance(gx, int) and isinstance(gy, int):
             wps, _dbg_path = ipc.path(goal=(gx, gy))
+            # Use path from door handling if path_waypoints not provided
+            if obj_path is None:
+                obj_path = wps
             door_plan = _first_blocking_door_from_waypoints(wps)
             if door_plan:
                 from .travel import _handle_door_opening
@@ -1287,6 +1819,11 @@ def click_object_in_area_action_auto(
             continue
 
         obj_name = target.get("name") or (names[0] if names else name)
+        # Check if we need to move closer to the object before clicking
+        if _move_toward_object_if_needed(world_coords, click_coords, click_rect):
+            # We moved - retry the click attempt
+            continue
+        
         return click_object_with_camera(
             object_name=str(obj_name),
             action=click_action,
@@ -1295,6 +1832,8 @@ def click_object_in_area_action_auto(
             click_rect=click_rect,
             aim_ms=420,
             exact_match=exact_match_target_and_action,
+            path_waypoints=obj_path,
+            movement_state=movement_state
         )
 
     return None
@@ -1398,6 +1937,33 @@ def click_object_in_area_action_auto_no_camera(
                 if not _handle_door_opening(door_plan, wps):
                     continue
 
+        # Get click coordinates for movement check
+        rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
+        if rect:
+            cx, cy = rect_beta_xy(
+                (
+                    rect.get("x", 0),
+                    rect.get("x", 0) + rect.get("width", 0),
+                    rect.get("y", 0),
+                    rect.get("y", 0) + rect.get("height", 0),
+                ),
+                alpha=2.0,
+                beta=2.0,
+            )
+            click_coords = {"x": cx, "y": cy}
+            click_rect = rect
+        elif isinstance(target.get("canvas", {}).get("x"), (int, float)) and isinstance(target.get("canvas", {}).get("y"), (int, float)):
+            cx, cy = int(target["canvas"]["x"]), int(target["canvas"]["y"])
+            click_coords = {"x": cx, "y": cy}
+            click_rect = None
+        else:
+            continue
+
+        # Check if we need to move closer to the object before clicking
+        if _move_toward_object_if_needed(world_coords, click_coords, click_rect):
+            # We moved - retry the click attempt
+            continue
+
         obj_name = target.get("name") or (names[0] if names else name)
         return click_object_no_camera(
             object_name=str(obj_name),
@@ -1405,6 +1971,7 @@ def click_object_in_area_action_auto_no_camera(
             world_coords=world_coords,
             door_plan=None,
             exact_match=exact_match_target_and_action,
+            click_coords=click_coords,
         )
 
     return None
@@ -1475,6 +2042,29 @@ def click_object_in_area_simple_no_camera(
     if not world_coords or not isinstance(world_coords.get("x"), int) or not isinstance(world_coords.get("y"), int):
         return None
 
+    # Get click coordinates for movement check
+    rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
+    if rect:
+        cx, cy = rect_beta_xy(
+            (rect.get("x", 0), rect.get("x", 0) + rect.get("width", 0), 
+             rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)),
+            alpha=2.0,
+            beta=2.0,
+        )
+        click_coords = {"x": cx, "y": cy}
+        click_rect = rect
+    elif isinstance(target.get("canvas", {}).get("x"), (int, float)) and isinstance(target.get("canvas", {}).get("y"), (int, float)):
+        cx, cy = int(target["canvas"]["x"]), int(target["canvas"]["y"])
+        click_coords = {"x": cx, "y": cy}
+        click_rect = None
+    else:
+        return None
+
+    # Check if we need to move closer to the object before clicking
+    if _move_toward_object_if_needed(world_coords, click_coords, click_rect):
+        # We moved - return None to indicate we should retry
+        return None
+
     obj_name = target.get("name") or (names[0] if names else name)
     return click_object_no_camera(
         object_name=str(obj_name),
@@ -1482,10 +2072,19 @@ def click_object_in_area_simple_no_camera(
         world_coords=world_coords,
         door_plan=None,
         exact_match=exact_match_target_and_action,
+        click_coords=click_coords,
     )
 
 
-def click_object_in_area(name: str | List[str], area: str | tuple, action: str = None, exact_match_object: bool = False, exact_match_target_and_action: bool = False) -> dict | None:
+def click_object_in_area(
+    name: str | List[str], 
+    area: str | tuple, 
+    action: str = None, 
+    exact_match_object: bool = False, 
+    exact_match_target_and_action: bool = False,
+    path_waypoints: list = None,
+    movement_state: dict = None,
+) -> dict | None:
     """
     Click an object within a specific area with door detection logic.
     Uses the efficient find_object_in_area command.
@@ -1548,8 +2147,12 @@ def click_object_in_area(name: str | List[str], area: str | tuple, action: str =
 
         # 1) Check for doors on the path to the object
         gx, gy = target.get("world", {}).get("x"), target.get("world", {}).get("y")
+        obj_path = path_waypoints
         if isinstance(gx, int) and isinstance(gy, int):
             wps, dbg_path = ipc.path(goal=(gx, gy))
+            # Use path from door handling if path_waypoints not provided
+            if obj_path is None:
+                obj_path = wps
             door_plan = _first_blocking_door_from_waypoints(wps)
             if door_plan:
                 # Handle door opening with retry logic and recently traversed door tracking
@@ -1588,7 +2191,9 @@ def click_object_in_area(name: str | List[str], area: str | tuple, action: str =
             click_coords=click_coords,
             click_rect=click_rect,
             aim_ms=420,
-            exact_match=exact_match_target_and_action
+            exact_match=exact_match_target_and_action,
+            path_waypoints=obj_path,
+            movement_state=movement_state
         )
         
         print(f"[OBJECT_ACTION] Click result: {result}")
@@ -1674,6 +2279,29 @@ def click_object_in_area_no_camera(
         if not world_coords or not isinstance(world_coords.get("x"), int) or not isinstance(world_coords.get("y"), int):
             continue
 
+        # Get click coordinates for movement check
+        rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
+        if rect:
+            cx, cy = rect_beta_xy(
+                (rect.get("x", 0), rect.get("x", 0) + rect.get("width", 0), 
+                 rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)),
+                alpha=2.0,
+                beta=2.0,
+            )
+            click_coords = {"x": cx, "y": cy}
+            click_rect = rect
+        elif isinstance(target.get("canvas", {}).get("x"), (int, float)) and isinstance(target.get("canvas", {}).get("y"), (int, float)):
+            cx, cy = int(target["canvas"]["x"]), int(target["canvas"]["y"])
+            click_coords = {"x": cx, "y": cy}
+            click_rect = None
+        else:
+            continue
+
+        # Check if we need to move closer to the object before clicking
+        if _move_toward_object_if_needed(world_coords, click_coords, click_rect):
+            # We moved - retry the click attempt
+            continue
+
         obj_name = target.get("name") or name
         result = click_object_no_camera(
             object_name=str(obj_name),
@@ -1681,6 +2309,7 @@ def click_object_in_area_no_camera(
             world_coords=world_coords,
             door_plan=None,
             exact_match=exact_match_target_and_action,
+            click_coords=click_coords,
         )
         if result:
             return result
@@ -1695,6 +2324,8 @@ def click_object_closest_by_distance_simple(
     types: List[str] | None = None,
     exact_match_object: bool = False,
     exact_match_target_and_action: bool = False,
+    path_waypoints: list = None,
+    movement_state: dict = None,
 ) -> dict | None:
     """
     Click a game object by (partial) name using straight-line distance calculation.
@@ -1741,7 +2372,24 @@ def click_object_closest_by_distance_simple(
         else:
             continue  # Try next attempt
 
+        # Check if we need to move closer to the object before clicking
+        if _move_toward_object_if_needed(world_coords, click_coords, click_rect):
+            # We moved - retry the click attempt
+            continue
+
         # Use simplified click with camera function
+        # Get path to object if not provided
+        obj_path = path_waypoints
+        if obj_path is None:
+            try:
+                obj_x = world_coords.get("x")
+                obj_y = world_coords.get("y")
+                if isinstance(obj_x, int) and isinstance(obj_y, int):
+                    wps, _ = ipc.path(goal=(obj_x, obj_y), visualize=False)
+                    obj_path = wps
+            except Exception:
+                pass
+        
         return click_object_with_camera(
             object_name=name,
             action=want_action,
@@ -1749,7 +2397,9 @@ def click_object_closest_by_distance_simple(
             click_coords=click_coords,
             click_rect=click_rect,
             aim_ms=420,
-            exact_match=exact_match_target_and_action
+            exact_match=exact_match_target_and_action,
+            path_waypoints=obj_path,
+            movement_state=movement_state
         )
 
     return None
@@ -1824,6 +2474,29 @@ def click_object_closest_by_distance_simple_no_camera(
         idx = action_index(target.get("actions"), want_action) if want_action else None
         world_coords = {"x": target.get("world", {}).get("x"), "y": target.get("world", {}).get("y"), "p": target.get("world", {}).get("p", 0)}
 
+        # Get click coordinates for movement check
+        rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))
+        if rect:
+            cx, cy = rect_beta_xy(
+                (rect.get("x", 0), rect.get("x", 0) + rect.get("width", 0), 
+                 rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)),
+                alpha=2.0,
+                beta=2.0,
+            )
+            click_coords = {"x": cx, "y": cy}
+            click_rect = rect
+        elif isinstance(target.get("canvas", {}).get("x"), (int, float)) and isinstance(target.get("canvas", {}).get("y"), (int, float)):
+            cx, cy = int(target["canvas"]["x"]), int(target["canvas"]["y"])
+            click_coords = {"x": cx, "y": cy}
+            click_rect = None
+        else:
+            continue
+
+        # Check if we need to move closer to the object before clicking
+        # if _move_toward_object_if_needed(world_coords, click_coords, click_rect):
+        #     # We moved - retry the click attempt
+        #     continue
+
         click_action = None if not want_action else want_action
         return click_object_no_camera(
             object_name=str(name),
@@ -1831,6 +2504,7 @@ def click_object_closest_by_distance_simple_no_camera(
             world_coords=world_coords,
             door_plan=None,
             exact_match=exact_match_target_and_action,
+            click_coords=click_coords,
         )
 
     return None
@@ -1842,7 +2516,8 @@ def click_object_no_camera(
         world_coords: dict = None,
         door_plan: dict = None,  # Door-specific plan with coordinates
         aim_ms: int = 420,
-        exact_match: bool = False
+        exact_match: bool = False,
+        click_coords: dict = None  # Optional pre-calculated click coordinates (with movement compensation applied)
 ) -> dict | None:
     """
     Click an object **without any camera movement**.
@@ -1862,8 +2537,12 @@ def click_object_no_camera(
         for _attempt in range(max_attempts):
             point = None
 
-            # Door-specific click point
-            if door_plan and door_plan.get("door"):
+            # Use provided click_coords if available (already has movement compensation applied)
+            if click_coords and isinstance(click_coords.get("x"), (int, float)) and isinstance(click_coords.get("y"), (int, float)):
+                point = {"x": int(click_coords["x"]), "y": int(click_coords["y"])}
+
+            # Door-specific click point (only if click_coords not provided)
+            if point is None and door_plan and door_plan.get("door"):
                 door_data = door_plan["door"] or {}
 
                 bounds = door_data.get("bounds") or {}
@@ -1888,7 +2567,7 @@ def click_object_no_camera(
                 if action is None:
                     action = "Open" if door_data.get("closed", True) else "Close"
 
-            # Standard object click point (refresh from IPC)
+            # Standard object click point (refresh from IPC) - only if click_coords not provided
             if point is None:
                 objects_resp = ipc.get_object_at_tile(
                     x=world_coords["x"],

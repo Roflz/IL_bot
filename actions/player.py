@@ -816,15 +816,21 @@ def is_activity_active(
             if last_seen_ts is not None:
                 time_since_last = now - float(last_seen_ts)
                 if time_since_last < idle_threshold_seconds:
-                    # Saw animation recently - still in activity cycle (brief idle), update timestamp
-                    state[last_seen_ts_key] = now
+                    # Saw animation recently - still in activity cycle (brief idle)
                     return True
                 else:
                     # Haven't seen animation in threshold time - activity is done, clear timer
+                    logging.info(f"[is_activity_active] Activity '{animation_name}' NOT active: "
+                               f"current_anim='{current_animation}', "
+                               f"last_seen={time_since_last:.2f}s ago (threshold={idle_threshold_seconds:.2f}s), "
+                               f"clearing timer")
                     state[last_seen_ts_key] = None
                     return False
             else:
                 # Never saw animation or timer was cleared - not active
+                logging.info(f"[is_activity_active] Activity '{animation_name}' NOT active: "
+                           f"current_anim='{current_animation}', "
+                           f"no last_seen_ts found (never started or already cleared)")
                 return False
                 
     except Exception as e:

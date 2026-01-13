@@ -275,12 +275,18 @@ class ActionExecutor:
             return False
 
     def _click_canvas(self, x: int, y: int, button: str = "left"):
-        """Click at canvas coordinates."""
+        """
+        Click at canvas coordinates.
+        
+        Returns:
+            dict with click result including tile information, or None on error
+        """
         btn = 1 if button == "left" else 3
         
         try:
-            self.ipc.click_canvas(int(x), int(y), button=btn)
-            return True
+            result = self.ipc.click_canvas(int(x), int(y), button=btn)
+            # Return the full result which now includes tile information
+            return result if result else True
         except Exception as e:
             self.debug(f"[IPC] click error: {e}")
             return None

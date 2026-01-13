@@ -24,6 +24,7 @@ BANK_REGIONS = {
     "ARDOUGNE_EAST_NORTH_BANK": (2612, 2621, 3330, 3335),
     "ARDOUGNE_EAST_SOUTH_BANK": (2649, 2658, 3280, 3287),
     "SEERS_BANK": (2721, 2730, 3490, 3496),
+    "MLM_BANK_CHEST": (3753, 3761, 5664, 5668),
 }
 
 REGIONS = {
@@ -319,6 +320,13 @@ def generate_multiple_names(count: int = 10) -> list[str]:
     
     return list(names)
 
+# Player orientation constants (0-2047 range)
+# Orientation values for cardinal directions
+ORIENTATION_SOUTH = 0      # 0 = facing south
+ORIENTATION_WEST = 512     # 512 = facing west
+ORIENTATION_NORTH = 1024   # 1024 = facing north
+ORIENTATION_EAST = 1536    # 1536 = facing east
+
 # Player animation IDs
 PLAYER_ANIMATIONS = {
     621: "NETTING",
@@ -342,7 +350,10 @@ PLAYER_ANIMATIONS = {
     623: "BAITING",
     622: "BAITING",
     896: "COOKING",
-    6752: "MLM_MINING"
+    6752: "MLM_MINING",
+    3971: "MLM_STRUT_REPAIR",
+    1248: "FLETCHING_ARROWSHAFTS",
+    8481: "FLETCHING_HEADLESS_ARROWS"
     # Add more animations as needed
 }
 
@@ -355,6 +366,7 @@ FALADOR_COWS = REGIONS["FALADOR_COWS"]
 
 # Widget IDs Database
 BANK_WIDGETS = {
+    "UNIVERSE": 786433,  # S 12.1 Bankmain.UNIVERSE (main bank interface)
     "SWAP": 786451,      # S 12.19 Bankmain.SWAP
     "INSERT": 786453,    # S 12.21 Bankmain.INSERT
     "ITEM": 786456,      # S 12.24 Bankmain.ITEM
@@ -364,6 +376,15 @@ BANK_WIDGETS = {
     "QUANTITY10": 786466,# S 12.34 Bankmain.QUANTITY10
     "QUANTITYX": 786468, # S 12.36 Bankmain.QUANTITYX
     "QUANTITYALL": 786470,# S 12.38 Bankmain.QUANTITYALL
+}
+
+# UI widgets that block game elements behind them - clicks within these bounds should be avoided
+BLOCKING_UI_WIDGETS = {
+    "CHATBOX": 10616832,  # N 162.0 Chatbox.UNIVERSE
+    "SIDE_CONTAINER": 10748000,  # S 164.96 ToplevelPreEoc.SIDE_CONTAINER
+    "SIDE_MOVABLE_LAYER": 10747999,  # S 164.95 ToplevelPreEoc.SIDE_MOVABLE_LAYER
+    "SIDE_STATIC_LAYER": 10747998,  # S 164.94 ToplevelPreEoc.SIDE_STATIC_LAYER
+    "MAP_CONTAINER": 10747996,  # S 164.92 ToplevelPreEoc.MAP_CONTAINER
 }
 
 # GE Widget IDs

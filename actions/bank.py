@@ -185,7 +185,7 @@ def open_bank(prefer: str | None = None, randomize_closest: int | None = None, p
             name = booth.get("name", "").lower()
             actions = booth.get("actions", [])
             bank_idx = find_bank_action(actions)
-            
+
             if bank_idx is not None and ("bank booth" in name or "grand exchange booth" in name):
                 valid_booths.append(booth)
         
@@ -307,7 +307,7 @@ def open_bank(prefer: str | None = None, randomize_closest: int | None = None, p
 
         # Wait for bank interface to open with proper verification
         min_wait = int(exponential_number(150, 300, 1.0, "int"))
-        max_wait = 3000  # Increased wait time for bank interface
+        max_wait = 10000  # Increased wait time for bank interface
 
         # Wait for bank interface to open
         bank_opened = wait_until(is_open, max_wait_ms=max_wait, min_wait_ms=min_wait)
@@ -426,7 +426,7 @@ def withdraw_item(
                 "action": "withdraw-item-all",
                 "option": "withdraw-all",
                 "click": {
-                        "type": "context-select",        # uses live menu geometry via IPC "menu"
+                            "type": "context-select",        # uses live menu geometry via IPC "menu"
                     "target": item_name.lower(),     # substring match against menu target
                     "x": int(cx),                    # right-click anchor (canvas)
                     "y": int(cy),
@@ -434,7 +434,7 @@ def withdraw_item(
                 },
                 "target": {"domain": "bank-slot", "name": item_name, "bounds": rect},
             }
-        return dispatch(step)
+            return dispatch(step)
 
     if withdraw_x == 5:
         step = {
@@ -644,14 +644,374 @@ def withdraw_items(
         time.sleep(0.5)
 
 
-def close_bank() -> dict | None:
-    step = {
-        "action": "close-bank",
-        "click": {"type": "key", "key": "esc"},
-        "target": {"domain": "bank", "name": "Close"},
-        "postconditions": ["bankOpen == false"],
-    }
-    return dispatch(step)
+def _is_point_in_widget_bounds(x: int, y: int, bounds: dict) -> bool:
+    """
+    Check if a point (x, y) is within widget bounds.
+    
+    Args:
+        x: X coordinate of the point
+        y: Y coordinate of the point
+        bounds: Widget bounds dict with x, y, width, height
+    
+    Returns:
+        True if point is within bounds, False otherwise
+    """
+    if not bounds:
+        return False
+    
+    bounds_x = bounds.get("x", 0)
+    bounds_y = bounds.get("y", 0)
+    bounds_width = bounds.get("width", 0)
+    bounds_height = bounds.get("height", 0)
+    
+    return (bounds_x <= x <= bounds_x + bounds_width and 
+            bounds_y <= y <= bounds_y + bounds_height)
+
+
+def _find_path_click_outside_bank_interface(obj_world_coords: dict, bank_bounds: dict) -> dict | None:
+    """
+    Find a click point outside the bank interface that paths correctly toward the object.
+    Uses sophisticated movement logic: clicks in an area that paths correctly, not on waypoints.
+    This mimics human behavior of clicking around the interface to move toward an object.
+    
+    Args:
+        obj_world_coords: World coordinates of the object {"x": int, "y": int, "p": int}
+        bank_bounds: Bank interface widget bounds {"x": int, "y": int, "width": int, "height": int}
+    
+    Returns:
+        World coordinates to click (outside bank interface) or None if not found
+    """
+    from actions import player
+    from actions.travel import _calculate_click_location, _verify_click_path, _is_tile_on_path
+    import random
+    
+    obj_x = obj_world_coords.get("x")
+    obj_y = obj_world_coords.get("y")
+    
+    if not isinstance(obj_x, int) or not isinstance(obj_y, int):
+        return None
+    
+    player_x = player.get_x()
+    player_y = player.get_y()
+    
+    if not isinstance(player_x, int) or not isinstance(player_y, int):
+        return None
+    
+    # Get intended path to object (for verification)
+    rect = (obj_x - 1, obj_x + 1, obj_y - 1, obj_y + 1)
+    intended_path, _ = ipc.path(rect=rect, visualize=False)
+    
+    if not intended_path or len(intended_path) == 0:
+        return None
+    
+    final_dest = {"x": obj_x, "y": obj_y}
+    
+    # STEP 1: Calculate optimal click location using sophisticated movement logic
+    # This clicks ahead of the destination, not on waypoints
+    click_location = _calculate_click_location(player_x, player_y, obj_x, obj_y, is_precise=False)
+    
+    # Check if this click location is outside the bank interface
+    proj = ipc.project_world_tile(click_location.get("x"), click_location.get("y"))
+    if proj and proj.get("ok") and proj.get("canvas"):
+        canvas_x = proj["canvas"].get("x")
+        canvas_y = proj["canvas"].get("y")
+        
+        if isinstance(canvas_x, (int, float)) and isinstance(canvas_y, (int, float)):
+            if not _is_point_in_widget_bounds(int(canvas_x), int(canvas_y), bank_bounds):
+                # Click location is outside bank interface - verify it paths correctly
+                if _verify_click_path(click_location, final_dest, intended_path):
+                    return click_location
+    
+    # STEP 2: Click location is blocked - try alternative click locations
+    # Try adjusting the click distance or direction to find a point outside the interface
+    # that still paths correctly
+    
+    # Calculate direction to object
+    dx = obj_x - player_x
+    dy = obj_y - player_y
+    distance = abs(dx) + abs(dy)
+    
+    if distance == 0:
+        return None
+    
+    # Normalize direction
+    if abs(dx) > abs(dy):
+        unit_dx = 1 if dx > 0 else -1
+        unit_dy = int(dy / abs(dx)) if dx != 0 else 0
+    else:
+        unit_dx = int(dx / abs(dy)) if dy != 0 else 0
+        unit_dy = 1 if dy > 0 else -1
+    
+    # Try different click distances (closer and farther from destination)
+    # to find one that's outside the bank interface
+    click_distances = []
+    
+    # Generate candidate click distances based on total distance
+    if distance > 20:
+        # Long distance: try 3-12 tiles ahead
+        click_distances = list(range(3, 13))
+    elif distance > 5:
+        # Medium distance: try 0-5 tiles ahead
+        click_distances = list(range(0, 6))
+    else:
+        # Close distance: try 1-4 tiles ahead
+        click_distances = list(range(1, 5))
+    
+    # Shuffle to add randomness
+    random.shuffle(click_distances)
+    
+    # Try each click distance
+    for click_dist in click_distances:
+        # Calculate click location at this distance
+        candidate_x = obj_x + (unit_dx * click_dist)
+        candidate_y = obj_y + (unit_dy * click_dist)
+        candidate_location = {"x": candidate_x, "y": candidate_y}
+        
+        # Check if this location is outside the bank interface
+        proj = ipc.project_world_tile(candidate_x, candidate_y)
+        if proj and proj.get("ok") and proj.get("canvas"):
+            canvas_x = proj["canvas"].get("x")
+            canvas_y = proj["canvas"].get("y")
+            
+            if isinstance(canvas_x, (int, float)) and isinstance(canvas_y, (int, float)):
+                if not _is_point_in_widget_bounds(int(canvas_x), int(canvas_y), bank_bounds):
+                    # Outside bank interface - verify it paths correctly
+                    if _verify_click_path(candidate_location, final_dest, intended_path):
+                        logging.info(f"[CLOSE_BANK] Found valid click location outside bank interface at ({candidate_x}, {candidate_y})")
+                        return candidate_location
+    
+    # STEP 3: Try clicking in perpendicular directions (left/right of the path)
+    # This mimics clicking around the interface
+    perpendicular_directions = [
+        (-unit_dy, unit_dx),   # 90 degrees clockwise
+        (unit_dy, -unit_dx),   # 90 degrees counter-clockwise
+    ]
+    
+    for perp_dx, perp_dy in perpendicular_directions:
+        # Try clicking a few tiles to the side of the optimal path
+        for side_offset in [2, 3, 4, 5]:  # Try 2-5 tiles to the side
+            candidate_x = obj_x + (unit_dx * 3) + (perp_dx * side_offset)
+            candidate_y = obj_y + (unit_dy * 3) + (perp_dy * side_offset)
+            candidate_location = {"x": candidate_x, "y": candidate_y}
+            
+            # Check if this location is outside the bank interface
+            proj = ipc.project_world_tile(candidate_x, candidate_y)
+            if proj and proj.get("ok") and proj.get("canvas"):
+                canvas_x = proj["canvas"].get("x")
+                canvas_y = proj["canvas"].get("y")
+                
+                if isinstance(canvas_x, (int, float)) and isinstance(canvas_y, (int, float)):
+                    if not _is_point_in_widget_bounds(int(canvas_x), int(canvas_y), bank_bounds):
+                        # Outside bank interface - verify it paths correctly
+                        if _verify_click_path(candidate_location, final_dest, intended_path):
+                            logging.info(f"[CLOSE_BANK] Found valid click location (perpendicular) outside bank interface at ({candidate_x}, {candidate_y})")
+                            return candidate_location
+    
+    # Couldn't find a valid click point outside the bank interface
+    logging.info(f"[CLOSE_BANK] Could not find click location outside bank interface that paths correctly")
+    return None
+
+
+def close_bank(
+    object_name: str | None = None,
+    object_action: str | None = None,
+    click_object_probability: float | tuple[float, float] | None = None,
+    prefer_no_camera: bool = False
+) -> dict | None:
+    """
+    Close the bank. Optionally can click an object instead (which auto-closes bank).
+    
+    If the bank interface is blocking the object, will either:
+    1. Click a point outside the bank interface that's on a path to the object (human-like behavior)
+    2. Fall back to closing the bank normally
+    
+    Args:
+        object_name: Optional name of object to potentially click (e.g., "Furnace")
+        object_action: Optional action to perform on object (e.g., "Smelt")
+        click_object_probability: Probability to click object instead of closing bank.
+                                 If tuple, uses random range (min, max). If float, uses that value.
+                                 If None and object_name provided, uses default range (0.2347, 0.3891).
+                                 If None and no object_name, always closes bank normally.
+        prefer_no_camera: If True, uses prefer_no_camera variant for object click
+    
+    Returns:
+        Dict with keys:
+            - "action": "object_click" | "ground_click" | "normal_close" | "failed"
+            - "result": Original result from the action (dict or None)
+        Or None if bank is not open
+    """
+    try:
+        # Check if bank is open first
+        if not is_open():
+            return None
+        
+        # If object_name and object_action provided, potentially click object instead
+        if object_name and object_action:
+            import random
+            from constants import BANK_WIDGETS
+            from actions.widgets import get_widget_bounds
+            from actions import objects
+            from services.click_with_camera import click_ground_with_camera
+            
+            # Determine probability
+            if click_object_probability is None:
+                # Default probability range
+                click_probability = random.uniform(0.2347, 0.3891)
+            elif isinstance(click_object_probability, tuple):
+                # Range provided
+                click_probability = random.uniform(click_object_probability[0], click_object_probability[1])
+            else:
+                # Single probability value
+                click_probability = float(click_object_probability)
+            
+            # Randomly decide whether to click object directly
+            click_object_directly = random.random() < click_probability
+            
+            if click_object_directly:
+                # First, try to find the object and check if it's blocked by bank interface
+                # Use IPC directly to find the object
+                obj_resp = ipc.find_object(object_name, types=["GAME"], exact_match=False)
+                obj = None
+                if obj_resp and obj_resp.get("ok") and obj_resp.get("found"):
+                    obj = obj_resp.get("object")
+                    # Verify it has the required action
+                    if obj and object_action:
+                        obj_actions = [str(a).strip().lower() for a in (obj.get("actions") or []) if a]
+                        if object_action.strip().lower() not in obj_actions:
+                            obj = None  # Object doesn't have required action
+                
+                if obj:
+                    obj_world_coords = obj.get("world", {})
+                    obj_canvas = obj.get("canvas", {})
+                    
+                    # Get bank interface bounds
+                    bank_bounds = get_widget_bounds(BANK_WIDGETS["UNIVERSE"])
+                    
+                    if bank_bounds and obj_canvas:
+                        obj_canvas_x = obj_canvas.get("x")
+                        obj_canvas_y = obj_canvas.get("y")
+                        
+                        # Check if object's click point is behind the bank interface
+                        if isinstance(obj_canvas_x, (int, float)) and isinstance(obj_canvas_y, (int, float)):
+                            if _is_point_in_widget_bounds(int(obj_canvas_x), int(obj_canvas_y), bank_bounds):
+                                # Object is blocked by bank interface
+                                logging.info(f"[CLOSE_BANK] Object '{object_name}' is blocked by bank interface, finding path click point outside...")
+                                
+                                # Try to find a click point outside the bank interface on path to object
+                                path_click_coords = _find_path_click_outside_bank_interface(obj_world_coords, bank_bounds)
+                                
+                                if path_click_coords:
+                                    # Click on ground outside bank interface (will move toward object)
+                                    logging.info(f"[CLOSE_BANK] Clicking ground outside bank interface at ({path_click_coords.get('x')}, {path_click_coords.get('y')}) to move toward object")
+                                    result = click_ground_with_camera(
+                                        world_coords=path_click_coords,
+                                        description=f"Move toward {object_name} (avoiding bank interface)",
+                                        aim_ms=420
+                                    )
+                                    if result:
+                                        return {"action": "ground_click", "result": result}
+                                
+                                # Couldn't find a good path click point - fall back to normal bank close
+                                logging.info(f"[CLOSE_BANK] Could not find path click point, closing bank normally")
+                                # Fall through to normal bank close
+                            else:
+                                # Object is not blocked - proceed with normal object click
+                                if prefer_no_camera:
+                                    result = objects.click_object_closest_by_distance_simple_no_camera(
+                                        object_name, 
+                                        prefer_action=object_action
+                                    )
+                                    if not result:
+                                        # Fallback to prefer_no_camera variant if no_camera fails
+                                        result = objects.click_object_closest_by_distance_simple_prefer_no_camera(
+                                            object_name, 
+                                            prefer_action=object_action
+                                        )
+                                else:
+                                    result = objects.click_object_closest_by_distance_simple(
+                                        object_name, 
+                                        prefer_action=object_action
+                                    )
+                                return {"action": "object_click", "result": result}
+                        else:
+                            # Can't determine canvas coords - try normal click anyway
+                            if prefer_no_camera:
+                                result = objects.click_object_closest_by_distance_simple_no_camera(
+                                    object_name, 
+                                    prefer_action=object_action
+                                )
+                                if not result:
+                                    # Fallback to prefer_no_camera variant if no_camera fails
+                                    result = objects.click_object_closest_by_distance_simple_prefer_no_camera(
+                                        object_name, 
+                                        prefer_action=object_action
+                                    )
+                            else:
+                                result = objects.click_object_closest_by_distance_simple(
+                                    object_name, 
+                                    prefer_action=object_action
+                                )
+                            return result
+                    else:
+                        # No bank bounds or object canvas - try normal click
+                        if prefer_no_camera:
+                            result = objects.click_object_closest_by_distance_simple_no_camera(
+                                object_name, 
+                                prefer_action=object_action
+                            )
+                            if not result:
+                                # Fallback to prefer_no_camera variant if no_camera fails
+                                result = objects.click_object_closest_by_distance_simple_prefer_no_camera(
+                                    object_name, 
+                                    prefer_action=object_action
+                                )
+                        else:
+                            result = objects.click_object_closest_by_distance_simple(
+                                object_name, 
+                                prefer_action=object_action
+                            )
+                        return result
+                else:
+                    # Object not found - try normal click anyway (might work)
+                    if prefer_no_camera:
+                        result = objects.click_object_closest_by_distance_simple_no_camera(
+                            object_name, 
+                            prefer_action=object_action
+                        )
+                        if not result:
+                            # Fallback to prefer_no_camera variant if no_camera fails
+                            result = objects.click_object_closest_by_distance_simple_prefer_no_camera(
+                                object_name, 
+                                prefer_action=object_action
+                            )
+                    else:
+                        result = objects.click_object_closest_by_distance_simple(
+                            object_name, 
+                            prefer_action=object_action
+                        )
+                    return result
+        
+        # Close bank normally
+        step = {
+            "action": "close-bank",
+            "click": {"type": "key", "key": "esc"},
+            "target": {"domain": "bank", "name": "Close"},
+            "postconditions": ["bankOpen == false"],
+        }
+        result = dispatch(step)
+        return {"action": "normal_close", "result": result}
+        
+    except Exception as e:
+        logging.error(f"[close_bank] actions/bank.py: {e}")
+        # Fallback to normal bank close
+        step = {
+            "action": "close-bank",
+            "click": {"type": "key", "key": "esc"},
+            "target": {"domain": "bank", "name": "Close"},
+            "postconditions": ["bankOpen == false"],
+        }
+        result = dispatch(step)
+        return {"action": "normal_close", "result": result}
 
 def toggle_note_mode() -> dict | None:
     """Toggle bank note mode (withdraw as note/withdraw as item)"""
@@ -1233,7 +1593,7 @@ def deposit_item(
     """
     Deposit an item from player's inventory to the bank.
     Replicates the withdrawal logic for intelligent deposit method selection.
-    
+
     Args:
         item_name: Name of the item to deposit
         deposit_x: Specific quantity to deposit (1, 5, 10, or custom X)
@@ -1375,10 +1735,10 @@ def deposit_item(
                     expected_action = "deposit-all"
                     expected_target = item_name
                     if (last_interaction and
-                        expected_action in last_interaction.get("action").lower() and
+                            expected_action in last_interaction.get("action").lower() and
                         clean_rs(last_interaction.get("target", "")).lower() == expected_target.lower()):
                         return result
-                continue
+                    continue
 
             # --- Deposit-5 ---
             if deposit_x == 5:
@@ -2251,6 +2611,150 @@ def has_materials_available(item_names: list[str]) -> dict[str, bool]:
     except Exception as e:
         logging.error(f"[has_materials_available] actions/bank.py: {e}")
         return {name: False for name in item_names}
+
+
+def close_bank_no_camera(
+    object_name: str | None = None,
+    object_action: str | None = None,
+    click_object_probability: float | tuple[float, float] | None = None,
+) -> dict | None:
+    """
+    Close the bank without using camera movement. Guarantees no camera movement.
+    
+    If object_name and object_action are provided, may click the object directly (which auto-closes bank).
+    If the object is blocked by the bank interface, closes bank normally instead of using camera.
+    If the no-camera object click fails, closes bank normally instead of falling back to camera.
+    
+    Args:
+        object_name: Optional name of object to potentially click (e.g., "Furnace")
+        object_action: Optional action to perform on object (e.g., "Smelt")
+        click_object_probability: Probability to click object instead of closing bank.
+                                 If tuple, uses random range (min, max). If float, uses that value.
+                                 If None and object_name provided, uses default range (0.2347, 0.3891).
+                                 If None and no object_name, always closes bank normally.
+    
+    Returns:
+        Dict with keys:
+            - "action": "object_click" | "normal_close" | "failed"
+            - "result": Original result from the action (dict or None)
+        Or None if bank is not open
+    """
+    try:
+        # Check if bank is open first
+        if not is_open():
+            return None
+        
+        # If object_name and object_action provided, potentially click object instead
+        if object_name and object_action:
+            import random
+            from constants import BANK_WIDGETS
+            from actions.widgets import get_widget_bounds
+            from actions import objects
+            
+            # Determine probability
+            if click_object_probability is None:
+                # Default probability range
+                click_probability = random.uniform(0.2347, 0.3891)
+            elif isinstance(click_object_probability, tuple):
+                # Range provided
+                click_probability = random.uniform(click_object_probability[0], click_object_probability[1])
+            else:
+                # Single probability value
+                click_probability = float(click_object_probability)
+            
+            # Randomly decide whether to click object directly
+            click_object_directly = random.random() < click_probability
+            
+            if click_object_directly:
+                # Get ALL objects matching the name with the required action
+                from actions.objects import _normalize_actions, _has_any_exact_action
+                
+                req_actions = _normalize_actions(object_action) if object_action else []
+                obj_resp = ipc.get_objects(object_name, types=["GAME"], radius=26) or {}
+                matching_objects = []
+                
+                if obj_resp.get("ok"):
+                    all_objs = obj_resp.get("objects") or []
+                    for obj in all_objs:
+                        # Filter by required action if specified
+                        if req_actions:
+                            if not _has_any_exact_action(obj, req_actions):
+                                continue
+                        matching_objects.append(obj)
+                
+                # Get bank interface bounds
+                bank_bounds = get_widget_bounds(BANK_WIDGETS["UNIVERSE"])
+                
+                # Check all matching objects to find one that's unblocked
+                unblocked_obj = None
+                for obj in matching_objects:
+                    obj_canvas = obj.get("canvas", {})
+                    if not bank_bounds or not obj_canvas:
+                        # Can't check blocking - use this object
+                        unblocked_obj = obj
+                        break
+                    
+                    obj_canvas_x = obj_canvas.get("x")
+                    obj_canvas_y = obj_canvas.get("y")
+                    
+                    if isinstance(obj_canvas_x, (int, float)) and isinstance(obj_canvas_y, (int, float)):
+                        if not _is_point_in_widget_bounds(int(obj_canvas_x), int(obj_canvas_y), bank_bounds):
+                            # This object is not blocked - use it
+                            unblocked_obj = obj
+                            break
+                    else:
+                        # Can't determine if blocked - use this object
+                        unblocked_obj = obj
+                        break
+                
+                if unblocked_obj:
+                    # Found an unblocked object - try no-camera click
+                    result = objects.click_object_closest_by_distance_simple_no_camera(
+                        object_name, 
+                        prefer_action=object_action
+                    )
+                    if result:
+                        return {"action": "object_click", "result": result}
+                    # No-camera click failed - close bank normally instead of using camera
+                    logging.info(f"[CLOSE_BANK_NO_CAMERA] No-camera object click failed, closing bank normally")
+                    # Fall through to normal bank close
+                elif matching_objects:
+                    # All matching objects are blocked by bank interface - close bank normally
+                    logging.info(f"[CLOSE_BANK_NO_CAMERA] All {len(matching_objects)} matching objects are blocked by bank interface, closing bank normally")
+                    # Fall through to normal bank close
+                else:
+                    # No matching objects found - try no-camera click anyway (might work)
+                    result = objects.click_object_closest_by_distance_simple_no_camera(
+                        object_name, 
+                        prefer_action=object_action
+                    )
+                    if result:
+                        return {"action": "object_click", "result": result}
+                    # No-camera click failed - close bank normally
+                    logging.info(f"[CLOSE_BANK_NO_CAMERA] No matching objects found and no-camera click failed, closing bank normally")
+                    # Fall through to normal bank close
+        
+        # Close bank normally (ESC key - never uses camera)
+        step = {
+            "action": "close-bank",
+            "click": {"type": "key", "key": "esc"},
+            "target": {"domain": "bank", "name": "Close"},
+            "postconditions": ["bankOpen == false"],
+        }
+        result = dispatch(step)
+        return {"action": "normal_close", "result": result}
+        
+    except Exception as e:
+        logging.error(f"[close_bank_no_camera] actions/bank.py: {e}")
+        # Fallback to normal bank close
+        step = {
+            "action": "close-bank",
+            "click": {"type": "key", "key": "esc"},
+            "target": {"domain": "bank", "name": "Close"},
+            "postconditions": ["bankOpen == false"],
+        }
+        result = dispatch(step)
+        return {"action": "normal_close", "result": result}
 
 
 def close_bank_or_click_object(

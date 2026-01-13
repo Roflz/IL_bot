@@ -20,25 +20,41 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def load_collision_data(start_coords=None, dest_coords=None, buffer=200):
     """Load collision data from cache, filtered by start/destination bounds."""
+    import time
+    import os
+    step_start = time.time()
+    
     script_dir = Path(__file__).parent
     # Cache lives in this folder (collision_cache/collision_map_debug.json)
     cache_file = script_dir / "collision_map_debug.json"
-    # Loading collision data
     
     if not cache_file.exists():
-        print("ERROR: No collision cache found. Run collision mapping first.")
+        print("[LOAD_COLLISION_DATA] ERROR: No collision cache found. Run collision mapping first.")
         return None
     
+    # Get file size
+    file_size = os.path.getsize(cache_file)
+    file_size_mb = file_size / (1024 * 1024)
+    print(f"[LOAD_COLLISION_DATA] Loading cache file: {cache_file}")
+    print(f"[LOAD_COLLISION_DATA]   File size: {file_size_mb:.2f} MB ({file_size:,} bytes)")
+    
     try:
+        # Load JSON file
+        load_start = time.time()
         with open(cache_file, 'r') as f:
             data = json.load(f)
+        load_time = time.time() - load_start
+        print(f"[LOAD_COLLISION_DATA]   JSON parsing took: {load_time:.3f}s")
         
         all_collision_data = data.get("collision_data", {})
-        # Total collision tiles in cache
+        total_tiles = len(all_collision_data)
+        print(f"[LOAD_COLLISION_DATA]   Total tiles in cache: {total_tiles:,}")
         
         # If no start/dest coordinates provided, return all data
         if not start_coords or not dest_coords:
-            # No start/dest coordinates provided, returning all collision data
+            print(f"[LOAD_COLLISION_DATA]   No filtering - returning all {total_tiles:,} tiles")
+            total_time = time.time() - step_start
+            print(f"[LOAD_COLLISION_DATA] Total time: {total_time:.3f}s")
             return all_collision_data
         
         # Calculate bounds based on start and destination coordinates
@@ -50,25 +66,51 @@ def load_collision_data(start_coords=None, dest_coords=None, buffer=200):
         min_y = min(start_y, dest_y) - buffer
         max_y = max(start_y, dest_y) + buffer
         
-        # Filtering collision data to bounds
+        distance = abs(dest_x - start_x) + abs(dest_y - start_y)
+        area_width = max_x - min_x + 1
+        area_height = max_y - min_y + 1
+        total_area = area_width * area_height
+        
+        print(f"[LOAD_COLLISION_DATA]   Start: ({start_x}, {start_y}), Dest: ({dest_x}, {dest_y})")
+        print(f"[LOAD_COLLISION_DATA]   Distance: {distance} tiles, Buffer: {buffer} tiles")
+        print(f"[LOAD_COLLISION_DATA]   Filter bounds: ({min_x}, {min_y}) to ({max_x}, {max_y})")
+        print(f"[LOAD_COLLISION_DATA]   Filter area: {area_width}x{area_height} = {total_area:,} tiles")
         
         # Filter collision data to only include tiles within bounds
+        filter_start = time.time()
         filtered_data = {}
+        tiles_checked = 0
         for tile_id, tile_data in all_collision_data.items():
+            tiles_checked += 1
             x, y = tile_data['x'], tile_data['y']
             if min_x <= x <= max_x and min_y <= y <= max_y:
                 filtered_data[tile_id] = tile_data
+        filter_time = time.time() - filter_start
         
-        # Filtered collision data
+        filtered_count = len(filtered_data)
+        filter_percent = (filtered_count / total_tiles * 100) if total_tiles > 0 else 0
+        
+        print(f"[LOAD_COLLISION_DATA]   Filtered {filtered_count:,} tiles from {total_tiles:,} ({filter_percent:.1f}%)")
+        print(f"[LOAD_COLLISION_DATA]   Filtering took: {filter_time:.3f}s ({tiles_checked:,} iterations)")
+        
+        total_time = time.time() - step_start
+        print(f"[LOAD_COLLISION_DATA] Total time: {total_time:.3f}s")
+        
         return filtered_data
         
     except Exception as e:
-        print(f"ERROR: Could not load cache: {e}")
+        total_time = time.time() - step_start
+        print(f"[LOAD_COLLISION_DATA] ERROR: Could not load cache after {total_time:.3f}s: {e}")
         return None
 
 
 def get_walkable_tiles(collision_data):
     """Convert collision data to a set of walkable coordinates with wall orientation handling."""
+    import time
+    total_start = time.time()
+    
+    print(f"[GET_WALKABLE_TILES] Processing {len(collision_data)} collision tiles...")
+    
     walkable = set()
     blocked = set()
     wall_masks = {}  # Store normalized orientation masks for drawing/debug
@@ -117,13 +159,18 @@ def get_walkable_tiles(collision_data):
     door_clears_neighbor = {}  # (nx,ny) -> mask_to_clear_bits
 
     # pass 1: scan tiles and record clears
+    pass1_start = time.time()
+    pass1_count = 0
+    door_count = 0
     for tile_data in collision_data.values():
+        pass1_count += 1
         x, y = tile_data['x'], tile_data['y']
         flags = tile_data.get('flags', 0)
         mask = mask_from_flags(flags)
 
         door_info = tile_data.get('door')
         if door_info and isinstance(door_info, dict):
+            door_count += 1
             # Check if door has 'Open' action (regardless of passable status)
             door_actions = door_info.get('actions', [])
             if 'Open' in door_actions:
@@ -166,7 +213,11 @@ def get_walkable_tiles(collision_data):
         # store raw masks for now
         wall_masks[(x, y)] = mask
 
+    pass1_time = time.time() - pass1_start
+    print(f"[GET_WALKABLE_TILES]   Pass 1: Processed {pass1_count} tiles, found {door_count} doors (took {pass1_time:.3f}s)")
+
     # pass 2: apply clears (on both the door tile and its opposite neighbor)
+    pass2_start = time.time()
     for pos, clr in door_clears_here.items():
         if pos in wall_masks:
             wall_masks[pos] &= ~clr
@@ -178,7 +229,11 @@ def get_walkable_tiles(collision_data):
             # neighbor exists but had no edges yet — ensure it exists so entry/exit checks see the cleared edge
             wall_masks[pos] = 0
 
+    pass2_time = time.time() - pass2_start
+    print(f"[GET_WALKABLE_TILES]   Pass 2: Applied door clears to {len(door_clears_here)} tiles + {len(door_clears_neighbor)} neighbors (took {pass2_time:.3f}s)")
+
     # now decide walkable vs blocked:
+    pass3_start = time.time()
     for tile_data in collision_data.values():
         x, y = tile_data['x'], tile_data['y']
         flags = tile_data.get('flags', 0)
@@ -189,17 +244,58 @@ def get_walkable_tiles(collision_data):
         else:
             walkable.add((x, y))
     
+    pass3_time = time.time() - pass3_start
+    print(f"[GET_WALKABLE_TILES]   Pass 3: Classified {len(walkable)} walkable, {len(blocked)} blocked tiles (took {pass3_time:.3f}s)")
+    
     # Add all tiles that are NOT in collision_data as walkable (NO DATA = walkable)
+    # OPTIMIZED: Only check tiles that are in collision_data bounds, not the entire rectangular area
+    pass4_start = time.time()
     if collision_data:
+        # Build a set of all tiles that exist in collision_data for fast lookup
+        collision_tiles_set = set()
+        for tile_data in collision_data.values():
+            collision_tiles_set.add((tile_data['x'], tile_data['y']))
+        
+        # Get bounds from actual collision data tiles (not rectangular area)
         all_x = [tile['x'] for tile in collision_data.values()]
         all_y = [tile['y'] for tile in collision_data.values()]
         min_x, max_x = min(all_x), max(all_x)
         min_y, max_y = min(all_y), max(all_y)
         
-        for x in range(min_x, max_x + 1):
-            for y in range(min_y, max_y + 1):
-                if (x, y) not in walkable and (x, y) not in blocked:
+        # Only check tiles within a reasonable expansion of the collision data bounds
+        # Expand by 1 tile in each direction to catch adjacent walkable tiles
+        expanded_min_x = min_x - 1
+        expanded_max_x = max_x + 1
+        expanded_min_y = min_y - 1
+        expanded_max_y = max_y + 1
+        
+        area_width = expanded_max_x - expanded_min_x + 1
+        area_height = expanded_max_y - expanded_min_y + 1
+        total_area = area_width * area_height
+        
+        print(f"[GET_WALKABLE_TILES]   Pass 4: Adding missing tiles as walkable...")
+        print(f"[GET_WALKABLE_TILES]     Collision data bounds: ({min_x}, {min_y}) to ({max_x}, {max_y})")
+        print(f"[GET_WALKABLE_TILES]     Expanded bounds: ({expanded_min_x}, {expanded_min_y}) to ({expanded_max_x}, {expanded_max_y})")
+        print(f"[GET_WALKABLE_TILES]     Area: {area_width}x{area_height} = {total_area:,} tiles to check")
+        
+        added_count = 0
+        # Only iterate through the expanded bounds (much smaller than full rectangular area)
+        for x in range(expanded_min_x, expanded_max_x + 1):
+            for y in range(expanded_min_y, expanded_max_y + 1):
+                # Only add if not already in walkable/blocked AND not in collision_data
+                if (x, y) not in walkable and (x, y) not in blocked and (x, y) not in collision_tiles_set:
                     walkable.add((x, y))
+                    added_count += 1
+        
+        pass4_time = time.time() - pass4_start
+        print(f"[GET_WALKABLE_TILES]   Pass 4: Added {added_count:,} missing tiles as walkable (took {pass4_time:.3f}s)")
+        print(f"[GET_WALKABLE_TILES]     Iterations: {total_area:,} (optimized from full rectangular area)")
+    else:
+        pass4_time = 0
+    
+    total_time = time.time() - total_start
+    print(f"[GET_WALKABLE_TILES] Total time: {total_time:.3f}s")
+    print(f"[GET_WALKABLE_TILES] Final: {len(walkable)} walkable, {len(blocked)} blocked, {len(wall_masks)} wall masks")
     
     return walkable, blocked, wall_masks, orientation_blockers
 
@@ -367,19 +463,42 @@ def find_closest_walkable_tile(goal, walkable_tiles, search_radius=50):
     return None
 
 
-def astar_pathfinding(start, goal, walkable_tiles, max_iterations=100000):
-    """Find path using A* algorithm with wall orientation support and partial fallback."""
-    print(f"[DEBUG] Finding path from {start} to {goal}")
-    print(f"[DEBUG] Walkable tiles: {len(walkable_tiles)}")
+def astar_pathfinding(start, goal, walkable_tiles, max_iterations=100000, wall_masks=None, orientation_blockers=None):
+    """Find path using A* algorithm with wall orientation support and partial fallback.
+    
+    Args:
+        start: Start position (x, y)
+        goal: Goal position (x, y)
+        walkable_tiles: Set of walkable tile coordinates
+        max_iterations: Maximum A* iterations
+        wall_masks: Optional pre-computed wall masks dict (avoids redundant loading)
+        orientation_blockers: Optional pre-computed orientation blockers set
+    """
+    import time
+    total_start = time.time()
+    
+    print(f"[ASTAR_PATHFINDING] Starting A* from {start} to {goal}")
+    print(f"[ASTAR_PATHFINDING]   Walkable tiles: {len(walkable_tiles):,}")
+    print(f"[ASTAR_PATHFINDING]   Max iterations: {max_iterations:,}")
 
+    # Use provided wall_masks if available, otherwise load (for backward compatibility)
+    if wall_masks is None or orientation_blockers is None:
+        print(f"[ASTAR_PATHFINDING] Loading collision data (wall_masks not provided)...")
+        load_start = time.time()
     collision_data = load_collision_data(start, goal)
+        load_time = time.time() - load_start
     if collision_data:
+            print(f"[ASTAR_PATHFINDING]   Load took: {load_time:.3f}s")
+            process_start = time.time()
         _, _, wall_masks, orientation_blockers = get_walkable_tiles(collision_data)
-        # Loaded wall masks and orientation blockers
+            process_time = time.time() - process_start
+            print(f"[ASTAR_PATHFINDING]   Processing took: {process_time:.3f}s")
     else:
         wall_masks = {}
         orientation_blockers = set()
-        print(f"[DEBUG] Could not load collision data, using empty wall data")
+            print(f"[ASTAR_PATHFINDING]   Could not load collision data, using empty wall data (took {load_time:.3f}s)")
+    else:
+        print(f"[ASTAR_PATHFINDING] Using provided wall_masks (avoiding redundant load)")
 
     if start not in walkable_tiles:
         print(f"ERROR: Start position {start} is not walkable")
@@ -411,10 +530,15 @@ def astar_pathfinding(start, goal, walkable_tiles, max_iterations=100000):
     best_h = heuristic(start, goal)
 
     iterations = 0
+    astar_start = time.time()
+    last_print_time = astar_start
     while open_set and iterations < max_iterations:
         iterations += 1
         if iterations % 2000 == 0:
-            print(f"[DEBUG] Iteration {iterations}, visited {len(visited)} tiles, queue size {len(open_set)}")
+            current_time = time.time()
+            elapsed = current_time - last_print_time
+            print(f"[ASTAR_PATHFINDING]   Iteration {iterations:,}, visited {len(visited):,} tiles, queue size {len(open_set):,} (last 2000 iterations took {elapsed:.3f}s)")
+            last_print_time = current_time
 
         _, _, current = heapq.heappop(open_set)
         if current in visited:
@@ -432,8 +556,11 @@ def astar_pathfinding(start, goal, walkable_tiles, max_iterations=100000):
                 current = came_from[current]
                 path.append(current)
             path.reverse()
-            print(f"[DEBUG] Path found with {len(path)} waypoints after {iterations} iterations")
-            print(f"[DEBUG] Path waypoints: {path}")
+            astar_time = time.time() - astar_start
+            total_time = time.time() - total_start
+            print(f"[ASTAR_PATHFINDING]   Path found with {len(path)} waypoints after {iterations:,} iterations")
+            print(f"[ASTAR_PATHFINDING]   A* search took: {astar_time:.3f}s")
+            print(f"[ASTAR_PATHFINDING]   Total time (including redundant loads): {total_time:.3f}s")
             return path
 
         for nbr in get_neighbors(current, walkable_tiles, wall_masks, orientation_blockers):
@@ -450,9 +577,13 @@ def astar_pathfinding(start, goal, walkable_tiles, max_iterations=100000):
                 f = tentative + heuristic(nbr, goal)
                 heapq.heappush(open_set, (f, tie, nbr))
 
-    print(f"ERROR: No path found after {iterations} iterations (visited {len(visited)} tiles)")
+    astar_time = time.time() - astar_start
+    total_time = time.time() - total_start
+    print(f"[ASTAR_PATHFINDING] ERROR: No path found after {iterations:,} iterations (visited {len(visited):,} tiles)")
+    print(f"[ASTAR_PATHFINDING]   A* search took: {astar_time:.3f}s")
+    print(f"[ASTAR_PATHFINDING]   Total time (including redundant loads): {total_time:.3f}s")
     if best_node is not None and best_node != start:
-        print(f"[DEBUG] Returning partial path to closest discovered node {best_node} (h={best_h:.3f})")
+        print(f"[ASTAR_PATHFINDING]   Returning partial path to closest discovered node {best_node} (h={best_h:.3f})")
         path = [best_node]
         cur = best_node
         while cur in came_from:

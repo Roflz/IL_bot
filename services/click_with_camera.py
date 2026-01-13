@@ -7,9 +7,10 @@ import random
 from helpers import unwrap_rect
 from helpers.ipc import get_last_interaction
 from helpers.utils import clean_rs, sleep_exponential, rect_beta_xy
-from services.camera_integration import aim_midtop_at_world
+from services.camera_integration import aim_midtop_at_world, aim_camera_along_path, aim_camera_at_target
 from helpers.runtime_utils import ipc, dispatch
 from helpers.navigation import _merge_door_into_projection
+from actions.movement import get_movement_direction
 
 
 def click_object_with_camera(
@@ -20,11 +21,17 @@ def click_object_with_camera(
     click_rect: dict = None,    # Rectangle bounds for anchor
     door_plan: dict = None,     # Door-specific plan with coordinates
     aim_ms: int = 420,
-    exact_match: bool = False
+    exact_match: bool = False,
+    path_waypoints: list = None,
+    movement_state: dict = None
 ) -> dict | None:
     """
     Click an object with camera movement and fresh coordinate recalculation.
     Handles doors specially when door_plan is provided.
+    
+    Args:
+        path_waypoints: Optional list of waypoint dicts from pathfinding for path-aware camera
+        movement_state: Optional movement state dict with is_running, movement_direction, etc.
     """
     
     try:
@@ -48,8 +55,37 @@ def click_object_with_camera(
             # Try multiple attempts with different coordinates
             max_attempts = 3
             for attempt in range(max_attempts):
-                # Move camera to target
-                aim_midtop_at_world(world_coords['x'], world_coords['y'], max_ms=aim_ms)
+                # Move camera to target using path-aware logic if available
+                from actions import player
+                player_x = player.get_x()
+                player_y = player.get_y()
+                
+                # Use new camera system
+                # Calculate distance for mode detection
+                from actions.travel import _get_player_movement_state
+                if isinstance(player_x, int) and isinstance(player_y, int):
+                    dx = abs(world_coords['x'] - player_x)
+                    dy = abs(world_coords['y'] - player_y)
+                    distance = dx + dy  # Manhattan distance
+                else:
+                    distance = None
+                
+                # Use new camera system with auto-detection
+                # Get area center from camera state if available
+                from services.camera_integration import get_camera_state
+                camera_state, state_config, area_center, _ = get_camera_state()
+                
+                aim_camera_at_target(
+                    target_world_coords=world_coords,
+                    mode=None,  # Auto-detect
+                    action_type="click_object",
+                    distance_to_target=distance,
+                    path_waypoints=path_waypoints,
+                    movement_state=movement_state,
+                    max_ms=aim_ms,
+                    object_world_coords=world_coords,  # Pass object coords for OBJECT_INTERACTION state
+                    area_center=area_center
+                )
                 
                 # Handle doors specially if door_plan is provided
                 if door_plan and door_plan.get('door'):
@@ -65,6 +101,38 @@ def click_object_with_camera(
                         cx = int(door_data["canvas"]["x"])
                         cy = int(door_data["canvas"]["y"])
                         point = {"x": cx, "y": cy}
+                    
+                    # Check if click point is within any blocking UI widget
+                    from helpers.widgets import is_point_in_blocking_widget
+                    if is_point_in_blocking_widget(cx, cy):
+                        # Click point is blocked by UI - adjust to nearest point outside widget bounds
+                        adjusted = False
+                        canvas_width = 1920  # Default, adjust if needed
+                        canvas_height = 1080  # Default, adjust if needed
+                        margin = 10
+                        
+                        for offset_x, offset_y in [
+                            (0, -50), (0, 50), (-50, 0), (50, 0),  # Up, down, left, right
+                            (-30, -30), (30, -30), (-30, 30), (30, 30),  # Diagonals
+                            (0, -100), (0, 100), (-100, 0), (100, 0),  # Further in cardinal directions
+                        ]:
+                            test_x = cx + offset_x
+                            test_y = cy + offset_y
+                            
+                            # Ensure test point is still within canvas bounds
+                            if (margin <= test_x <= canvas_width - margin and 
+                                margin <= test_y <= canvas_height - margin and
+                                not is_point_in_blocking_widget(test_x, test_y)):
+                                cx = test_x
+                                cy = test_y
+                                point = {"x": cx, "y": cy}
+                                adjusted = True
+                                print(f"[CLICK] Door - click point blocked by UI widget, adjusted to ({cx}, {cy})")
+                                break
+                        
+                        if not adjusted:
+                            # Couldn't find a valid point - this is a problem, but we'll try anyway
+                            print(f"[WARNING] Door - click point ({cx}, {cy}) is blocked by UI widget and couldn't be adjusted")
                         
                     # Determine action based on door state
                     if action is None:
@@ -156,6 +224,39 @@ def click_object_with_camera(
                     cx = int(fresh_coords["x"])
                     cy = int(fresh_coords["y"])
                     point = {"x": cx, "y": cy}
+                
+                # Check if click point is within any blocking UI widget
+                from helpers.widgets import is_point_in_blocking_widget
+                if is_point_in_blocking_widget(cx, cy):
+                    # Click point is blocked by UI - adjust to nearest point outside widget bounds
+                    # Try moving the click point in different directions to find a valid location
+                    adjusted = False
+                    canvas_width = 1920  # Default, adjust if needed
+                    canvas_height = 1080  # Default, adjust if needed
+                    margin = 10
+                    
+                    for offset_x, offset_y in [
+                        (0, -50), (0, 50), (-50, 0), (50, 0),  # Up, down, left, right
+                        (-30, -30), (30, -30), (-30, 30), (30, 30),  # Diagonals
+                        (0, -100), (0, 100), (-100, 0), (100, 0),  # Further in cardinal directions
+                    ]:
+                        test_x = cx + offset_x
+                        test_y = cy + offset_y
+                        
+                        # Ensure test point is still within canvas bounds
+                        if (margin <= test_x <= canvas_width - margin and 
+                            margin <= test_y <= canvas_height - margin and
+                            not is_point_in_blocking_widget(test_x, test_y)):
+                            cx = test_x
+                            cy = test_y
+                            point = {"x": cx, "y": cy}
+                            adjusted = True
+                            print(f"[CLICK] Object - click point blocked by UI widget, adjusted to ({cx}, {cy})")
+                            break
+                    
+                    if not adjusted:
+                        # Couldn't find a valid point - this is a problem, but we'll try anyway
+                        print(f"[WARNING] Object - click point ({cx}, {cy}) is blocked by UI widget and couldn't be adjusted")
 
                 step = {
                     "action": "click-object-context",
@@ -208,10 +309,16 @@ def click_npc_with_camera(
     action: str = None,
     world_coords: dict = None,
     aim_ms: int = 420,
-    exact_match: bool = False
+    exact_match: bool = False,
+    path_waypoints: list = None,
+    movement_state: dict = None
 ) -> dict | None:
     """
     Click an NPC with camera movement and fresh coordinate recalculation.
+    
+    Args:
+        path_waypoints: Optional list of waypoint dicts from pathfinding for path-aware camera
+        movement_state: Optional movement state dict with is_running, movement_direction, etc.
     """
     try:
         if not world_coords:
@@ -234,8 +341,35 @@ def click_npc_with_camera(
             # Try multiple attempts with different coordinates
             max_attempts = 3
             for attempt in range(max_attempts):
-                # Move camera to target
-                aim_midtop_at_world(world_coords['x'], world_coords['y'], max_ms=aim_ms)
+                # Move camera to target using path-aware logic if available
+                from actions import player
+                player_x = player.get_x()
+                player_y = player.get_y()
+                
+                # Use new camera system
+                # Calculate distance for mode detection
+                if isinstance(player_x, int) and isinstance(player_y, int):
+                    dx = abs(world_coords['x'] - player_x)
+                    dy = abs(world_coords['y'] - player_y)
+                    distance = dx + dy  # Manhattan distance
+                else:
+                    distance = None
+                
+                # Use new camera system with auto-detection
+                from services.camera_integration import get_camera_state
+                camera_state, state_config, area_center, _ = get_camera_state()
+                
+                aim_camera_at_target(
+                    target_world_coords=world_coords,
+                    mode=None,  # Auto-detect
+                    action_type="click_npc",
+                    distance_to_target=distance,
+                    path_waypoints=path_waypoints,
+                    movement_state=movement_state,
+                    max_ms=aim_ms,
+                    object_world_coords=world_coords,  # Pass object coords for OBJECT_INTERACTION state
+                    area_center=area_center
+                )
                 
                 # STEP 3: NPC finding and rect resampling
                 npc_resp = ipc.find_npc(npc_name)
@@ -319,6 +453,8 @@ def click_npc_with_camera_no_reacquire(
     world_coords: dict = None,
     aim_ms: int = 420,
     exact_match: bool = False,
+    path_waypoints: list = None,
+    movement_state: dict = None
 ) -> dict | None:
     """
     Click an NPC with camera movement, WITHOUT re-acquiring a (potentially different) NPC from IPC.
@@ -326,6 +462,10 @@ def click_npc_with_camera_no_reacquire(
     This is meant to be used when the caller has already selected/filtered a specific NPC (e.g. not
     in combat, not 0% hp) and wants to click *that* NPC, not whichever IPC reports as "closest"
     at click-time.
+    
+    Args:
+        path_waypoints: Optional list of waypoint dicts from pathfinding for path-aware camera
+        movement_state: Optional movement state dict with is_running, movement_direction, etc.
     """
     try:
         if not isinstance(target_npc, dict):
@@ -356,8 +496,35 @@ def click_npc_with_camera_no_reacquire(
             # Try multiple attempts with different coordinates
             max_attempts = 3
             for _attempt in range(max_attempts):
-                # Move camera to target tile (still OK; doesn't change which NPC we're targeting)
-                aim_midtop_at_world(world_coords["x"], world_coords["y"], max_ms=aim_ms)
+                # Move camera to target using path-aware logic if available
+                from actions import player
+                player_x = player.get_x()
+                player_y = player.get_y()
+                
+                # Use new camera system
+                # Calculate distance for mode detection
+                if isinstance(player_x, int) and isinstance(player_y, int):
+                    dx = abs(world_coords["x"] - player_x)
+                    dy = abs(world_coords["y"] - player_y)
+                    distance = dx + dy  # Manhattan distance
+                else:
+                    distance = None
+                
+                # Use new camera system with auto-detection
+                from services.camera_integration import get_camera_state
+                camera_state, state_config, area_center, _ = get_camera_state()
+                
+                aim_camera_at_target(
+                    target_world_coords=world_coords,
+                    mode=None,  # Auto-detect
+                    action_type="click_npc",
+                    distance_to_target=distance,
+                    path_waypoints=path_waypoints,
+                    movement_state=movement_state,
+                    max_ms=aim_ms,
+                    object_world_coords=world_coords,  # Pass object coords for OBJECT_INTERACTION state
+                    area_center=area_center
+                )
 
                 # Pick click point from the already-selected NPC (no IPC npc query here)
                 rect = unwrap_rect(target_npc.get("clickbox")) or unwrap_rect(target_npc.get("bounds"))
@@ -498,106 +665,280 @@ def click_ground_with_camera(
     world_coords: dict,
     description: str = "Move",
     aim_ms: int = 700,
-    waypoint_path: list = None
+    waypoint_path: list = None,
+    verify_tile: bool = False,
+    expected_tile: dict = None,
+    verify_path: bool = False,
+    path_waypoints: list = None,
+    movement_state: dict = None
 ) -> dict | None:
     """
-    Click ground with camera movement and fresh coordinate recalculation.
-    If verify_walk_here_available returns false, retry with different tiles from waypoint path.
+    Click ground in the general direction of the destination, then verify the clicked tile is on the path.
+    Uses shift+left-click for walking (RuneLite plugin makes "Walk here" top action when shift is held).
+    
+    This function:
+    - Gets path for visualization and verification (visualize=True)
+    - Calculates direction from player to destination
+    - Clicks somewhere in that general direction (NOT on waypoints)
+    - Verifies the clicked tile is on/near the intended path
     """
     try:
         if not world_coords:
             return None
         
-        # Try pathfinding with decreasing max waypoints (20 down to 15)
-        max_attempts = 3  # 20, 19, 18, 17, 16, 15
-        initial_max_wps = 18
+        from actions import player
         
-        # Try camera retry directions: first try without moving camera, then LEFT, then RIGHT
-        camera_retry_directions = [None, "LEFT", "RIGHT"]
-        camera_retry_duration = 0.5  # Move camera for 500ms
+        # Get player position
+        player_x = player.get_x()
+        player_y = player.get_y()
         
-        for camera_retry_idx, direction in enumerate(camera_retry_directions):
-            # Move camera if this is not the first attempt
-            if direction is not None:
-                try:
-                    ipc.key_press(direction)
-                    sleep_exponential(camera_retry_duration * 0.8, camera_retry_duration * 1.2, 1.0)
-                    ipc.key_release(direction)
-                except Exception:
-                    pass  # Don't fail if camera movement fails
-            
-            for attempt in range(max_attempts):
-                current_max_wps = initial_max_wps - attempt
-                
-                # Re-run pathfinding logic like in go_to to get fresh waypoint
-                wps, dbg_path = ipc.path(rect=(world_coords['x']-1, world_coords['x']+1, world_coords['y']-1, world_coords['y']+1), visualize=False)
-                
-                if not wps:
-                    continue
-                
-                proj, dbg_proj = ipc.project_many(wps)
-                proj = _merge_door_into_projection(wps, proj)
-                
-                usable = [p for p in proj if isinstance(p, dict) and p.get("canvas")]
-                if not usable:
-                    continue
-                
-                # Pick from the last 3 waypoints (or all if less than 3) - same logic as go_to
-                if len(usable) <= 3:
-                    chosen = random.choice(usable)
-                else:
-                    chosen = random.choice(usable[-3:])
-                
-                coords = chosen.get("world") or {"x": chosen.get("x"), "y": chosen.get("y"), "p": chosen.get("p")}
-                
-                # STEP 2: Camera movement
-                aim_midtop_at_world(coords['x'], coords['y'], max_ms=aim_ms)
-                
-                proj, _ = ipc.project_many([{"x": coords['x'], "y": coords['y'], "p": coords.get('p', 0)}])
-                
-                # Get fresh coordinates - check bounds first, then canvas
-                proj_data = proj[0]
-                bounds = proj_data.get("bounds", {})
-                if bounds and bounds.get("width", 0) > 0 and bounds.get("height", 0) > 0:
-                    cx, cy = rect_beta_xy((bounds.get("x", 0), bounds.get("x", 0) + bounds.get("width", 0),
-                                           bounds.get("y", 0), bounds.get("y", 0) + bounds.get("height", 0)), alpha=2.0, beta=2.0)
-                else:
-                    # Fallback to canvas coordinates
-                    fresh_coords = proj_data["canvas"]
-                    cx = int(fresh_coords["x"])
-                    cy = int(fresh_coords["y"])
-                
-                sleep_exponential(0.05, 0.15, 1.5)
-                
-                step = {
-                    "action": "click-ground-context",
-                    "option": "Walk here",
-                    "click": {
-                        "type": "context-select",
-                        "index": 0,
-                        "x": cx,
-                        "y": cy,
-                        "row_height": 16,
-                        "start_dy": 10,
-                        "open_delay_ms": 120,
-                    },
-                    "target": {"domain": "ground", "name": "", "world": coords},
-                    "anchor": {"x": cx, "y": cy},
-                }
-                
-                result = dispatch(step)
-                
-                if result:
-                    # Check if the correct interaction was performed
-                    last_interaction = get_last_interaction()
+        if not isinstance(player_x, int) or not isinstance(player_y, int):
+            return None
+        
+        click_x = world_coords.get('x')
+        click_y = world_coords.get('y')
+        
+        if not isinstance(click_x, int) or not isinstance(click_y, int):
+            return None
+        
+        # Get movement state if not provided (for camera compensation)
+        if movement_state is None:
+            # Try to get movement state from IPC directly to avoid circular imports
+            try:
+                resp = ipc.get_player()
+                if resp and resp.get("ok") and resp.get("player"):
+                    player_data = resp.get("player", {})
+                    current_x = player_data.get("worldX")
+                    current_y = player_data.get("worldY")
+                    pose_animation = player_data.get("poseAnimation", -1)
+                    is_running = player_data.get("isRunning", False)
+                    orientation = player_data.get("orientation", 0)
                     
-                    if last_interaction and last_interaction.get("action") == "Walk here":
-                        return result
-                    else:
-                        print(f"[CLICK] Ground - incorrect interaction, retrying...")
-                        # Continue to next attempt in the same camera direction
-                        continue
-        return None
+                    # Simple movement state - just check if running
+                    movement_state = {
+                        "is_running": is_running,
+                        "orientation": orientation
+                    }
+            except Exception:
+                movement_state = None
+        
+        # Use new camera system for ground clicks
+        # Calculate distance for mode detection
+        if isinstance(player_x, int) and isinstance(player_y, int):
+            dx = abs(click_x - player_x)
+            dy = abs(click_y - player_y)
+            distance = dx + dy  # Manhattan distance
+        else:
+            distance = None
+        
+        # Use new camera system with auto-detection
+        from services.camera_integration import get_camera_state
+        camera_state, state_config, area_center, _ = get_camera_state()
+        
+        aim_camera_at_target(
+            target_world_coords={"x": click_x, "y": click_y},
+            mode=None,  # Auto-detect
+            action_type="click_ground",
+            distance_to_target=distance,
+            path_waypoints=path_waypoints,
+            movement_state=movement_state,
+            max_ms=aim_ms,
+            object_world_coords=None,
+            area_center=area_center
+        )
+        
+        # Project the click tile to get screen coordinates
+        proj, _ = ipc.project_many([{"x": click_x, "y": click_y}])
+        
+        if not proj or not isinstance(proj[0], dict) or not proj[0].get("canvas"):
+            return None
+        
+        proj_data = proj[0]
+        bounds = proj_data.get("bounds", {})
+        
+        # Get click coordinates with some randomization
+        if bounds and bounds.get("width", 0) > 0 and bounds.get("height", 0) > 0:
+            # Use bounds with randomization
+            base_x = bounds.get("x", 0) + bounds.get("width", 0) // 2
+            base_y = bounds.get("y", 0) + bounds.get("height", 0) // 2
+            cx = base_x + random.randint(-bounds.get("width", 0) // 4, bounds.get("width", 0) // 4)
+            cy = base_y + random.randint(-bounds.get("height", 0) // 4, bounds.get("height", 0) // 4)
+        else:
+            # Fallback to canvas coordinates with randomization
+            fresh_coords = proj_data["canvas"]
+            base_x = int(fresh_coords["x"])
+            base_y = int(fresh_coords["y"])
+            cx = base_x + random.randint(-5, 5)
+            cy = base_y + random.randint(-5, 5)
+        
+        # Canvas dimensions (default to common sizes, will adjust if needed)
+        canvas_width = 1920
+        canvas_height = 1080
+        
+        # Check if target is off-screen and adjust click to canvas edge in that direction
+        if base_x < 0 or base_x >= canvas_width or base_y < 0 or base_y >= canvas_height:
+            # Target is off-screen - click at canvas edge in the direction of the target
+            canvas_center_x = canvas_width // 2
+            canvas_center_y = canvas_height // 2
+            
+            # Calculate direction vector from canvas center to target
+            dx = base_x - canvas_center_x
+            dy = base_y - canvas_center_y
+            
+            # Calculate which edge we'll hit first
+            # Find intersection with canvas edges
+            edge_distance_from_center = random.uniform(30, 80)  # Human-like: 30-80px from edge
+            
+            if base_y < 0:
+                # Target is above canvas - click at top edge
+                cy = int(edge_distance_from_center)
+                # Keep X direction but clamp to canvas, with slight randomization along edge
+                if abs(dx) > 0:
+                    # Project X to edge while maintaining direction
+                    ratio = abs(dy) / abs(dx) if dx != 0 else 1
+                    edge_x = canvas_center_x + int(dx / abs(dx) * min(abs(dx), canvas_width // 2 - 50))
+                    cx = edge_x + random.randint(-30, 30)  # Randomize position along top edge
+                else:
+                    cx = canvas_center_x + random.randint(-50, 50)
+                cx = max(50, min(canvas_width - 50, cx))  # Clamp to canvas with margin
+            elif base_y >= canvas_height:
+                # Target is below canvas - click at bottom edge
+                cy = int(canvas_height - edge_distance_from_center)
+                if abs(dx) > 0:
+                    ratio = abs(dy) / abs(dx) if dx != 0 else 1
+                    edge_x = canvas_center_x + int(dx / abs(dx) * min(abs(dx), canvas_width // 2 - 50))
+                    cx = edge_x + random.randint(-30, 30)
+                else:
+                    cx = canvas_center_x + random.randint(-50, 50)
+                cx = max(50, min(canvas_width - 50, cx))
+            elif base_x < 0:
+                # Target is left of canvas - click at left edge
+                cx = int(edge_distance_from_center)
+                if abs(dy) > 0:
+                    ratio = abs(dx) / abs(dy) if dy != 0 else 1
+                    edge_y = canvas_center_y + int(dy / abs(dy) * min(abs(dy), canvas_height // 2 - 50))
+                    cy = edge_y + random.randint(-30, 30)
+                else:
+                    cy = canvas_center_y + random.randint(-50, 50)
+                cy = max(50, min(canvas_height - 50, cy))
+            elif base_x >= canvas_width:
+                # Target is right of canvas - click at right edge
+                cx = int(canvas_width - edge_distance_from_center)
+                if abs(dy) > 0:
+                    ratio = abs(dx) / abs(dy) if dy != 0 else 1
+                    edge_y = canvas_center_y + int(dy / abs(dy) * min(abs(dy), canvas_height // 2 - 50))
+                    cy = edge_y + random.randint(-30, 30)
+                else:
+                    cy = canvas_center_y + random.randint(-50, 50)
+                cy = max(50, min(canvas_height - 50, cy))
+            
+            print(f"[CLICK] Ground - target off-screen (base: {base_x}, {base_y}), clicking at canvas edge ({cx}, {cy}) in target direction")
+        else:
+            # Target is on-screen - use coordinates with minor clamping for safety
+            # Add small randomization to click position
+            cx = base_x + random.randint(-3, 3)
+            cy = base_y + random.randint(-3, 3)
+            
+            # Clamp to canvas bounds with safety margin
+            margin = random.randint(10, 20)  # Human-like: 10-20px margin from edge
+            cx = max(margin, min(canvas_width - margin, cx))
+            cy = max(margin, min(canvas_height - margin, cy))
+        
+        # Check if click point is within any blocking UI widget
+        from helpers.widgets import is_point_in_blocking_widget
+        if is_point_in_blocking_widget(cx, cy):
+            # Click point is blocked by UI - adjust to nearest point outside widget bounds
+            # Try moving the click point in different directions to find a valid location
+            adjusted = False
+            for offset_x, offset_y in [
+                (0, -50), (0, 50), (-50, 0), (50, 0),  # Up, down, left, right
+                (-30, -30), (30, -30), (-30, 30), (30, 30),  # Diagonals
+                (0, -100), (0, 100), (-100, 0), (100, 0),  # Further in cardinal directions
+            ]:
+                test_x = cx + offset_x
+                test_y = cy + offset_y
+                
+                # Ensure test point is still within canvas bounds
+                if (margin <= test_x <= canvas_width - margin and 
+                    margin <= test_y <= canvas_height - margin and
+                    not is_point_in_blocking_widget(test_x, test_y)):
+                    cx = test_x
+                    cy = test_y
+                    adjusted = True
+                    print(f"[CLICK] Ground - click point blocked by UI widget, adjusted to ({cx}, {cy})")
+                    break
+            
+            if not adjusted:
+                # Couldn't find a valid point - this is a problem, but we'll try anyway
+                print(f"[WARNING] Ground - click point ({cx}, {cy}) is blocked by UI widget and couldn't be adjusted")
+        
+        sleep_exponential(0.05, 0.15, 1.5)
+                
+        # Press shift before clicking (RuneLite plugin makes "Walk here" top action when shift is held)
+        try:
+            ipc.key_press("SHIFT")
+        except Exception:
+            pass  # Don't fail if key press fails
+        
+        # Perform a simple left click (shift is held, so "Walk here" will be the action)
+        result = ipc.click(cx, cy, button=1)
+        
+        # Release shift after clicking
+        try:
+            ipc.key_release("SHIFT")
+        except Exception:
+            pass  # Don't fail if key release fails
+        
+        if not result:
+            return None
+        
+        # Wait a short delay for the game to process the click and update selected tile
+        import time
+        time.sleep(0.05)  # 50ms delay
+        
+        # Get the ACTUAL selected tile from the game state (not from IPC response)
+        selected_tile = ipc.get_selected_tile()
+        
+        # Check if the correct interaction was performed
+        last_interaction = get_last_interaction()
+        if not last_interaction or last_interaction.get("action") != "Walk here":
+            print(f"[CLICK] Ground - incorrect interaction: {last_interaction}")
+            return None
+        
+        # Verify the clicked tile matches the intended target
+        if selected_tile:
+            actual_x = selected_tile.get("x")
+            actual_y = selected_tile.get("y")
+            intended_x = click_x
+            intended_y = click_y
+            
+            if actual_x is not None and actual_y is not None:
+                # Calculate Manhattan distance between intended and actual tiles
+                distance = abs(actual_x - intended_x) + abs(actual_y - intended_y)
+                
+                # Determine tolerance based on distance from player
+                player_distance = abs(player_x - intended_x) + abs(player_y - intended_y)
+                if player_distance <= 5:
+                    max_tolerance = 1  # Close range: exact or 1 tile
+                elif player_distance <= 20:
+                    max_tolerance = 2  # Medium range: 1-2 tiles
+                else:
+                    max_tolerance = 3  # Long range: 2-3 tiles
+                
+                if distance > max_tolerance:
+                    print(f"[CLICK] Ground - tile mismatch: intended ({intended_x}, {intended_y}), actual ({actual_x}, {actual_y}), distance: {distance}, tolerance: {max_tolerance}")
+                    return None
+                # Tile matches within tolerance - success
+        else:
+            # No tile selected - might be acceptable for long-range clicks
+            player_distance = abs(player_x - click_x) + abs(player_y - click_y)
+            if player_distance <= 5:
+                # Close range without tile data is suspicious
+                print(f"[CLICK] Ground - no selected tile for close-range click")
+                return None
+            # Long range without tile data might be okay (tile might not be selectable)
+        
+        return result
     
     except Exception as e:
         raise

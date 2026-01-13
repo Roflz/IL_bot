@@ -63,7 +63,12 @@ class IPCClient:
     # ===== CLICKING METHODS =====
     
     def click(self, x: int, y: int, button: int = 1, hover_only: bool = False, pre_ms: int = None):
-        """Click at canvas coordinates."""
+        """
+        Click at canvas coordinates.
+        
+        Returns:
+            dict with 'ok', 'mode', 'hoverDelayMs', and optionally 'tile' (with x, y, plane)
+        """
         delay = self.pre_action_ms if pre_ms is None else pre_ms
         if delay > 0:
             from .utils import sleep_exponential
@@ -467,37 +472,11 @@ class IPCClient:
         if goal:
             gx, gy = goal
             req.update({"goalX": gx, "goalY": gy})
+        if max_wps is not None:
+            req.update({"maxWps": max_wps})
 
         resp = self._send(req)
         wps = resp.get("waypoints", []) or [] if resp else []
-        
-        # Filter waypoints to only include those within 14x14 box around player
-        if wps:
-            player_info = self.get_player()
-            if player_info and player_info.get("ok"):
-                player_x = player_info['player'].get("worldX")
-                player_y = player_info['player'].get("worldY")
-                
-                if isinstance(player_x, int) and isinstance(player_y, int):
-                    # Calculate 29x29 box bounds (14 tiles in each direction from player)
-                    min_x = player_x - 14
-                    max_x = player_x + 14
-                    min_y = player_y - 14
-                    max_y = player_y + 14
-                    
-                    # Filter waypoints to only include those within the box
-                    filtered_wps = []
-                    for wp in wps:
-                        wp_x = wp.get("x")
-                        wp_y = wp.get("y")
-                        if (isinstance(wp_x, int) and isinstance(wp_y, int) and
-                            min_x <= wp_x <= max_x and min_y <= wp_y <= max_y):
-                            filtered_wps.append(wp)
-                        else:
-                            # Stop at first waypoint outside the box
-                            break
-                    
-                    wps = filtered_wps
         
         return wps, resp
 
@@ -549,6 +528,24 @@ class IPCClient:
         """Get current GE prices from RuneLite GE plugin."""
         return self._send({"cmd": "get_ge_prices"}) or {}
     
+    def get_selected_tile(self) -> dict | None:
+        """
+        Get the currently selected scene tile from the game.
+        
+        Returns:
+            dict with 'x', 'y', 'plane' keys, or None if no tile is selected
+        """
+        result = self._send({"cmd": "get_selected_tile"})
+        if result and result.get("ok"):
+            tile_data = result.get("tile")
+            if tile_data and isinstance(tile_data, dict):
+                return {
+                    "x": tile_data.get("x"),
+                    "y": tile_data.get("y"),
+                    "plane": tile_data.get("plane", 0)
+                }
+        return None
+
     def get_last_interaction(self) -> dict:
         """Get the last interaction data from StateExporter2Plugin."""
         return self._send({"cmd": "get_last_interaction"}) or {}

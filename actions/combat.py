@@ -8,7 +8,7 @@ from helpers.runtime_utils import ipc, dispatch
 from helpers.ipc import get_last_interaction
 from helpers.utils import clean_rs, rect_beta_xy, sleep_exponential
 from helpers import unwrap_rect
-from services.camera_integration import aim_midtop_at_world
+from services.camera_integration import aim_midtop_at_world, aim_camera_at_target
 
 
 def attack_closest(npc_name: str | list) -> Optional[dict]:
@@ -100,7 +100,24 @@ def attack_closest(npc_name: str | list) -> Optional[dict]:
                     world_coords = chosen.get("world") or {}
                     if not (isinstance(world_coords.get("x"), int) and isinstance(world_coords.get("y"), int)):
                         continue
-                    aim_midtop_at_world(world_coords["x"], world_coords["y"], max_ms=aim_ms)
+                    
+                    # Use new camera system
+                    from actions import player
+                    player_x = player.get_x()
+                    player_y = player.get_y()
+                    if isinstance(player_x, int) and isinstance(player_y, int):
+                        dx = abs(world_coords["x"] - player_x)
+                        dy = abs(world_coords["y"] - player_y)
+                        distance = dx + dy  # Manhattan distance
+                    else:
+                        distance = None
+                    
+                    aim_camera_at_target(
+                        target_world_coords=world_coords,
+                        mode=None,  # Auto-detect
+                        action_type="click_npc",
+                        distance_to_target=distance
+                    )
 
                     # --- Re-acquire after camera movement for FRESH screen bounds ---
                     npc_resp2 = ipc.get_npcs(npc_name_to_try)
