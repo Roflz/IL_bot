@@ -1,0 +1,48 @@
+# Core dependencies for bot_runelite_IL project
+
+# Numerical computing and optimization
+numpy>=1.20.0
+scipy>=1.7.0
+
+# Image processing
+Pillow>=9.0.0
+
+# Automation and GUI control
+pyautogui>=0.9.54
+
+# HTTP requests
+requests>=2.28.0
+
+# Process management
+psutil>=5.9.0
+
+# OCR (used in account_creation)
+pytesseract>=0.3.10
+
+# Data visualization
+matplotlib>=3.5.0
+
+# Input recording
+pynput>=1.7.6
+
+# Web automation (used in account_creation)
+selenium>=4.24.0
+webdriver-manager>=4.0.2
+
+# Email handling (used in account_creation)
+imapclient>=3.0.1
+beautifulsoup4>=4.12.3
+
+# Google API (used in account_creation)
+google-api-python-client>=2.147.0
+google-auth-oauthlib>=1.2.1
+google-auth>=2.35.0
+
+# Windows automation (used in account_creation)
+pywinauto>=0.6.8
+
+# Environment variables (used in account_creation)
+python-dotenv>=1.0.1
+
+# Note: tkinter is typically included with Python installations
+# If not available, install python3-tkinter (Linux) or it comes with Python (Windows/Mac)
