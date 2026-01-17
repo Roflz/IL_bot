@@ -485,17 +485,17 @@ def astar_pathfinding(start, goal, walkable_tiles, max_iterations=100000, wall_m
     if wall_masks is None or orientation_blockers is None:
         print(f"[ASTAR_PATHFINDING] Loading collision data (wall_masks not provided)...")
         load_start = time.time()
-    collision_data = load_collision_data(start, goal)
+        collision_data = load_collision_data(start, goal)
         load_time = time.time() - load_start
-    if collision_data:
+        if collision_data:
             print(f"[ASTAR_PATHFINDING]   Load took: {load_time:.3f}s")
             process_start = time.time()
-        _, _, wall_masks, orientation_blockers = get_walkable_tiles(collision_data)
+            _, _, wall_masks, orientation_blockers = get_walkable_tiles(collision_data)
             process_time = time.time() - process_start
             print(f"[ASTAR_PATHFINDING]   Processing took: {process_time:.3f}s")
-    else:
-        wall_masks = {}
-        orientation_blockers = set()
+        else:
+            wall_masks = {}
+            orientation_blockers = set()
             print(f"[ASTAR_PATHFINDING]   Could not load collision data, using empty wall data (took {load_time:.3f}s)")
     else:
         print(f"[ASTAR_PATHFINDING] Using provided wall_masks (avoiding redundant load)")

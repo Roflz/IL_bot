@@ -254,7 +254,7 @@ def click_ground_with_camera_jacobian(
             step_scale=1.0,  # No damping - move full distance
             max_yaw_step=9999.0,  # No clamping - allow full yaw movement
             max_pitch_step=9999.0,  # No clamping - allow full pitch movement
-            pitch_min=328,  # Minimum pitch for travel (keep camera high)
+            pitch_min=280,  # Minimum pitch for travel (keep camera high)
             jacobian_method="finite_diff",  # Use finite-difference method (default)
             finite_diff_dyaw=0.0,  # Auto-adaptive based on error
             finite_diff_dpitch=0.0  # Auto-adaptive based on error

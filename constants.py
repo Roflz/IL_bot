@@ -505,3 +505,42 @@ JEWELRY_CRAFTING_WIDGETS = {
     "JADE_RING": 0,                # TODO: Find correct widget ID for jade ring
     "TOPAZ_RING": 0,               # TODO: Find correct widget ID for topaz ring
 }
+
+# Prayer Widget IDs (Prayerbook.PRAYER1 through PRAYER29)
+# Maps prayer names directly to their widget IDs
+# Each prayer widget has:
+# - 2 children if active (prayer is on)
+# - 1 child if not active (prayer is off)
+# Children have the same ID as their parent, but different parent ID
+PRAYER_WIDGETS = {
+    # Prayer widget IDs (base ID 35454985 for PRAYER1, increments by 1)
+    "Thick Skin": 35454985,
+    "Burst of Strength": 35454986,
+    "Clarity of Thought": 35454987,
+    "Rock Skin": 35454988,
+    "Superhuman Strength": 35454989,
+    "Improved Reflexes": 35454990,
+    "Rapid Restore": 35454991,
+    "Rapid Heal": 35454992,
+    "Protect Item": 35454993,
+    "Steel Skin": 35454994,
+    "Ultimate Strength": 35454995,
+    "Incredible Reflexes": 35454996,
+    "Protect from Magic": 35454997,
+    "Protect from Missiles": 35454998,
+    "Protect from Melee": 35454999,
+    "Retribution": 35455000,
+    "Redemption": 35455001,
+    "Smite": 35455002,
+    "Sharp Eye": 35455003,
+    "Hawk Eye": 35455004,
+    "Eagle Eye": 35455005,
+    "Mystic Will": 35455006,
+    "Mystic Lore": 35455007,
+    "Mystic Might": 35455008,
+    "Rigour": 35455009,
+    "Chivalry": 35455010,
+    "Piety": 35455011,
+    "Augury": 35455012,
+    "Preserve": 35455013,
+}

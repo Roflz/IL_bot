@@ -1076,8 +1076,8 @@ class SimpleRecorderGUI:
     def load_character_stats(self, username):
         """Load character stats from CSV file and return the data."""
         try:
-            # Use absolute path matching stats_monitor
-            csv_path = Path(__file__).parent / "character_data" / "character_stats.csv"
+            # Use path matching stats_monitor (which is in utils/ directory)
+            csv_path = Path(__file__).parent / "utils" / "character_data" / "character_stats.csv"
             if not csv_path.exists():
                 return None
             

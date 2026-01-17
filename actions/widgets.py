@@ -597,6 +597,47 @@ def prayer_interface_open() -> bool:
     """
     return widget_exists(9764866)  # Prayer container
 
+def is_prayer_active(prayer_name: str) -> Optional[bool]:
+    """
+    Check if a specific prayer is currently active (turned on).
+    
+    Prayer widgets have:
+    - 2 children if active (prayer is on)
+    - 1 child if not active (prayer is off)
+    Children have the same ID as their parent, but different parent ID
+    
+    Args:
+        prayer_name: The name of the prayer (e.g., "Rapid Heal")
+    
+    Returns:
+        True if prayer is active, False if not active, None if unable to determine
+    """
+    from constants import PRAYER_WIDGETS
+    
+    try:
+        prayer_widget_id = PRAYER_WIDGETS.get(prayer_name)
+        if not prayer_widget_id:
+            return None
+        
+        # Get children of the prayer widget
+        prayer_widget = get_widget_children(prayer_widget_id)
+        if prayer_widget is None:
+            return None
+        
+        # Count children - 2 means active, 1 means inactive
+        children = prayer_widget.get('children')
+        child_count = len(children)
+        if child_count == 2:
+            return True  # Prayer is active
+        elif child_count == 1:
+            return False  # Prayer is not active
+        else:
+            # Unexpected number of children
+            return None
+    except Exception as e:
+        print(f"[WIDGETS] Error checking prayer status for {prayer_name}: {e}")
+        return None
+
 def spellbook_interface_open() -> bool:
     """
     Check if the spellbook interface is open and visible.

@@ -40,7 +40,7 @@ class FishingPlan(Plan):
     label = "Fishing Plan"
 
     def __init__(self):
-        self.state = {"phase": "BANK", "after_bank": "GO_TO_OCEAN_FISHING_AREA", "next_tab_switch_ts": None}
+        self.state = {"phase": "FISH_RIVER_FISH", "after_bank": "GO_TO_OCEAN_FISHING_AREA", "next_tab_switch_ts": None}
         self.next = self.state["phase"]
         self.loop_interval_ms = 600
 

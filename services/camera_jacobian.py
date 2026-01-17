@@ -838,7 +838,7 @@ def calculate_camera_movement_to_screen_position(
     max_pitch_step: float = 48.0,
     k: int = 500,
     max_dxdy: int = 3,
-    pitch_min: int = None,  # Custom pitch minimum (defaults to PITCH_MIN)
+    pitch_min: int = 280,  # Default minimum pitch (was None, defaults to 280 instead of PITCH_MIN)
     pitch_max: int = None,  # Custom pitch maximum (defaults to PITCH_MAX)
     preloaded_global_model: dict = None,  # Pre-loaded global model (avoids reloading)
     preloaded_rows: list = None,  # Pre-loaded calibration rows (avoids reloading)
@@ -964,7 +964,8 @@ def calculate_camera_movement_to_screen_position(
             print(f"{COLOR_YELLOW}  Consider using iterative refinement or local fit method for better accuracy.{COLOR_RESET}\n")
         
         # Use custom pitch bounds if provided, otherwise use defaults
-        effective_pitch_min = pitch_min if pitch_min is not None else PITCH_MIN
+        # Default minimum pitch is 280 (instead of PITCH_MIN=128) to keep camera high
+        effective_pitch_min = pitch_min if pitch_min is not None else 280
         effective_pitch_max = pitch_max if pitch_max is not None else PITCH_MAX
         
         # Initialize variables
@@ -1199,7 +1200,8 @@ def calculate_camera_movement_to_screen_position(
             dzoom = 0.0
         
         # Use custom pitch bounds if provided, otherwise use defaults
-        effective_pitch_min = pitch_min if pitch_min is not None else PITCH_MIN
+        # Default minimum pitch is 280 (instead of PITCH_MIN=128) to keep camera high
+        effective_pitch_min = pitch_min if pitch_min is not None else 280
         effective_pitch_max = pitch_max if pitch_max is not None else PITCH_MAX
         
         # Enforce absolute pitch bounds at the delta level
@@ -1272,7 +1274,7 @@ def aim_camera_at_target_iterative(
     max_initial_error: float = 500.0,
     use_global_model: bool = True,
     use_zoom: bool = False,
-    pitch_min: int = None,
+    pitch_min: int = 280,  # Default minimum pitch (was None)
     pitch_max: int = None,
     step_scale: float = 1.0,
     max_yaw_step: float = 9999.0,

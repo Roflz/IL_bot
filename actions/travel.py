@@ -8,7 +8,7 @@ from .player import get_player_position
 from helpers.runtime_utils import ipc
 from helpers.navigation import get_nav_rect, closest_bank_key, _merge_door_into_projection
 from helpers.utils import sleep_exponential, get_random_walkable_tile, get_center_weighted_walkable_tile, exponential_number, normal_number
-from services.click_with_camera import click_ground_with_camera, click_object_with_camera
+from services.click_with_camera import click_object_with_camera
 from services.camera_integration import aim_midtop_at_world
 from constants import BANK_REGIONS, REGIONS
 from actions.movement import get_movement_direction, clear_movement_state
@@ -674,6 +674,7 @@ def go_to(destination: str | tuple | list | dict, center: bool = False, destinat
         # Check if destination is outside scene (heuristic: try IPC path first, if fails or very far, use long-distance)
         use_long_distance = False
         target_waypoint = None
+        waypoint_batch = None
         
         # Try IPC path first to check if destination is reachable
         test_path, _ = ipc.path(rect=(target_x - 1, target_x + 1, target_y - 1, target_y + 1), visualize=False)
@@ -682,6 +683,7 @@ def go_to(destination: str | tuple | list | dict, center: bool = False, destinat
         if not test_path or distance > 100:
             # Try long-distance waypoint batching
             waypoint_batch = _get_next_long_distance_waypoints(rect_key, rect, destination_method)
+        
         waypoints_remaining = len(_long_distance_path_cache) - _long_distance_waypoint_index if _long_distance_path_cache else 0
         
         if waypoints_remaining > 0 and waypoint_batch:
@@ -751,13 +753,11 @@ def go_to(destination: str | tuple | list | dict, center: bool = False, destinat
         # Get movement state for camera movement compensation
         movement_state = _get_player_movement_state()
         
-        # STEP 10: Click at calculated location with path-aware camera
-        result = click_ground_with_camera(
+        # STEP 10: Click at calculated location with old camera logic
+        result = _click_ground_old_camera(
             world_coords=click_location,
-            description=f"Move toward {rect_key}",
             aim_ms=700,
-            path_waypoints=wps if wps else None,
-            movement_state=movement_state
+            path_waypoints=wps if wps else None
         )
         
         if not result:
@@ -860,15 +860,12 @@ def go_to_tile_precise(tile_x: int, tile_y: int, *, plane: int | None = None, ar
         print(f"[PRECISION] Cannot get path to ({tile_x}, {tile_y}), using regular pathfinding")
         return go_to_tile(tile_x, tile_y, plane=plane, arrive_radius=arrive_radius, aim_ms=aim_ms)
     
-    # Use area-based clicking with path verification (same as regular go_to_tile)
+    # Use area-based clicking with old camera logic
     world_coords = {"x": tile_x, "y": tile_y, "p": plane or 0}
     
-    result = click_ground_with_camera(
+    result = _click_ground_old_camera(
         world_coords=world_coords,
-        description=f"Precision move to tile ({tile_x}, {tile_y})",
         aim_ms=aim_ms,
-        waypoint_path=wps,
-        verify_path=True,  # Use path-based verification
         path_waypoints=wps
     )
     
@@ -978,6 +975,60 @@ def go_to_bank(
     
     # Failed to open bank after max attempts
     return None
+
+
+def _click_ground_old_camera(world_coords: dict, aim_ms: int = 700, path_waypoints: list = None) -> dict | None:
+    """
+    Old-style ground click using simple aim_midtop_at_world camera logic.
+    This is the original camera logic before jacobian was introduced.
+    """
+    try:
+        if not world_coords:
+            return None
+        
+        click_x = world_coords.get('x')
+        click_y = world_coords.get('y')
+        
+        if not isinstance(click_x, int) or not isinstance(click_y, int):
+            return None
+        
+        # Use old camera logic: simple aim_midtop_at_world
+        aim_midtop_at_world(click_x, click_y, max_ms=aim_ms, path_waypoints=path_waypoints)
+        
+        # Project the click tile to get screen coordinates
+        proj, _ = ipc.project_many([{"x": click_x, "y": click_y}])
+        
+        if not proj or not isinstance(proj[0], dict) or not proj[0].get("canvas"):
+            return None
+        
+        proj_data = proj[0]
+        canvas_coords = proj_data.get("canvas", {})
+        cx = int(canvas_coords.get("x", 0))
+        cy = int(canvas_coords.get("y", 0))
+        
+        if cx == 0 and cy == 0:
+            return None
+        
+        # Press shift before clicking (RuneLite plugin makes "Walk here" top action when shift is held)
+        try:
+            ipc.key_press("SHIFT")
+        except Exception:
+            pass
+        
+        # Perform a simple left click
+        result = ipc.click(cx, cy, button=1)
+        
+        # Release shift after clicking
+        try:
+            ipc.key_release("SHIFT")
+        except Exception:
+            pass
+        
+        return result
+    
+    except Exception as e:
+        logging.error(f"[CLICK_GROUND_OLD] Error: {e}")
+        return None
 
 
 def _calculate_distance(x1: int, y1: int, x2: int, y2: int) -> float:
@@ -2211,11 +2262,11 @@ def move_to_random_tile_near_player(max_distance: int = 3) -> bool:
         
         print(f"[TRAVEL] Moving to random tile ({target_x}, {target_y})")
         
-        # Use click_ground_with_camera to move to the random tile
+        # Use old camera logic to move to the random tile
         world_coords = {"x": target_x, "y": target_y}
-        result = click_ground_with_camera(
+        result = _click_ground_old_camera(
             world_coords=world_coords,
-            description="Move to random tile"
+            aim_ms=700
         )
         
         if result and result.get("ok"):
@@ -2231,7 +2282,7 @@ def move_to_random_tile_near_player(max_distance: int = 3) -> bool:
 
 def move_to_random_tile_in_area(area_key: str) -> bool:
     """
-    Move to a random tile within the specified area using click_ground_with_camera.
+    Move to a random tile within the specified area using old camera logic.
     
     Args:
         area_key: The area key from BANK_REGIONS or REGIONS (e.g., "VARROCK_WEST_TREES", "FALADOR_COWS")
@@ -2261,11 +2312,10 @@ def move_to_random_tile_in_area(area_key: str) -> bool:
     
     print(f"[MOVE_TO_RANDOM_TILE] Moving to random tile in {area_key}: ({random_x}, {random_y})")
     
-    # Use click_ground_with_camera to move to the random tile
+    # Use old camera logic to move to the random tile
     world_coords = {"x": random_x, "y": random_y, "p": 0}
-    result = click_ground_with_camera(
+    result = _click_ground_old_camera(
         world_coords=world_coords,
-        description=f"Random tile in {area_key}",
         aim_ms=700
     )
     

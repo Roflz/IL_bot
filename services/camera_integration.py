@@ -2239,6 +2239,9 @@ def _aim_camera_with_state(
         elif pitch_behavior == "auto":
             desired_pitch = normal_number(pitch_range[0], pitch_range[1], center_bias=0.7, output_type="int")
         
+        # Enforce minimum pitch of 280
+        desired_pitch = max(280, desired_pitch)
+        
         # Continuous feedback loop with state-specific adjustments
         max_aim_time = max(0.05, min(5.0, float(max_ms) / 1000.0))
         check_interval = 0.05
@@ -2277,11 +2280,15 @@ def _aim_camera_with_state(
                                 ipc.key_release(yaw_key)
                                 pressed_keys.discard(yaw_key)
                 
-                # Check pitch adjustment
+                # Check pitch adjustment (with minimum pitch constraint of 280)
                 pitch_diff = desired_pitch - current_pitch
                 if abs(pitch_diff) > 20:  # Dead zone
                     pitch_key = "UP" if pitch_diff > 0 else "DOWN"
-                    if pitch_key not in pressed_keys:
+                    # Prevent pitch from going below 280
+                    if pitch_key == "DOWN" and current_pitch <= 280:
+                        # Don't allow DOWN if pitch is already at or below minimum
+                        pitch_key = None
+                    if pitch_key and pitch_key not in pressed_keys:
                         other_pitch_key = "DOWN" if pitch_key == "UP" else "UP"
                         if other_pitch_key in pressed_keys:
                             ipc.key_release(other_pitch_key)
@@ -2440,6 +2447,10 @@ def _aim_camera_continuous_feedback(
                 screen_x = int(proj.get("canvas", {}).get("x", 0))
                 screen_y = int(proj.get("canvas", {}).get("y", 0))
                 
+                # Get current camera state for pitch check
+                camera = ipc.get_camera() or {}
+                current_pitch = int(camera.get("pitch", 0))
+                
                 # Calculate offsets from target position
                 dx = screen_x - target_screen_x
                 dy = screen_y - target_screen_y
@@ -2474,10 +2485,14 @@ def _aim_camera_continuous_feedback(
                             ipc.key_release(yaw_key)
                             pressed_keys.discard(yaw_key)
                 
-                # Apply pitch adjustment
+                # Apply pitch adjustment (with minimum pitch constraint of 280)
                 if needs_pitch:
                     pitch_key = "UP" if dy > 0 else "DOWN"
-                    if pitch_key not in pressed_keys:
+                    # Prevent pitch from going below 280
+                    if pitch_key == "DOWN" and current_pitch <= 280:
+                        # Don't allow DOWN if pitch is already at or below minimum
+                        pitch_key = None
+                    if pitch_key and pitch_key not in pressed_keys:
                         other_pitch_key = "DOWN" if pitch_key == "UP" else "UP"
                         if other_pitch_key in pressed_keys:
                             ipc.key_release(other_pitch_key)
@@ -2600,42 +2615,21 @@ def aim_midtop_at_world(
                 y_in_range = screen_y < 500
                 
                 # Determine what adjustments are needed
-                needs_pitch_up = current_pitch < (300 - pitch_dead_zone)
-                # needs_pitch = not y_close and not needs_pitch_up
+                # NOTE: Pitch movement is DISABLED for non-jacobian travel methods
+                # Only adjust yaw and scale, never pitch
                 needs_yaw = not x_in_range or not y_in_range
                 needs_scale = not (500 <= current_scale <= 600)  # Check if scale is in reasonable range
 
                 # Exit early once we're "good enough"
-                if (x_in_range and y_in_range) and (not needs_pitch_up) and (not needs_yaw) and (not needs_scale):
+                # Note: We don't check pitch here since we're not adjusting it
+                if (x_in_range and y_in_range) and (not needs_yaw) and (not needs_scale):
                     break
                 
-                # Handle pitch adjustments
-                if needs_pitch_up:
-                    if "UP" not in pressed_keys:
-                        # Release any other pitch keys first
-                        if "DOWN" in pressed_keys:
-                            ipc.key_release("DOWN")
-                            pressed_keys.discard("DOWN")
-                        # Press UP
-                        ipc.key_press("UP")
-                        pressed_keys.add("UP")
-                # elif needs_pitch:
-                #     pitch_key = "DOWN" if dy > 0 else "UP"
-                #     if pitch_key not in pressed_keys:
-                #         # Release the other pitch key first
-                #         other_pitch_key = "DOWN" if pitch_key == "UP" else "UP"
-                #         if other_pitch_key in pressed_keys:
-                #             ipc_send({"cmd": "key_release", "key": other_pitch_key})
-                #             pressed_keys.discard(other_pitch_key)
-                #         # Press the needed pitch key
-                #         ipc_send({"cmd": "key_press", "key": pitch_key})
-                #         pressed_keys.add(pitch_key)
-                else:
-                    # Release pitch keys if we don't need them
-                    for pitch_key in ["UP", "DOWN"]:
-                        if pitch_key in pressed_keys:
-                            ipc.key_release(pitch_key)
-                            pressed_keys.discard(pitch_key)
+                # Release any pitch keys that might be pressed (safety measure)
+                for pitch_key in ["UP", "DOWN"]:
+                    if pitch_key in pressed_keys:
+                        ipc.key_release(pitch_key)
+                        pressed_keys.discard(pitch_key)
                 
                 # Handle yaw adjustments
                 if needs_yaw:
