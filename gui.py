@@ -731,6 +731,18 @@ class SimpleRecorderGUI:
         self.runelite_process = None
         self.build_maven = tk.BooleanVar(value=True)  # Default to building Maven
         
+        # Configuration variables
+        self.config_file = Path(__file__).resolve().parent / "launch-config.json"
+        self.config_vars = {
+            "projectDir": tk.StringVar(),
+            "classPathFile": tk.StringVar(),
+            "javaExe": tk.StringVar(),
+            "baseDir": tk.StringVar(),
+            "exportsBase": tk.StringVar(),
+            "credentialsDir": tk.StringVar(),
+            "autoDetect": tk.BooleanVar(value=True)
+        }
+        
         # Instance management
         self.instance_tabs = {}  # Dictionary to store instance tab references
         self.instance_ports = {}  # Dictionary to map instance names to ports
@@ -805,9 +817,79 @@ class SimpleRecorderGUI:
         # RuneLite configuration
         ttk.Label(runelite_tab, text="RuneLite Instance Launcher", style='Title.TLabel').grid(row=0, column=0, columnspan=2, pady=(0, 15))
         
-        # Configuration frame
+        # Setup and Configuration section
+        setup_frame = ttk.LabelFrame(runelite_tab, text="Setup & Configuration", padding="10")
+        setup_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        setup_frame.columnconfigure(1, weight=1)
+        
+        # Setup dependencies button
+        ttk.Button(setup_frame, text="Setup Dependencies", command=self.setup_dependencies, style='Action.TButton').grid(row=0, column=0, columnspan=2, pady=(0, 10), sticky=tk.W)
+        
+        # Auto-detect checkbox
+        ttk.Checkbutton(setup_frame, text="Auto-detect paths", variable=self.config_vars["autoDetect"], 
+                       command=self.toggle_auto_detect).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+        
+        # Path configuration (initially disabled if auto-detect is on)
+        path_config_frame = ttk.Frame(setup_frame)
+        path_config_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        path_config_frame.columnconfigure(1, weight=1)
+        
+        # Project directory
+        ttk.Label(path_config_frame, text="RuneLite Project:", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W, pady=2)
+        project_entry = ttk.Entry(path_config_frame, textvariable=self.config_vars["projectDir"], width=50, state='disabled')
+        project_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), pady=2, padx=(5, 5))
+        ttk.Button(path_config_frame, text="Browse", command=lambda: self.browse_path("projectDir")).grid(row=0, column=2, pady=2)
+        
+        # Java executable
+        ttk.Label(path_config_frame, text="Java Executable:", style='Header.TLabel').grid(row=1, column=0, sticky=tk.W, pady=2)
+        java_entry = ttk.Entry(path_config_frame, textvariable=self.config_vars["javaExe"], width=50, state='disabled')
+        java_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=2, padx=(5, 5))
+        ttk.Button(path_config_frame, text="Browse", command=lambda: self.browse_path("javaExe")).grid(row=1, column=2, pady=2)
+        
+        # Credentials directory
+        ttk.Label(path_config_frame, text="Credentials Dir:", style='Header.TLabel').grid(row=2, column=0, sticky=tk.W, pady=2)
+        cred_dir_entry = ttk.Entry(path_config_frame, textvariable=self.config_vars["credentialsDir"], width=50, state='disabled')
+        cred_dir_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=2, padx=(5, 5))
+        ttk.Button(path_config_frame, text="Browse", command=lambda: self.browse_path("credentialsDir")).grid(row=2, column=2, pady=2)
+        
+        # Base directory
+        ttk.Label(path_config_frame, text="Instances Base Dir:", style='Header.TLabel').grid(row=3, column=0, sticky=tk.W, pady=2)
+        base_dir_entry = ttk.Entry(path_config_frame, textvariable=self.config_vars["baseDir"], width=50, state='disabled')
+        base_dir_entry.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=2, padx=(5, 5))
+        ttk.Button(path_config_frame, text="Browse", command=lambda: self.browse_path("baseDir")).grid(row=3, column=2, pady=2)
+        
+        # Exports base directory
+        ttk.Label(path_config_frame, text="Exports Base Dir:", style='Header.TLabel').grid(row=4, column=0, sticky=tk.W, pady=2)
+        exports_entry = ttk.Entry(path_config_frame, textvariable=self.config_vars["exportsBase"], width=50, state='disabled')
+        exports_entry.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=2, padx=(5, 5))
+        ttk.Button(path_config_frame, text="Browse", command=lambda: self.browse_path("exportsBase")).grid(row=4, column=2, pady=2)
+        
+        # Classpath file
+        ttk.Label(path_config_frame, text="Classpath File:", style='Header.TLabel').grid(row=5, column=0, sticky=tk.W, pady=2)
+        classpath_entry = ttk.Entry(path_config_frame, textvariable=self.config_vars["classPathFile"], width=50, state='disabled')
+        classpath_entry.grid(row=5, column=1, sticky=(tk.W, tk.E), pady=2, padx=(5, 5))
+        ttk.Button(path_config_frame, text="Browse", command=lambda: self.browse_path("classPathFile", is_file=True)).grid(row=5, column=2, pady=2)
+        
+        # Save/Load config buttons
+        config_buttons = ttk.Frame(setup_frame)
+        config_buttons.grid(row=3, column=0, columnspan=2, pady=(5, 0))
+        ttk.Button(config_buttons, text="Save Configuration", command=self.save_config).grid(row=0, column=0, padx=(0, 5))
+        ttk.Button(config_buttons, text="Load Configuration", command=self.load_config).grid(row=0, column=1, padx=5)
+        ttk.Button(config_buttons, text="Auto-detect Now", command=self.auto_detect_paths).grid(row=0, column=2, padx=5)
+        
+        # Store entry references for state management
+        self.path_entries = {
+            "projectDir": project_entry,
+            "javaExe": java_entry,
+            "credentialsDir": cred_dir_entry,
+            "baseDir": base_dir_entry,
+            "exportsBase": exports_entry,
+            "classPathFile": classpath_entry
+        }
+        
+        # Launch configuration frame
         runelite_config = ttk.Frame(runelite_tab)
-        runelite_config.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        runelite_config.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
         runelite_config.columnconfigure(1, weight=1)
         
         # Base port
@@ -827,14 +909,14 @@ class SimpleRecorderGUI:
         
         # Credential selection
         cred_header = ttk.Frame(runelite_tab)
-        cred_header.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 3))
+        cred_header.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 3))
         cred_header.columnconfigure(0, weight=1)
         ttk.Label(cred_header, text="Credential Files:", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W)
         ttk.Button(cred_header, text="Refresh Credentials", command=self.refresh_credentials).grid(row=0, column=1, sticky=tk.E)
         
         # Available credentials (left)
         cred_frame = ttk.Frame(runelite_tab)
-        cred_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 5), padx=(0, 5))
+        cred_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(0, 5), padx=(0, 5))
         cred_frame.columnconfigure(0, weight=1)
         
         self.credentials_listbox = tk.Listbox(cred_frame, selectmode=tk.MULTIPLE, height=8)
@@ -846,7 +928,7 @@ class SimpleRecorderGUI:
         
         # Selected credentials (right)
         selected_cred_frame = ttk.Frame(runelite_tab)
-        selected_cred_frame.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=(0, 5), padx=(5, 0))
+        selected_cred_frame.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=(0, 5), padx=(5, 0))
         selected_cred_frame.columnconfigure(0, weight=1)
         
         self.selected_credentials_listbox = tk.Listbox(selected_cred_frame, height=8)
@@ -858,7 +940,7 @@ class SimpleRecorderGUI:
         
         # Credential controls
         cred_controls = ttk.Frame(runelite_tab)
-        cred_controls.grid(row=4, column=0, columnspan=2, pady=(5, 10))
+        cred_controls.grid(row=5, column=0, columnspan=2, pady=(5, 10))
         
         ttk.Button(cred_controls, text="Add Selected", command=self.add_credential).grid(row=0, column=0, padx=(0, 3))
         ttk.Button(cred_controls, text="Remove Selected", command=self.remove_credential).grid(row=0, column=1, padx=3)
@@ -868,7 +950,7 @@ class SimpleRecorderGUI:
         
         # Launch controls
         launch_controls = ttk.Frame(runelite_tab)
-        launch_controls.grid(row=5, column=0, columnspan=2, pady=(10, 0))
+        launch_controls.grid(row=6, column=0, columnspan=2, pady=(10, 0))
         
         # Build Maven checkbox
         self.build_maven_checkbox = ttk.Checkbutton(launch_controls, text="Build Maven", 
@@ -885,7 +967,7 @@ class SimpleRecorderGUI:
         
         # Client detection controls
         detection_controls = ttk.Frame(runelite_tab)
-        detection_controls.grid(row=6, column=0, columnspan=2, pady=(20, 0))
+        detection_controls.grid(row=7, column=0, columnspan=2, pady=(20, 0))
         
         ttk.Label(detection_controls, text="Client Detection:", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
         
@@ -930,8 +1012,12 @@ class SimpleRecorderGUI:
         log_scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.log_text.yview)
         log_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         self.log_text.configure(yscrollcommand=log_scrollbar.set)
+        
         # Populate credentials after log widget is initialized
         self.populate_credentials()
+        
+        # Load configuration after all widgets are created
+        self.load_config()
     
     def setup_styles(self):
         """Configure the GUI styles and colors."""
@@ -2769,6 +2855,225 @@ class SimpleRecorderGUI:
             self.log_message_to_instance(instance_name, f"Failed to execute plan {plan_name}: {str(e)}", 'error')
             raise Exception(f"Failed to execute plan {plan_name}: {str(e)}")
     
+    def setup_dependencies(self):
+        """Run the setup-dependencies.ps1 script."""
+        try:
+            script_path = Path(__file__).resolve().parent / "setup-dependencies.ps1"
+            if not script_path.exists():
+                messagebox.showerror("Script Not Found", f"Setup script not found at {script_path}")
+                return
+            
+            self.log_message("Running dependency setup...", 'info')
+            
+            ps_cmd = [
+                "powershell.exe",
+                "-ExecutionPolicy", "Bypass",
+                "-Command",
+                f"& '{script_path}'"
+            ]
+            
+            env = os.environ.copy()
+            env['PYTHONIOENCODING'] = 'utf-8'
+            
+            process = subprocess.Popen(
+                ps_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                env=env
+            )
+            
+            # Show output in a separate window or log
+            def monitor_setup():
+                while True:
+                    output = process.stdout.readline()
+                    if output == '' and process.poll() is not None:
+                        break
+                    if output:
+                        self.log_message(f"[Setup] {output.strip()}", 'info')
+                        self.root.update_idletasks()
+                
+                return_code = process.wait()
+                if return_code == 0:
+                    self.log_message("Dependency setup completed successfully", 'success')
+                    messagebox.showinfo("Setup Complete", "Dependency setup completed successfully!")
+                else:
+                    self.log_message(f"Dependency setup failed with return code {return_code}", 'error')
+                    messagebox.showerror("Setup Failed", f"Dependency setup failed. Check logs for details.")
+            
+            threading.Thread(target=monitor_setup, daemon=True).start()
+            
+        except Exception as e:
+            self.log_message(f"Error running setup script: {str(e)}", 'error')
+            messagebox.showerror("Setup Error", f"Failed to run setup script: {str(e)}")
+    
+    def load_config(self):
+        """Load configuration from JSON file."""
+        try:
+            if not self.config_file.exists():
+                if hasattr(self, 'log_text'):
+                    self.log_message("Config file not found, using defaults", 'info')
+                self.auto_detect_paths()
+                return
+            
+            with open(self.config_file, 'r') as f:
+                config = json.load(f)
+            
+            # Load paths
+            if 'paths' in config:
+                for key, value in config['paths'].items():
+                    if key in self.config_vars:
+                        self.config_vars[key].set(value or "")
+            
+            # Load auto-detect setting
+            if 'autoDetect' in config and 'enabled' in config['autoDetect']:
+                self.config_vars["autoDetect"].set(config['autoDetect']['enabled'])
+            
+            # Load launch settings (only if widgets exist)
+            if hasattr(self, 'base_port') and 'launch' in config:
+                if 'basePort' in config['launch']:
+                    self.base_port.set(config['launch']['basePort'])
+                if 'delaySeconds' in config['launch']:
+                    self.launch_delay.set(config['launch']['delaySeconds'])
+                if 'buildMaven' in config['launch']:
+                    self.build_maven.set(config['launch']['buildMaven'])
+            
+            self.toggle_auto_detect()
+            if hasattr(self, 'log_text'):
+                self.log_message("Configuration loaded successfully", 'success')
+            
+        except Exception as e:
+            if hasattr(self, 'log_text'):
+                self.log_message(f"Error loading config: {str(e)}", 'error')
+                messagebox.showerror("Config Error", f"Failed to load configuration: {str(e)}")
+            else:
+                # If log_text doesn't exist yet, just print to console
+                print(f"Error loading config: {str(e)}")
+    
+    def save_config(self):
+        """Save current configuration to JSON file."""
+        try:
+            config = {
+                "version": "1.0",
+                "autoDetect": {
+                    "enabled": self.config_vars["autoDetect"].get(),
+                    "java": True,
+                    "maven": True,
+                    "projectDir": True,
+                    "credentialsDir": True,
+                    "baseDir": True,
+                    "exportsBase": True,
+                    "classPathFile": True
+                },
+                "paths": {
+                    "projectDir": self.config_vars["projectDir"].get(),
+                    "classPathFile": self.config_vars["classPathFile"].get(),
+                    "javaExe": self.config_vars["javaExe"].get(),
+                    "baseDir": self.config_vars["baseDir"].get(),
+                    "exportsBase": self.config_vars["exportsBase"].get(),
+                    "credentialsDir": self.config_vars["credentialsDir"].get()
+                },
+                "launch": {
+                    "basePort": self.base_port.get(),
+                    "delaySeconds": self.launch_delay.get(),
+                    "defaultWorld": 0,
+                    "buildMaven": self.build_maven.get()
+                }
+            }
+            
+            with open(self.config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+            
+            self.log_message("Configuration saved successfully", 'success')
+            messagebox.showinfo("Config Saved", "Configuration saved successfully!")
+            
+        except Exception as e:
+            self.log_message(f"Error saving config: {str(e)}", 'error')
+            messagebox.showerror("Config Error", f"Failed to save configuration: {str(e)}")
+    
+    def toggle_auto_detect(self):
+        """Enable/disable path entry fields based on auto-detect setting."""
+        state = 'disabled' if self.config_vars["autoDetect"].get() else 'normal'
+        for entry in self.path_entries.values():
+            entry.config(state=state)
+    
+    def browse_path(self, path_key, is_file=False):
+        """Browse for a file or directory path."""
+        current_path = self.config_vars[path_key].get()
+        initial_dir = current_path if current_path and Path(current_path).exists() else str(Path.home())
+        
+        if is_file:
+            path = filedialog.askopenfilename(
+                title=f"Select {path_key}",
+                initialdir=initial_dir
+            )
+        else:
+            path = filedialog.askdirectory(
+                title=f"Select {path_key}",
+                initialdir=initial_dir
+            )
+        
+        if path:
+            self.config_vars[path_key].set(path)
+    
+    def auto_detect_paths(self):
+        """Auto-detect paths using PowerShell script logic."""
+        try:
+            script_dir = Path(__file__).resolve().parent
+            
+            # Find Java
+            java_path = None
+            if os.environ.get('JAVA_HOME'):
+                java_exe = Path(os.environ['JAVA_HOME']) / "bin" / "java.exe"
+                if java_exe.exists():
+                    java_path = str(java_exe)
+            
+            if not java_path:
+                # Check common paths
+                common_paths = [
+                    Path("C:/Program Files/Java/jdk-11*"),
+                    Path("C:/Program Files (x86)/Java/jdk-11*"),
+                ]
+                for pattern in common_paths:
+                    matches = list(pattern.parent.glob(pattern.name))
+                    if matches:
+                        java_exe = matches[0] / "bin" / "java.exe"
+                        if java_exe.exists():
+                            java_path = str(java_exe)
+                            break
+            
+            if java_path:
+                self.config_vars["javaExe"].set(java_path)
+            
+            # Find RuneLite project
+            possible_paths = [
+                script_dir.parent.parent / "IdeaProjects" / "runelite",
+                script_dir.parent / "runelite",
+                Path.home() / "IdeaProjects" / "runelite",
+                Path("D:/IdeaProjects/runelite"),
+                Path("C:/IdeaProjects/runelite")
+            ]
+            for path in possible_paths:
+                if path.exists() and (path / "pom.xml").exists():
+                    self.config_vars["projectDir"].set(str(path))
+                    break
+            
+            # Set relative paths
+            cred_dir = script_dir / "credentials"
+            if cred_dir.exists():
+                self.config_vars["credentialsDir"].set(str(cred_dir))
+            
+            self.config_vars["baseDir"].set(str(script_dir / "instances"))
+            self.config_vars["exportsBase"].set(str(script_dir / "exports"))
+            self.config_vars["classPathFile"].set(str(script_dir / "rl-classpath.txt"))
+            
+            self.log_message("Auto-detection completed", 'success')
+            
+        except Exception as e:
+            self.log_message(f"Error during auto-detection: {str(e)}", 'error')
+    
     def launch_runelite(self):
         """Launch RuneLite instances using the PowerShell script."""
         if not self.selected_credentials:
@@ -2780,9 +3085,13 @@ class SimpleRecorderGUI:
             messagebox.showerror("Invalid Configuration", "Instance count must be greater than 0.")
             return
         
+        # Save config before launching
+        self.save_config()
+        
         try:
             # Build PowerShell command
             script_path = Path(__file__).resolve().parent / "launch-runelite.ps1"
+            config_path = Path(__file__).resolve().parent / "launch-config.json"
             logging.info(f"[GUI] RuneLite launcher script path: {script_path}")
             if not script_path.exists():
                 messagebox.showerror("Script Not Found", f"RuneLite launcher script not found at {script_path}")
@@ -2792,13 +3101,13 @@ class SimpleRecorderGUI:
             cred_files = "', '".join(self.selected_credentials)
             cred_files = f"@('{cred_files}')"
             
-            # Build PowerShell command
+            # Build PowerShell command with config file
             build_maven_flag = "-BuildMaven" if self.build_maven.get() else ""
             ps_cmd = [
                 "powershell.exe",
                 "-ExecutionPolicy", "Bypass",
                 "-Command",
-                f"& '{script_path}' -Count {instance_count} -BasePort {self.base_port.get()} -DelaySeconds {self.launch_delay.get()} -CredentialFiles {cred_files} {build_maven_flag}"
+                f"& '{script_path}' -Count {instance_count} -BasePort {self.base_port.get()} -DelaySeconds {self.launch_delay.get()} -CredentialFiles {cred_files} -ConfigFile '{config_path}' {build_maven_flag}"
             ]
             
             self.log_message(f"Launching RuneLite instances...", 'info')

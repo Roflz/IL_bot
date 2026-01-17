@@ -2626,10 +2626,10 @@ def aim_midtop_at_world(
                     break
                 
                 # Release any pitch keys that might be pressed (safety measure)
-                for pitch_key in ["UP", "DOWN"]:
-                    if pitch_key in pressed_keys:
-                        ipc.key_release(pitch_key)
-                        pressed_keys.discard(pitch_key)
+                    for pitch_key in ["UP", "DOWN"]:
+                        if pitch_key in pressed_keys:
+                            ipc.key_release(pitch_key)
+                            pressed_keys.discard(pitch_key)
                 
                 # Handle yaw adjustments
                 if needs_yaw:

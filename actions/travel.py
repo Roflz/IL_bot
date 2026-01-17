@@ -1028,7 +1028,7 @@ def _click_ground_old_camera(world_coords: dict, aim_ms: int = 700, path_waypoin
     
     except Exception as e:
         logging.error(f"[CLICK_GROUND_OLD] Error: {e}")
-        return None
+    return None
 
 
 def _calculate_distance(x1: int, y1: int, x2: int, y2: int) -> float:
