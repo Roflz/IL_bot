@@ -1302,10 +1302,24 @@ class RuneLiteLauncher:
         }
         
         try:
-            # Step 1: Fetch from remote to get latest tags and commits
-            self.log_callback("[Release Check] Fetching from remote repository...", "info")
+            # Step 1: Fetch from upstream remote to get latest tags and commits
+            # Use 'upstream' remote if it exists (fork workflow), otherwise fall back to 'origin'
+            self.log_callback("[Release Check] Fetching from upstream repository...", "info")
+            
+            # Check if upstream remote exists
+            check_upstream = subprocess.run(
+                ["git", "remote", "get-url", "upstream"],
+                cwd=str(runelite_repo_path),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5
+            )
+            
+            remote_name = "upstream" if check_upstream.returncode == 0 else "origin"
+            self.log_callback(f"[Release Check] Using remote: {remote_name}", "info")
+            
             fetch_process = subprocess.run(
-                ["git", "fetch", "--tags", "--prune"],
+                ["git", "fetch", remote_name, "--tags", "--prune"],
                 cwd=str(runelite_repo_path),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
