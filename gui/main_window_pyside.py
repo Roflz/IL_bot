@@ -1935,14 +1935,15 @@ class SimpleRecorderGUI(QMainWindow):
                 self._log_message(f"Error in custom event callback: {str(e)}", 'error')
                 import traceback
                 self._log_message(f"Traceback: {traceback.format_exc()}", 'error')
-        # Handle create tabs events from launcher (with delay)
+        # Handle create tabs / launch complete events from launcher (with optional delay)
         elif hasattr(event, 'callback') and hasattr(event, 'delay_ms'):
             try:
-                self._log_message(f"Processing create tabs event from background thread (delay: {event.delay_ms}ms)", 'info')
-                # Use QTimer on main thread to delay the callback
+                if not getattr(event, 'launch_complete', False):
+                    self._log_message(f"Processing create tabs event from background thread (delay: {event.delay_ms}ms)", 'info')
                 from PySide6.QtCore import QTimer
                 QTimer.singleShot(event.delay_ms, event.callback)
-                self._log_message("Create tabs event scheduled successfully", 'info')
+                if not getattr(event, 'launch_complete', False):
+                    self._log_message("Create tabs event scheduled successfully", 'info')
             except Exception as e:
                 self._log_message(f"Error in create tabs event: {str(e)}", 'error')
                 import traceback

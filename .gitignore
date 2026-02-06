@@ -12,6 +12,9 @@ credentials/
 # Instances directory (contains per-instance RuneLite data and cache)
 instances/
 
+# Character stats and rule data (runtime-generated, per-user)
+utils/character_data/
+
 # Large calibration data files
 screen_projection_calibration_*.jsonl
 *.jsonl

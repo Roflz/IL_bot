@@ -77,6 +77,15 @@ class _LogFromThreadEvent(QEvent):
         self.callback = lambda: log_callback(msg, level)
 
 
+# Event to run create_instance_tabs + re-enable launch button on main thread after Step 5 completes
+class _LaunchCompleteEvent(QEvent):
+    launch_complete = True  # so main window can run callback without "Processing create tabs event" log
+    def __init__(self, callback: Callable):
+        super().__init__(QEvent.Type.User)
+        self.callback = callback
+        self.delay_ms = 0
+
+
 def _post_log_to_main_thread(root: QWidget, msg: str, level: str, log_callback: Callable):
     """Post a log message to be run on the main thread (required when called from background thread)."""
     if root and log_callback:
@@ -260,7 +269,7 @@ def _wait_for_runelite_window_and_maximize(
     root_create_time = None
     last_log_time = time.time()
     last_debug_log_time = time.time()
-    debug_interval = 5.0  # Log debug info every 5 seconds
+    debug_interval = 30.0  # Log progress every 30 seconds (reduce log noise)
     
     # Create debug log function that only logs periodically to avoid spam
     def debug_log(msg: str):
@@ -581,10 +590,10 @@ class RuneLiteLauncher:
                 return
             
             # ============================================================================
-            # STEP 1/4: Check and merge latest RuneLite release commit
+            # STEP 1/5: Check and merge latest RuneLite release
             # ============================================================================
             self.log_callback("=" * 70, "info")
-            self.log_callback("[STEP 1/4] Checking for latest RuneLite release...", "info")
+            self.log_callback("[STEP 1/5] Checking for latest RuneLite release...", "info")
             self.log_callback("=" * 70, "info")
             merge_result = self._check_and_merge_latest_release(project_dir)
             if not merge_result["success"]:
@@ -602,13 +611,13 @@ class RuneLiteLauncher:
                         f"Failed to check/merge latest RuneLite release:\n{merge_result.get('error', 'Unknown error')}"
                     )
                 return
-            self.log_callback("[STEP 1/4] Release check completed successfully", "success")
+            self.log_callback("[STEP 1/5] Release check completed successfully", "success")
             
             # ============================================================================
-            # STEP 2/4: Resolve and verify Java toolchain JDK
+            # STEP 2/5: Resolve and verify Java toolchain JDK
             # ============================================================================
             self.log_callback("=" * 70, "info")
-            self.log_callback("[STEP 2/4] Resolving Java toolchain JDK (this may take several minutes on first run)...", "info")
+            self.log_callback("[STEP 2/5] Resolving Java toolchain JDK (this may take several minutes on first run)...", "info")
             self.log_callback("=" * 70, "info")
             toolchain_result = self._resolve_and_log_toolchain_jdk(project_dir)
             if not toolchain_result["success"]:
@@ -618,12 +627,7 @@ class RuneLiteLauncher:
                 )
                 return
             
-            # ============================================================================
-            # STEP 3/4: Build and run with Gradle
-            # ============================================================================
-            self.log_callback("=" * 70, "info")
-            self.log_callback("[STEP 3/4] Building and launching RuneLite instances...", "info")
-            self.log_callback("=" * 70, "info")
+            # Prepare for steps 3–5 (run in worker thread so GUI stays responsive)
             import shutil
             if os.name == "nt":
                 gradlew = project_dir / "gradlew.bat"
@@ -634,111 +638,75 @@ class RuneLiteLauncher:
             if not gradlew or (isinstance(gradlew, Path) and not gradlew.exists()):
                 QMessageBox.critical(
                     self.root, "Gradle Required",
-                    "Gradle not found: no gradlew or gradlew.bat in project directory, and gradle not in PATH. "
-                    "The RuneLite project uses Gradle (same as IntelliJ). Use the project's Gradle wrapper or install Gradle."
+                    "Gradle not found: no gradlew or gradlew.bat in project directory, and gradle not in PATH."
                 )
                 return
             gradlew = str(gradlew) if isinstance(gradlew, Path) else gradlew
 
-            self.log_callback(f"Using Gradle wrapper: {gradlew}", "info")
-            self.log_callback(f"Using JDK: {toolchain_result.get('jdk_path', 'Unknown')}", "info")
-            self.log_callback(f"JDK Version: {toolchain_result.get('jdk_version', 'Unknown')}", "info")
-
-            default_world = 0  # 0 = random F2P world per instance
+            default_world = 0
             base_port = 17000
             starting_port = self._get_next_available_port(base_port)
-            self.log_callback(f"Launching {instance_count} instance(s) starting at port {starting_port} (Run RuneLite.main())", "info")
-            
             base_dir.mkdir(parents=True, exist_ok=True)
             exports_base.mkdir(parents=True, exist_ok=True)
             pid_file = base_dir / "runelite-pids.txt"
             self._last_launched_pids = []
 
-            for i in range(instance_count):
-                port = starting_port + i
-                inst_home = base_dir / f"inst_{i}"
-                exp_dir = exports_base / f"inst_{i}"
-                inst_home.mkdir(parents=True, exist_ok=True)
-                exp_dir.mkdir(parents=True, exist_ok=True)
-                
-                cred_name = self.selected_credentials[i % len(self.selected_credentials)]
-                source_cred = credentials_dir / cred_name
-                if not source_cred.exists() and not cred_name.endswith(".properties"):
-                    source_cred = credentials_dir / f"{cred_name}.properties"
-                config_dir = inst_home / ".runelite"
-                config_dir.mkdir(parents=True, exist_ok=True)
-                target_cred = config_dir / "credentials.properties"
-                if source_cred.exists():
-                    import shutil
-                    shutil.copy2(source_cred, target_cred)
-                    self.log_callback(f"Instance {i}: copied credentials {cred_name}", "info")
-                
-                profiles2 = config_dir / "profiles2"
-                if profiles2.exists():
-                    import shutil
-                    shutil.rmtree(profiles2)
-                
-                world = default_world if default_world != 0 else random.choice(VALID_WORLDS)
-                settings_file = config_dir / "settings.properties"
-                settings_content = SETTINGS_PROPERTIES_TEMPLATE.format(port=port, world=world)
-                settings_file.write_text(settings_content.strip(), encoding="utf-8")
-                
-                inst_home_str = str(inst_home)
-                gradle_args = [
-                    gradlew,
-                    ":client:run",
-                    f"-Puser.home={inst_home_str}",
-                    f"-Prl.instance={i}",
-                ]
-                self.log_callback(f"Instance {i}: Starting Gradle build/run process...", "info")
-                self.log_callback(f"  Port: {port}", "info")
-                self.log_callback(f"  Home: {inst_home}", "info")
-                self.log_callback(f"  Command: {' '.join(gradle_args)}", "info")
-                self.log_callback(f"  Note: First-time toolchain JDK download may take 5-15 minutes. Please wait...", "warning")
-                
-                env = os.environ.copy()
-                gradle_log = inst_home / "gradle-run.log"
-                
-                # Use unbuffered output to ensure real-time logging
-                proc = subprocess.Popen(
-                    gradle_args,
+            if self.launch_button:
+                self.launch_button.setEnabled(False)
+
+            def _run_steps_3_4_5():
+                import time
+                root = self.root
+                log_cb = self.log_callback
+
+                def log(msg: str, level: str = "info"):
+                    if root and log_cb:
+                        _post_log_to_main_thread(root, msg, level, log_cb)
+
+                # ----- STEP 3/5: Build only (blocking) -----
+                log("=" * 70, "info")
+                log("[STEP 3/5] Building RuneLite (this may take several minutes on first run)...", "info")
+                log("=" * 70, "info")
+                log(f"Using Gradle: {gradlew}", "info")
+                log(f"Using JDK: {toolchain_result.get('jdk_path', 'Unknown')}", "info")
+                build_proc = subprocess.Popen(
+                    [gradlew, ":client:assemble"],
                     cwd=str(project_dir),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
-                    bufsize=0,  # Unbuffered for real-time output
-                    env=env,
+                    bufsize=1,
+                    env=os.environ.copy(),
                 )
-                with open(pid_file, "a", encoding="ascii") as f:
-                    f.write(f"{proc.pid},{i},{port},{inst_home_str}\n")
-                self._last_launched_pid = proc.pid
-                entry = {
-                    "pid": proc.pid,
-                    "port": port,
-                    "instance_index": i,
-                    "inst_home": inst_home_str,
-                    "cred_name": cred_name,
-                }
-                self._last_launched_pids.append(entry)
-                self.log_callback(
-                    f"Instance #{i}: Gradle process started (PID={proc.pid})", 
-                    "info",
-                )
-                self.log_callback(
-                    f"Instance #{i}: Streaming Gradle output (build/download progress will appear below)...",
-                    "info",
-                )
+                for line in iter(build_proc.stdout.readline, ""):
+                    if line:
+                        line = line.rstrip()
+                        if "[IPC] recv raw:" in line:
+                            continue
+                        log(f"[Build] {line}", "info")
+                build_proc.stdout.close()
+                ret = build_proc.wait()
+                if ret != 0:
+                    log(f"[STEP 3/5] Build failed (exit code {ret}). Launch aborted.", "error")
+                    def re_enable_only():
+                        if self.launch_button:
+                            self.launch_button.setEnabled(True)
+                    QApplication.postEvent(root, _LaunchCompleteEvent(re_enable_only))
+                    return
+                log("[STEP 3/5] Build completed successfully.", "success")
 
-                def stream_gradle_output(process, instance_idx, log_path, callback):
-                    """Read Gradle stdout line by line; post to GUI and append to log file with enhanced logging."""
+                # ----- STEP 4/5: Launch :client:run for each instance -----
+                log("=" * 70, "info")
+                log("[STEP 4/5] Launching RuneLite instance(s)...", "info")
+                log("=" * 70, "info")
+                log(f"Launching {instance_count} instance(s) starting at port {starting_port}.", "info")
+
+                def stream_gradle_output(process, instance_idx, log_path, callback, gui_root):
                     import time
                     last_activity_time = time.time()
                     line_count = 0
                     try:
                         with open(log_path, "w", encoding="utf-8") as log_file:
-                            # Log that we're starting to stream
-                            callback(f"[Gradle inst_{instance_idx}] Starting to capture Gradle output...", "info")
-                            
                             for line in iter(process.stdout.readline, ""):
                                 line = line.rstrip()
                                 if line:
@@ -746,97 +714,103 @@ class RuneLiteLauncher:
                                     last_activity_time = time.time()
                                     log_file.write(line + "\n")
                                     log_file.flush()
-                                    
-                                    # Filter out repetitive IPC polling messages to reduce log noise
                                     if "[IPC] recv raw: {\"cmd\":\"get_player\"}" in line:
-                                        # Skip these repetitive messages - they're normal operation
                                         continue
-                                    
-                                    # Log every line to GUI with appropriate prefix
-                                    # Highlight important messages
-                                    if "Downloading" in line or "Download" in line:
-                                        callback(f"[Gradle inst_{instance_idx}] {line}", "info")
-                                    elif "BUILD" in line.upper() or "Task" in line:
-                                        callback(f"[Gradle inst_{instance_idx}] {line}", "info")
-                                    elif "error" in line.lower() or "Error" in line or "FAILURE" in line:
-                                        callback(f"[Gradle inst_{instance_idx}] {line}", "error")
-                                    elif "toolchain" in line.lower() or "JDK" in line or ("java" in line.lower() and "version" in line.lower()):
-                                        callback(f"[Gradle inst_{instance_idx}] {line}", "info")
-                                    elif "Starting process" in line or "java.exe" in line:
-                                        callback(f"[Gradle inst_{instance_idx}] {line}", "info")
-                                    elif "[IPC]" in line and "get_player" in line:
-                                        # Skip IPC polling messages (already filtered above, but double-check)
-                                        continue
-                                    else:
-                                        callback(f"[Gradle inst_{instance_idx}] {line}", "info")
-                                    
-                                    # Periodic activity indicator (every 50 lines or 30 seconds)
-                                    if line_count % 50 == 0:
-                                        callback(f"[Gradle inst_{instance_idx}] Progress: {line_count} lines processed...", "info")
-                                
-                                # Check for long silence (no output for 60 seconds)
+                                    if "Download" in line or "BUILD" in line.upper() or "Task" in line:
+                                        _post_log_to_main_thread(gui_root, f"[Gradle inst_{instance_idx}] {line}", "info", callback)
+                                    elif "error" in line.lower() or "FAILURE" in line:
+                                        _post_log_to_main_thread(gui_root, f"[Gradle inst_{instance_idx}] {line}", "error", callback)
+                                    elif "RuneLite" in line and ("starting" in line.lower() or "INFO" in line):
+                                        _post_log_to_main_thread(gui_root, f"[Gradle inst_{instance_idx}] {line}", "info", callback)
+                                    elif line_count % 100 == 0:
+                                        _post_log_to_main_thread(gui_root, f"[Gradle inst_{instance_idx}] Progress: {line_count} lines...", "info", callback)
                                 if time.time() - last_activity_time > 60:
-                                    callback(
-                                        f"[Gradle inst_{instance_idx}] ⏳ No output for 60s - process may be downloading JDK or building (this is normal, please wait)...",
-                                        "warning"
-                                    )
+                                    _post_log_to_main_thread(gui_root, f"[Gradle inst_{instance_idx}] No output for 60s (building/starting)...", "warning", callback)
                                     last_activity_time = time.time()
-                            
-                            callback(f"[Gradle inst_{instance_idx}] Finished capturing output ({line_count} total lines)", "info")
                         process.stdout.close()
                     except Exception as e:
-                        callback(f"[Gradle inst_{instance_idx}] Stream error: {e}", "error")
-                        import traceback
-                        callback(f"[Gradle inst_{instance_idx}] Traceback: {traceback.format_exc()}", "error")
+                        _post_log_to_main_thread(gui_root, f"[Gradle inst_{instance_idx}] Stream error: {e}", "error", callback)
                     finally:
-                        ret = process.poll()
-                        if ret is not None:
-                            if ret == 0:
-                                callback(f"[Gradle inst_{instance_idx}] Process completed successfully (exit code {ret})", "success")
-                            else:
-                                callback(f"[Gradle inst_{instance_idx}] Process ended with error code {ret}", "error")
+                        if process.poll() is not None and process.poll() != 0:
+                            _post_log_to_main_thread(gui_root, f"[Gradle inst_{instance_idx}] Process exited with code {process.poll()}", "error", callback)
 
-                threading.Thread(
-                    target=stream_gradle_output,
-                    args=(proc, i, gradle_log, self.log_callback),
-                    daemon=True,
-                ).start()
-
-            # ============================================================================
-            # STEP 4/4: Wait for RuneLite windows and maximize
-            # ============================================================================
-            self.log_callback("=" * 70, "info")
-            self.log_callback("[STEP 4/4] Waiting for RuneLite windows to appear...", "info")
-            self.log_callback("=" * 70, "info")
-            
-            # Auto-maximize each launched instance's RuneLite window (same as launch-runelite.ps1: wait for "RuneLite" then ShowWindow)
-            if os.name == "nt" and self._last_launched_pids:
-                self.log_callback("Waiting for RuneLite window(s) to appear (this may take several minutes if JDK is downloading)...", "info")
-                for entry in self._last_launched_pids:
+                for i in range(instance_count):
+                    port = starting_port + i
+                    inst_home = base_dir / f"inst_{i}"
+                    exp_dir = exports_base / f"inst_{i}"
+                    inst_home.mkdir(parents=True, exist_ok=True)
+                    exp_dir.mkdir(parents=True, exist_ok=True)
+                    cred_name = self.selected_credentials[i % len(self.selected_credentials)]
+                    source_cred = credentials_dir / cred_name
+                    if not source_cred.exists() and not cred_name.endswith(".properties"):
+                        source_cred = credentials_dir / f"{cred_name}.properties"
+                    config_dir = inst_home / ".runelite"
+                    config_dir.mkdir(parents=True, exist_ok=True)
+                    target_cred = config_dir / "credentials.properties"
+                    if source_cred.exists():
+                        import shutil as _shutil
+                        _shutil.copy2(source_cred, target_cred)
+                    profiles2 = config_dir / "profiles2"
+                    if profiles2.exists():
+                        import shutil as _shutil
+                        _shutil.rmtree(profiles2)
+                    world = default_world if default_world != 0 else random.choice(VALID_WORLDS)
+                    settings_file = config_dir / "settings.properties"
+                    settings_content = SETTINGS_PROPERTIES_TEMPLATE.format(port=port, world=world)
+                    settings_file.write_text(settings_content.strip(), encoding="utf-8")
+                    inst_home_str = str(inst_home)
+                    gradle_args = [gradlew, ":client:run", f"-Puser.home={inst_home_str}", f"-Prl.instance={i}"]
+                    log(f"Instance {i}: port {port}, home {inst_home}, starting :client:run...", "info")
+                    proc = subprocess.Popen(
+                        gradle_args,
+                        cwd=str(project_dir),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=0,
+                        env=os.environ.copy(),
+                    )
+                    with open(pid_file, "a", encoding="ascii") as f:
+                        f.write(f"{proc.pid},{i},{port},{inst_home_str}\n")
+                    self._last_launched_pid = proc.pid
+                    self._last_launched_pids.append({
+                        "pid": proc.pid, "port": port, "instance_index": i, "inst_home": inst_home_str, "cred_name": cred_name,
+                    })
                     threading.Thread(
-                        target=_wait_for_runelite_window_and_maximize,
-                        args=(entry["pid"], self.log_callback, self.root),
+                        target=stream_gradle_output,
+                        args=(proc, i, inst_home / "gradle-run.log", log_cb, root),
                         daemon=True,
                     ).start()
+                log("[STEP 4/5] All RuneLite processes started.", "success")
 
-            if self.launch_button:
-                self.launch_button.setEnabled(False)
-            self.log_callback("=" * 70, "info")
-            self.log_callback("All launch steps initiated. Monitor output above for progress.", "success")
-            self.log_callback("Note: First-time JDK download can take 5-15 minutes. Be patient!", "warning")
-            self.log_callback("=" * 70, "info")
-            
-            if self.create_instance_tab_callback:
-                self.instance_tabs_timer = QTimer(self.root)
-                self.instance_tabs_timer.setSingleShot(True)
-                self.instance_tabs_timer.timeout.connect(self._create_instance_tabs_wrapper)
-                self.instance_tabs_timer.start(2000)
-            
-            def re_enable():
-                if self.launch_button:
-                    self.launch_button.setEnabled(True)
-            QTimer.singleShot(3000, re_enable)
-            
+                # ----- STEP 5/5: Wait for RuneLite windows, then create tabs -----
+                log("=" * 70, "info")
+                log("[STEP 5/5] Waiting for RuneLite window(s) to appear...", "info")
+                log("=" * 70, "info")
+                if os.name == "nt" and self._last_launched_pids:
+                    wait_threads = []
+                    for entry in self._last_launched_pids:
+                        t = threading.Thread(
+                            target=_wait_for_runelite_window_and_maximize,
+                            args=(entry["pid"], log_cb, root),
+                            daemon=True,
+                        )
+                        t.start()
+                        wait_threads.append(t)
+                    for t in wait_threads:
+                        t.join()
+                log("[STEP 5/5] Window wait completed. Creating instance tabs.", "success")
+                log("=" * 70, "info")
+
+                def on_launch_complete():
+                    self._create_instance_tabs_wrapper()
+                    if self.launch_button:
+                        self.launch_button.setEnabled(True)
+
+                QApplication.postEvent(root, _LaunchCompleteEvent(on_launch_complete))
+
+            threading.Thread(target=_run_steps_3_4_5, daemon=True).start()
+
         except Exception as e:
             import traceback
             self.log_callback(f"Error launching RuneLite: {str(e)}", "error")
@@ -922,77 +896,44 @@ class RuneLiteLauncher:
     
     def _create_instance_tabs_wrapper(self):
         """Wrapper to call create_instance_tabs - ensures it runs in main thread."""
-        self.log_callback("_create_instance_tabs_wrapper called", 'info')
         self.create_instance_tabs()
     
     def _get_next_available_port(self, start_port: int = 17000) -> int:
         """Find the next available port starting from start_port."""
-        # Debug: Check what we're seeing
-        if self.instance_ports:
-            used_ports = set(self.instance_ports.values())
-            self.log_callback(f"_get_next_available_port: instance_ports dict has {len(self.instance_ports)} entries: {dict(self.instance_ports)}", 'info')
-            self.log_callback(f"_get_next_available_port: used_ports set: {sorted(used_ports)}", 'info')
-        else:
-            used_ports = set()
-            self.log_callback(f"_get_next_available_port: instance_ports is empty or None", 'info')
-        
+        used_ports = set(self.instance_ports.values()) if self.instance_ports else set()
         port = start_port
         while port in used_ports:
             port += 1
-        self.log_callback(f"_get_next_available_port: returning port {port}", 'info')
         return port
     
     def create_instance_tabs(self):
         """Create tabs for each launched RuneLite instance."""
-        self.log_callback("create_instance_tabs() method called", 'info')
-        
         if not self.create_instance_tab_callback:
             self.log_callback("No create_instance_tab_callback available", 'error')
             return
         
         try:
-            self.log_callback("Starting to create instance tabs...", 'info')
-            base_port = 17000  # Default since removed from UI
-            
-            # Debug: Check instance_ports reference
-            if self.instance_ports:
-                self.log_callback(f"create_instance_tabs: instance_ports dict has {len(self.instance_ports)} entries: {dict(self.instance_ports)}", 'info')
-                used_ports = set(self.instance_ports.values())
-            else:
-                used_ports = set()
-                self.log_callback(f"create_instance_tabs: instance_ports is empty or None", 'info')
-            
-            self.log_callback(f"Currently used ports: {sorted(used_ports)}", 'info')
-            self.log_callback(f"Using base port: {base_port}, Credentials: {self.selected_credentials}", 'info')
-            
-            # Find starting port (next available port from base_port)
+            base_port = 17000
+            used_ports = set(self.instance_ports.values()) if self.instance_ports else set()
             current_port = self._get_next_available_port(base_port)
-            self.log_callback(f"Found starting port: {current_port}", 'info')
+            self.log_callback(f"Creating instance tabs for {len(self.selected_credentials)} instance(s) (ports from {current_port}).", 'info')
             
             for i, cred_name in enumerate(self.selected_credentials):
-                # Extract username from credential filename (remove .properties)
                 username = cred_name.replace('.properties', '')
-                
-                # Use current_port and increment for next credential
                 port = current_port + i
-                
-                # Make sure this port isn't already taken (in case of concurrent launches)
                 while port in used_ports:
                     port += 1
-                used_ports.add(port)  # Mark as used for this batch
-                
-                self.log_callback(f"Creating tab for {username} on port {port}", 'info')
+                used_ports.add(port)
                 
                 if self.create_instance_tab_callback:
                     try:
                         self.create_instance_tab_callback(username, port)
-                        self.log_callback(f"Callback executed for {username}", 'info')
                     except Exception as e:
-                        self.log_callback(f"Error in callback for {username}: {str(e)}", 'error')
+                        self.log_callback(f"Error creating tab for {username}: {str(e)}", 'error')
                         import traceback
-                        self.log_callback(f"Traceback: {traceback.format_exc()}", 'error')
+                        self.log_callback(traceback.format_exc(), 'error')
             
-            self.log_callback("Instance tabs creation completed", 'success')
+            self.log_callback("Instance tabs created.", 'success')
             
         except Exception as e:
             self.log_callback(f"Error creating instance tabs: {str(e)}", 'error')
@@ -1254,27 +1195,25 @@ class RuneLiteLauncher:
                 if jdk_version:
                     self.log_callback(f"[Toolchain] JDK Version: {jdk_version}", "info")
             else:
-                result["error"] = "Could not determine JDK path from Gradle output"
-                self.log_callback(f"[Toolchain] ⚠️  Could not determine JDK path, but continuing anyway...", "warning")
-                result["success"] = True  # Continue anyway - Gradle will handle it
-                result["jdk_path"] = "Will be resolved by Gradle"
-                result["jdk_version"] = "Java 11 (toolchain)"
+                result["error"] = (
+                    "Could not determine JDK path. Gradle could not resolve Java 11. "
+                    "Ensure toolchain auto-download is enabled (foojay-resolver in runelite and cache/settings.gradle.kts) "
+                    "or install JDK 11 and set JAVA_HOME."
+                )
+                self.log_callback("[Toolchain] Could not determine JDK path. Launch aborted.", "error")
             
             return result
             
         except subprocess.TimeoutExpired:
-            result["error"] = "Toolchain resolution timed out (JDK download may still be in progress)"
-            self.log_callback(f"[Toolchain] ⚠️  Resolution timed out, but continuing (JDK download may complete during build)", "warning")
-            result["success"] = True  # Continue anyway
-            result["jdk_path"] = "Downloading..."
-            result["jdk_version"] = "Java 11 (toolchain)"
+            result["error"] = (
+                "Toolchain resolution timed out (over 5 minutes). "
+                "JDK download may still be in progress; try again in a few minutes."
+            )
+            self.log_callback("[Toolchain] Resolution timed out. Launch aborted.", "error")
             return result
         except Exception as e:
-            result["error"] = f"Unexpected error: {str(e)}"
-            self.log_callback(f"[Toolchain] ⚠️  Error resolving toolchain: {e}, but continuing anyway...", "warning")
-            result["success"] = True  # Continue anyway
-            result["jdk_path"] = "Unknown (will be resolved by Gradle)"
-            result["jdk_version"] = "Java 11 (toolchain)"
+            result["error"] = f"Error resolving toolchain: {str(e)}"
+            self.log_callback(f"[Toolchain] Error resolving toolchain: {e}. Launch aborted.", "error")
             return result
     
     def _check_and_merge_latest_release(self, runelite_repo_path: Path) -> Dict[str, Any]:
