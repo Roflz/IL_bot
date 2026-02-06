@@ -9,6 +9,9 @@
 # Credentials directory (contains account credentials)
 credentials/
 
+# Instances directory (contains per-instance RuneLite data and cache)
+instances/
+
 # YOLO model weight files
 *.pt
 *.onnx
