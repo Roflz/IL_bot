@@ -12,6 +12,11 @@ credentials/
 # Instances directory (contains per-instance RuneLite data and cache)
 instances/
 
+# Large calibration data files
+screen_projection_calibration_*.jsonl
+*.jsonl
+!camera.timing.jsonl
+
 # YOLO model weight files
 *.pt
 *.onnx
