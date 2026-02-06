@@ -49,7 +49,10 @@ def set_phase_with_camera(self, phase: str, camera_setup: bool = True) -> str:
 
     try:
         import logging
-        logging.info(f"[{self.__class__.__name__}] phase → {phase}")
+        # Only log if phase actually changed
+        current_phase = self.state.get("phase")
+        if current_phase != phase:
+            logging.info(f"[{self.__class__.__name__}] phase → {phase}")
     except Exception:
         pass
     return phase

@@ -55,6 +55,10 @@ from .base import Plan
 class BlastFurnacePlan(Plan):
     id = "BLAST_FURNACE"
     label = "Smithing: Blast Furnace"
+    description = """Efficiently smelts steel bars at the Blast Furnace using iron ore and coal. Automatically manages coffer payments, stamina potions, ice gloves, and coal bag. Optimized for high XP rates with minimal downtime.
+
+Starting Area: Blast Furnace (Keldagrim)
+Required Items: Ice gloves, Coal bag, Iron ore, Coal, Coins (for coffer)"""
 
     # RuneLite Var Inspector: VarbitID.BLAST_FURNACE_COFFER = 5357
     BLAST_FURNACE_COFFER_VARBIT = 5357

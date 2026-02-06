@@ -11,6 +11,10 @@ class LogoutPlan(Plan):
     
     id = "logout"
     label = "Logout Utility"
+    description = """Simple utility plan that handles logging out of the game. Useful as a final step in plan sequences or for scheduled logout operations.
+
+Starting Area: Anywhere
+Required Items: None"""
     
     def __init__(self):
         self.state = {"phase": "LOGOUT"}

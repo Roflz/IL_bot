@@ -72,6 +72,10 @@ class BankPlan(Plan):
     
     id = "BANK_PLAN"
     label = "Generic Bank Setup"
+    description = """Comprehensive bank setup utility that configures character inventory and equipment. Automatically equips best available gear based on skill levels, withdraws specified items, and handles food setup. Does not buy missing items from GE.
+
+Starting Area: Any bank (travels to closest bank)
+Required Items: Specified in plan initialization (equipment, food, inventory items)"""
     
     # Return status codes
     SUCCESS = 0

@@ -1020,6 +1020,8 @@ def calculate_camera_movement_to_screen_position(
         sx0_real = sx0  # Save real position before overwrite
         sy0_real = sy0
         oracle_error = math.hypot(sx0_oracle - sx0_real, sy0_oracle - sy0_real)
+        ORACLE_MISMATCH_THRESHOLD = 100.0  # If oracle is >100px off, use real position
+        
         if oracle_error > 50:  # Significant mismatch
             logging.warning(f"[JACOBIAN] Oracle vs Real screen position mismatch: "
                           f"Real=({sx0_real:.1f}, {sy0_real:.1f}), "
@@ -1029,22 +1031,45 @@ def calculate_camera_movement_to_screen_position(
             print(f"  Real screen position:    ({sx0_real:.1f}, {sy0_real:.1f})")
             print(f"  Oracle prediction:       ({sx0_oracle:.1f}, {sy0_oracle:.1f})")
             print(f"  Difference:              {oracle_error:.1f}px")
-            print(f"  This may indicate model inaccuracy or coordinate system mismatch.{COLOR_RESET}\n")
+            
+            if oracle_error > ORACLE_MISMATCH_THRESHOLD:
+                print(f"  {COLOR_RED}{COLOR_BOLD}Oracle too inaccurate ({oracle_error:.1f}px > {ORACLE_MISMATCH_THRESHOLD}px threshold){COLOR_RESET}")
+                print(f"  {COLOR_YELLOW}Will use REAL screen position for error calculation{COLOR_RESET}")
+                print(f"  {COLOR_YELLOW}This may indicate model inaccuracy or insufficient calibration data.{COLOR_RESET}\n")
+            else:
+                print(f"  {COLOR_YELLOW}Mismatch is within acceptable range - using oracle prediction{COLOR_RESET}")
+                print(f"  {COLOR_YELLOW}This may indicate minor model inaccuracy.{COLOR_RESET}\n")
         
-        # Update screen position and error with oracle's prediction
-        # NOTE: We use oracle's prediction because the Jacobian was computed using it
-        # If oracle is wrong, the Jacobian will be wrong, leading to incorrect movement
-        sx0 = sx0_oracle
-        sy0 = sy0_oracle
+        # Update screen position and error - use real position if oracle is too inaccurate
+        # NOTE: If oracle mismatch is large (>100px), the Jacobian computed from oracle
+        # will be wrong anyway, so we use real position for error calculation
+        if oracle_error > ORACLE_MISMATCH_THRESHOLD:
+            # Oracle is too inaccurate - use real position for error calculation
+            # (Jacobian was computed from oracle, so movement may still be inaccurate)
+            sx0 = sx0_real
+            sy0 = sy0_real
+        else:
+            # Oracle is accurate enough - use it
+            sx0 = sx0_oracle
+            sy0 = sy0_oracle
         error_x = sx0 - tx
         error_y = sy0 - ty
         error_pixels_pre = math.hypot(error_x, error_y)
         jacobian_computed = True
         
+        # If oracle was inaccurate, warn and reduce step_scale for safety
+        if oracle_error > ORACLE_MISMATCH_THRESHOLD:
+            print(f"  {COLOR_YELLOW}⚠ WARNING: Jacobian computed from inaccurate oracle{COLOR_RESET}")
+            print(f"  {COLOR_YELLOW}  Movement accuracy may be reduced. Auto-reducing step_scale for safety.{COLOR_RESET}\n")
+            # Reduce step_scale to be more conservative when oracle is wrong
+            if step_scale > 0.5:
+                step_scale = 0.5  # Reduce to 50% for safety
+                print(f"  {COLOR_YELLOW}  step_scale reduced to {step_scale:.2f}{COLOR_RESET}\n")
+        
         # Determine actual perturbations used (may be adaptive)
         actual_dyaw = finite_diff_dyaw if finite_diff_dyaw > 0 else "auto"
         actual_dpitch = finite_diff_dpitch if finite_diff_dpitch > 0 else "auto"
-        logging.info(f"[JACOBIAN] Using finite-difference method (dyaw={actual_dyaw}, dpitch={actual_dpitch}, error={error_pixels_pre:.1f}px)")
+        logging.info(f"[JACOBIAN] Using finite-difference method (dyaw={actual_dyaw}, dpitch={actual_dpitch}, error={error_pixels_pre:.1f}px, oracle_error={oracle_error:.1f}px)")
         if error_pixels_pre > 200:
             print(f"\n{COLOR_BLUE}Finite-Diff Jacobian:{COLOR_RESET}")
             print(f"  Error: {error_pixels_pre:.1f}px")
@@ -1832,13 +1857,19 @@ def execute_jacobian_camera_movement(
             check_pitch = abs(pitch_diff) > 2
             check_zoom = abs(zoom_diff) > 10
             
-            # Track last values and stability
+            # Track last values and stability (require multiple stable readings)
             last_yaw = None
             last_pitch = None
             last_zoom = None
             yaw_stable = not check_yaw  # If not checking, consider stable
             pitch_stable = not check_pitch
             zoom_stable = not check_zoom
+            
+            # Require 3 consecutive stable readings (0.03s total) to confirm stability
+            stable_count_required = 3
+            yaw_stable_count = 0
+            pitch_stable_count = 0
+            zoom_stable_count = 0
             
             while (time.time() - start_time) < max_wait:
                 # Check if all values we care about are stable
@@ -1855,27 +1886,40 @@ def execute_jacobian_camera_movement(
                 if check_yaw and not yaw_stable:
                     current_yaw = camera_data.get('yaw', 0)
                     if last_yaw is not None and current_yaw == last_yaw:
-                        yaw_stable = True
+                        yaw_stable_count += 1
+                        if yaw_stable_count >= stable_count_required:
+                            yaw_stable = True
                     else:
                         last_yaw = current_yaw
+                        yaw_stable_count = 0  # Reset counter on change
                 
                 # Check pitch if needed
                 if check_pitch and not pitch_stable:
                     current_pitch = camera_data.get('pitch', 0)
                     if last_pitch is not None and current_pitch == last_pitch:
-                        pitch_stable = True
+                        pitch_stable_count += 1
+                        if pitch_stable_count >= stable_count_required:
+                            pitch_stable = True
                     else:
                         last_pitch = current_pitch
+                        pitch_stable_count = 0  # Reset counter on change
                 
                 # Check zoom if needed
                 if check_zoom and not zoom_stable:
                     current_zoom = camera_data.get('scale', 0)
                     if last_zoom is not None and current_zoom == last_zoom:
-                        zoom_stable = True
+                        zoom_stable_count += 1
+                        if zoom_stable_count >= stable_count_required:
+                            zoom_stable = True
                     else:
                         last_zoom = current_zoom
+                        zoom_stable_count = 0  # Reset counter on change
                 
                 time.sleep(check_interval)
+            
+            # Additional safety wait after stability detected
+            if yaw_stable and pitch_stable and zoom_stable:
+                time.sleep(0.05)  # Small additional wait to ensure fully stopped
         
         # Get ending camera state
         camera_data_after = ipc.get_camera()

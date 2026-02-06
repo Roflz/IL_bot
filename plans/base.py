@@ -13,6 +13,7 @@ class Plan:
     """
     id: str
     label: str
+    description: str
     
     def set_phase(self, phase: str, camera_setup: bool = True) -> str: ...
     def loop(self, ui) -> int: ...

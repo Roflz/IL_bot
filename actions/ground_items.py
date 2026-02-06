@@ -187,3 +187,84 @@ def _pickup_ground_item_once(item: dict) -> Optional[dict]:
 
     print(f"[CLICK] {expected_target} - incorrect interaction")
     return None
+
+
+def interact_ground_item(item: dict, action: str) -> Optional[dict]:
+    """
+    Interact with a ground item using a specific action (e.g., "Lay", "Take").
+    
+    Args:
+        item: Ground item data dictionary
+        action: Action to perform (e.g., "Lay", "Take")
+        
+    Returns:
+        UI dispatch result if successful, None if failed
+    """
+    from helpers.rects import unwrap_rect
+    from helpers.utils import rect_beta_xy, clean_rs
+
+    rect = unwrap_rect(item.get("clickbox"))
+
+    # Determine click coordinates
+    if rect:
+        cx, cy = rect_beta_xy(
+            (rect.get("x", 0), rect.get("x", 0) + rect.get("width", 0), rect.get("y", 0), rect.get("y", 0) + rect.get("height", 0)),
+            alpha=2.0,
+            beta=2.0,
+        )
+        anchor = {"bounds": rect}
+        point = {"x": cx, "y": cy}
+    elif isinstance(item.get("canvas", {}).get("x"), (int, float)) and isinstance(item.get("canvas", {}).get("y"), (int, float)):
+        cx, cy = int(item.get("canvas", {}).get("x")), int(item.get("canvas", {}).get("y"))
+        anchor = {}
+        point = {"x": cx, "y": cy}
+    else:
+        print(f"[GROUND_ITEM] No valid coordinates found for ground item")
+        return None
+
+    # Get item name and world coordinates
+    item_name = item.get("name", "Unknown")
+    world_coords = {
+        "x": item.get("world", {}).get("x"),
+        "y": item.get("world", {}).get("y"),
+        "p": item.get("world", {}).get("p", 0),
+    }
+
+    # Create the interaction step using context menu
+    step = {
+        "action": "ground-item-pickup-context",
+        "option": action,
+        "click": {
+            "type": "context-select",
+            "target": f"{item_name}",
+            "x": cx,
+            "y": cy,
+            "row_height": 16,
+            "start_dy": 18,
+            "open_delay_ms": 120,
+        },
+        "target": {"domain": "ground-item", "name": item_name, "world": world_coords, **anchor} if rect else {"domain": "ground-item", "name": item_name, "world": world_coords},
+        "anchor": point,
+    }
+
+    result = dispatch(step)
+    if not result:
+        return None
+
+    # Check if the correct interaction was performed
+    from helpers.ipc import get_last_interaction
+
+    last_interaction = get_last_interaction()
+    expected_action = action
+    expected_target = item_name
+
+    if (
+        last_interaction
+        and last_interaction.get("action") == expected_action
+        and clean_rs(last_interaction.get("target", "")).lower() == expected_target.lower()
+    ):
+        print(f"[GROUND_ITEM] {expected_target} - {expected_action} interaction verified")
+        return result
+
+    print(f"[GROUND_ITEM] {expected_target} - incorrect interaction")
+    return None

@@ -35,6 +35,10 @@ class MiningPlan(Plan):
     
     id = "MINING"
     label = "Mining Plan"
+    description = """Mines copper/tin ore until level 15, then switches to iron ore. Drops ores when inventory is full. Includes initial banking to withdraw pickaxes.
+
+Starting Area: Any bank (travels to mining spots)
+Required Items: Pickaxe"""
     
     def __init__(self):
         self.state = {"phase": "MINING_IRON"}

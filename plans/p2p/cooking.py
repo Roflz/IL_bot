@@ -32,12 +32,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from plans.base import Plan
 from plans.utilities.bank_plan_simple import BankPlanSimple
 from helpers import setup_camera_optimal
-from helpers import set_phase_with_camera
 
 
 class CookingPlan(Plan):
     id = "COOKING"
     label = "Cooking Plan"
+    description = """Cooks raw fish at cooking ranges for cooking XP. Simple loop: bank -> range -> cook -> bank. Automatically withdraws raw fish and travels to cooking locations.
+
+Starting Area: Any bank (travels to cooking range)
+Required Items: Raw fish"""
     DONE = 0
 
     def __init__(self):
@@ -46,7 +49,7 @@ class CookingPlan(Plan):
         self.loop_interval_ms = 600
 
         try:
-            setup_camera_optimal()
+            setup_camera_optimal(target_pitch=0)
         except Exception as e:
             logging.warning(f"[{self.id}] Could not setup camera: {e}")
 
@@ -59,18 +62,18 @@ class CookingPlan(Plan):
         self.range_object_names = ["Range", "Cooking range"]
 
         # What we withdraw/cook, with cooking level requirements.
-        # Ordered by preference (best fish first that you can cook + have in bank).
+        # Ordered by preference (lowest level first, then higher levels).
         # Format: (raw_fish_name, cooking_level_required)
         self.raw_fish = [
-            ("Raw swordfish", 45),
-            ("Raw lobster", 40),
-            ("Raw tuna", 30),
-            ("Raw salmon", 25),
-            ("Raw trout", 15),
-            ("Raw herring", 5),
-            ("Raw sardine", 1),
-            ("Raw anchovies", 1),
             ("Raw shrimp", 1),
+            ("Raw anchovies", 1),
+            ("Raw sardine", 1),
+            ("Raw herring", 5),
+            ("Raw trout", 15),
+            ("Raw salmon", 25),
+            ("Raw tuna", 30),
+            ("Raw lobster", 40),
+            ("Raw swordfish", 45),
         ]
 
         # Withdraw 28 of the first raw fish we can find in bank (best-effort).
@@ -120,7 +123,28 @@ class CookingPlan(Plan):
         self.state["next_tab_switch_ts"] = now + float(exponential_number(60.0, 1800.0, 0.5, output_type="float"))
 
     def set_phase(self, phase: str, camera_setup: bool = True):
-        return set_phase_with_camera(self, phase, camera_setup)
+        # Check if this is a new phase (not just setting the same phase)
+        current_phase = self.state.get("phase")
+        is_new_phase = current_phase != phase
+        
+        self.state["phase"] = phase
+        self.next = phase
+        
+        # Set up camera for new phases (without pitch adjustment)
+        if is_new_phase and camera_setup:
+            try:
+                print(f"[{self.__class__.__name__}] Setting up camera for new phase: {phase}")
+                setup_camera_optimal(target_pitch=0)
+            except Exception as e:
+                print(f"[{self.__class__.__name__}] Camera setup failed for phase {phase}: {e}")
+        
+        try:
+            # Only log if phase actually changed
+            if current_phase != phase:
+                logging.info(f"[{self.__class__.__name__}] phase → {phase}")
+        except Exception:
+            pass
+        return phase
 
     def loop(self, ui) -> int:
         phase = self.state.get("phase", "BANK")
@@ -185,7 +209,7 @@ class CookingPlan(Plan):
             return self.loop_interval_ms
 
         if not bank.is_open():
-            bank.open_bank()
+            bank.open_bank(prefer_no_camera=True)
             return self.loop_interval_ms
 
         ok = self._configure_bank_plan_for_fish()
@@ -236,7 +260,7 @@ class CookingPlan(Plan):
         before = inventory.inv_count(raw)
 
         # 2) click the range (object)
-        res = objects.click_object_closest_by_distance_simple_prefer_no_camera("Range", "Cook")
+        res = objects.click_object_closest_by_distance_simple_no_camera("Range", "Cook")
         if not res:
             return self.loop_interval_ms
 

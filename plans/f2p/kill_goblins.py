@@ -33,6 +33,10 @@ from helpers.utils import sleep_exponential, exponential_number, random_number
 class KillGoblinsPlan(Plan):
     id = "KILL_GOBLINS"
     label = "Kill Goblins"
+    description = """Combat training by killing goblins in Goblin Village. Equips scimitar and attacks goblins for combat XP. Includes banking support for food and equipment.
+
+Starting Area: Varrock West Bank (travels to Goblin Village)
+Required Items: Scimitar, Food"""
 
     def __init__(self):
         self.state = {"phase": "FIGHT", "next_tab_switch_ts": None}

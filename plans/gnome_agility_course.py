@@ -33,6 +33,10 @@ from .base import Plan
 class GnomeAgilityCoursePlan(Plan):
     id = "GNOME_AGILITY_COURSE"
     label = "Agility: Gnome Course"
+    description = """Completes the Gnome Agility Course for agility XP. Configurable obstacle sequence with automatic course navigation and obstacle interaction.
+
+Starting Area: Gnome Stronghold Agility Course
+Required Items: None"""
 
     def __init__(self):
         # ---- Config ----

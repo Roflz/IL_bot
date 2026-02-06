@@ -115,7 +115,8 @@ def setup_camera_optimal(target_scale: int = 551, target_pitch: int = 383) -> bo
                 return False
         
         # Then, handle pitch - hold UP until we're close enough
-        if current_pitch < target_pitch - 30:
+        # Skip pitch adjustment if target_pitch is 0 or less (indicates no pitch adjustment desired)
+        if target_pitch > 0 and current_pitch < target_pitch - 30:
             
             def pitch_good():
                 stats = get_camera_stats()

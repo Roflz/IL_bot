@@ -624,6 +624,9 @@ Examples:
             # File path for triggered rule check
             triggered_rule_file = Path(__file__).parent / "character_data" / f"triggered_rule_{username}.txt"
         
+        # Track last logged phase to only log when phase changes
+        last_logged_phase = None
+        
         while True:
             # Check for triggered rule from StatsMonitor (reads from file)
             triggered_rule = None
@@ -640,9 +643,11 @@ Examples:
                 logging.info(f"Stopping after {runtime_minutes:.1f} minutes")
                 break
             
-            # Log current phase for GUI detection
+            # Log current phase for GUI detection (only when phase changes)
             current_phase = getattr(plan, 'state', {}).get('phase', 'unknown')
-            logging.info(f"phase: {current_phase}")
+            if current_phase != last_logged_phase:
+                logging.info(f"phase: {current_phase}")
+                last_logged_phase = current_phase
             
             # Let the plan decide the wait (ms)
             try:

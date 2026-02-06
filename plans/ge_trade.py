@@ -25,6 +25,10 @@ from helpers import set_phase_with_camera
 class GeTradePlan(Plan):
     id = "GE_TRADE"
     label = "Grand Exchange Trading"
+    description = """Facilitates player-to-player trading at the Grand Exchange. Supports both worker and buyer roles for coordinated trading operations.
+
+Starting Area: Grand Exchange
+Required Items: Items to trade (varies by role)"""
 
     def __init__(self, role="worker"):
         self.state = {"phase": "GO_TO_GE"}

@@ -90,7 +90,7 @@ function Load-Configuration {
             basePort = 17000
             delaySeconds = 0
             defaultWorld = 0
-            buildMaven = $false
+            buildMaven = $true
         }
     }
     
@@ -121,7 +121,7 @@ function Load-Configuration {
                     basePort = if ($configContent.launch.basePort) { $configContent.launch.basePort } else { 17000 }
                     delaySeconds = if ($configContent.launch.delaySeconds -ne $null) { $configContent.launch.delaySeconds } else { 0 }
                     defaultWorld = if ($configContent.launch.defaultWorld -ne $null) { $configContent.launch.defaultWorld } else { 0 }
-                    buildMaven = if ($configContent.launch.buildMaven -ne $null) { $configContent.launch.buildMaven } else { $false }
+                    buildMaven = if ($configContent.launch.buildMaven -ne $null) { $configContent.launch.buildMaven } else { $true }
                 }
             }
             Write-Host "[Config] Loaded configuration from: $ConfigPath" -ForegroundColor Green
@@ -475,17 +475,20 @@ if ($credentialFiles.Count -lt $Count) {
 
 # -----------------------------------------------------------------------------
 # Build (optional) and regenerate classpath
+# Build same as normal RuneLite: full clean install from root so runelite-api,
+# injected-client, and runelite-client are all built and installed in one go.
+# Then classpath resolution uses that same install; no version mismatch.
 # -----------------------------------------------------------------------------
 $classes = Join-Path $ProjectDir 'runelite-client\target\classes'
 
 if ($config.launch.buildMaven) {
-    Write-Host "Building RuneLite project..."
+    Write-Host "Building RuneLite (full clean install, same as upstream)..."
     $mvnExe = Find-MavenExecutable
     if (-not $mvnExe) {
         throw "Maven not found. Please install Maven or disable BuildMaven option."
     }
-    Write-Host "Running: $mvnExe -q -f `"$ProjectDir\pom.xml`" -pl runelite-client -am package -DskipTests"
-    & $mvnExe -q -f "$ProjectDir\pom.xml" -pl runelite-client -am package -DskipTests
+    Write-Host "Running: $mvnExe -q -f `"$ProjectDir\pom.xml`" clean install -DskipTests"
+    & $mvnExe -q -f "$ProjectDir\pom.xml" clean install -DskipTests
     if ($LASTEXITCODE -ne 0) { throw "Maven build failed with exit code $LASTEXITCODE" }
 } else {
     Write-Host "Skipping Maven build (BuildMaven = false)"
@@ -526,8 +529,9 @@ New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ExportsBase | Out-Null
 
 # Track PIDs so we can stop cleanly later
+# Don't delete existing PID file - append to it so multiple launches are tracked
 $pidFile = Join-Path $BaseDir "runelite-pids.txt"
-if (Test-Path $pidFile) { Remove-Item $pidFile -Force }
+# Note: We append to the file instead of overwriting, so multiple separate launches are tracked
 
 Write-Host "Starting to launch $Count instances..."
 

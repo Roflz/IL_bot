@@ -2,6 +2,7 @@
 Centralized click with camera functionality.
 Handles the 3-step process: camera movement, fresh coordinates, click.
 """
+import logging
 import random
 
 from helpers import unwrap_rect
@@ -311,7 +312,9 @@ def click_npc_with_camera(
     aim_ms: int = 420,
     exact_match: bool = False,
     path_waypoints: list = None,
-    movement_state: dict = None
+    movement_state: dict = None,
+    disable_pitch: bool = False,
+    area: str | tuple = None
 ) -> dict | None:
     """
     Click an NPC with camera movement and fresh coordinate recalculation.
@@ -319,10 +322,88 @@ def click_npc_with_camera(
     Args:
         path_waypoints: Optional list of waypoint dicts from pathfinding for path-aware camera
         movement_state: Optional movement state dict with is_running, movement_direction, etc.
+        disable_pitch: If True, pitch will not be adjusted during camera movement (default: False)
+        area: Optional area constraint - can be:
+            - String: Area name from constants.py (e.g., "GWD_BANDOS")
+            - Tuple: (min_x, max_x, min_y, max_y) for custom coordinates
+            If provided, only clicks NPCs within this area
     """
     try:
-        if not world_coords:
-            return None
+        # if not world_coords:
+        #     return None
+
+        # Check if NPC is already visible and within clickable area before moving camera
+        npc_resp_precheck = ipc.find_npc(npc_name)
+        skip_camera_movement = False
+        
+        if npc_resp_precheck and npc_resp_precheck.get("ok") and npc_resp_precheck.get("found"):
+            target_precheck = npc_resp_precheck.get("npc")
+            if target_precheck:
+                # Verify NPC is within specified area (if area constraint provided)
+                if area is not None:
+                    target_world_precheck = target_precheck.get("world", {})
+                    target_x_precheck = target_world_precheck.get("x")
+                    target_y_precheck = target_world_precheck.get("y")
+                    
+                    if isinstance(target_x_precheck, int) and isinstance(target_y_precheck, int):
+                        # Resolve area coordinates
+                        min_x, max_x, min_y, max_y = None, None, None, None
+                        if isinstance(area, str):
+                            try:
+                                from constants import REGIONS, BANK_REGIONS
+                                if area in REGIONS:
+                                    min_x, max_x, min_y, max_y = REGIONS[area]
+                                elif area in BANK_REGIONS:
+                                    min_x, max_x, min_y, max_y = BANK_REGIONS[area]
+                            except ImportError:
+                                pass
+                        elif isinstance(area, tuple) and len(area) == 4:
+                            min_x, max_x, min_y, max_y = area
+                        
+                        # Check if NPC is within area bounds
+                        if min_x is not None and not (min_x <= target_x_precheck <= max_x and min_y <= target_y_precheck <= max_y):
+                            # NPC is outside area, don't skip camera movement
+                            target_precheck = None
+                
+                if target_precheck:
+                    # Get screen coordinates from NPC
+                    rect_precheck = unwrap_rect(target_precheck.get("clickbox")) or unwrap_rect(target_precheck.get("bounds"))
+                    canvas_precheck = target_precheck.get("canvas", {})
+                    
+                    # Check if NPC has valid screen coordinates
+                    screen_x = None
+                    screen_y = None
+                    
+                    if rect_precheck:
+                        # Use center of clickbox/bounds
+                        screen_x = rect_precheck.get("x", 0) + rect_precheck.get("width", 0) // 2
+                        screen_y = rect_precheck.get("y", 0) + rect_precheck.get("height", 0) // 2
+                    elif isinstance(canvas_precheck.get("x"), (int, float)) and isinstance(canvas_precheck.get("y"), (int, float)):
+                        screen_x = int(canvas_precheck["x"])
+                        screen_y = int(canvas_precheck["y"])
+                    
+                    # Check if NPC is within 800x600 clickable area centered on screen
+                    if screen_x is not None and screen_y is not None:
+                        where = ipc.where() or {}
+                        screen_width = int(where.get("w", 0))
+                        screen_height = int(where.get("h", 0))
+                        
+                        if screen_width > 0 and screen_height > 0:
+                            # 800x600 box centered on screen
+                            clickable_width = 800
+                            clickable_height = 600
+                            center_x = screen_width // 2
+                            center_y = screen_height // 2
+                            
+                            min_x = center_x - clickable_width // 2
+                            max_x = center_x + clickable_width // 2
+                            min_y = center_y - clickable_height // 2
+                            max_y = center_y + clickable_height // 2
+                            
+                            # Check if NPC is within clickable area
+                            if min_x <= screen_x <= max_x and min_y <= screen_y <= max_y:
+                                skip_camera_movement = True
+                                logging.debug(f"[CLICK_NPC] NPC {npc_name} already visible at ({screen_x}, {screen_y}), skipping camera movement")
 
         # Try camera retry directions: first try without moving camera, then LEFT, then RIGHT
         camera_retry_directions = [None, "LEFT", "RIGHT"]
@@ -341,35 +422,37 @@ def click_npc_with_camera(
             # Try multiple attempts with different coordinates
             max_attempts = 3
             for attempt in range(max_attempts):
-                # Move camera to target using path-aware logic if available
-                from actions import player
-                player_x = player.get_x()
-                player_y = player.get_y()
-                
-                # Use new camera system
-                # Calculate distance for mode detection
-                if isinstance(player_x, int) and isinstance(player_y, int):
-                    dx = abs(world_coords['x'] - player_x)
-                    dy = abs(world_coords['y'] - player_y)
-                    distance = dx + dy  # Manhattan distance
-                else:
-                    distance = None
-                
-                # Use new camera system with auto-detection
-                from services.camera_integration import get_camera_state
-                camera_state, state_config, area_center, _ = get_camera_state()
-                
-                aim_camera_at_target(
-                    target_world_coords=world_coords,
-                    mode=None,  # Auto-detect
-                    action_type="click_npc",
-                    distance_to_target=distance,
-                    path_waypoints=path_waypoints,
-                    movement_state=movement_state,
-                    max_ms=aim_ms,
-                    object_world_coords=world_coords,  # Pass object coords for OBJECT_INTERACTION state
-                    area_center=area_center
-                )
+                # Move camera to target using path-aware logic if available (skip if already visible)
+                if not skip_camera_movement:
+                    from actions import player
+                    player_x = player.get_x()
+                    player_y = player.get_y()
+                    
+                    # Use new camera system
+                    # Calculate distance for mode detection
+                    if isinstance(player_x, int) and isinstance(player_y, int):
+                        dx = abs(world_coords['x'] - player_x)
+                        dy = abs(world_coords['y'] - player_y)
+                        distance = dx + dy  # Manhattan distance
+                    else:
+                        distance = None
+                    
+                    # Use new camera system with auto-detection
+                    from services.camera_integration import get_camera_state
+                    camera_state, state_config, area_center, _ = get_camera_state()
+                    
+                    aim_camera_at_target(
+                        target_world_coords=world_coords,
+                        mode=None,  # Auto-detect
+                        action_type="click_npc",
+                        distance_to_target=distance,
+                        path_waypoints=path_waypoints,
+                        movement_state=movement_state,
+                        max_ms=aim_ms,
+                        object_world_coords=world_coords,  # Pass object coords for OBJECT_INTERACTION state
+                        area_center=area_center,
+                        disable_pitch=disable_pitch
+                    )
                 
                 # STEP 3: NPC finding and rect resampling
                 npc_resp = ipc.find_npc(npc_name)
@@ -381,6 +464,43 @@ def click_npc_with_camera(
                 
                 if not target:
                     continue
+                
+                # Verify NPC is within specified area (if area constraint provided)
+                if area is not None:
+                    target_world = target.get("world", {})
+                    target_x = target_world.get("x")
+                    target_y = target_world.get("y")
+                    
+                    if not isinstance(target_x, int) or not isinstance(target_y, int):
+                        logging.debug(f"[CLICK_NPC] NPC {npc_name} has invalid world coordinates, skipping")
+                        continue
+                    
+                    # Resolve area coordinates
+                    min_x, max_x, min_y, max_y = None, None, None, None
+                    if isinstance(area, str):
+                        # Try to import constants
+                        try:
+                            from constants import REGIONS, BANK_REGIONS
+                            if area in REGIONS:
+                                min_x, max_x, min_y, max_y = REGIONS[area]
+                            elif area in BANK_REGIONS:
+                                min_x, max_x, min_y, max_y = BANK_REGIONS[area]
+                            else:
+                                logging.warning(f"[CLICK_NPC] Unknown area name: {area}")
+                                continue
+                        except ImportError:
+                            logging.warning(f"[CLICK_NPC] Could not import constants to resolve area: {area}")
+                            continue
+                    elif isinstance(area, tuple) and len(area) == 4:
+                        min_x, max_x, min_y, max_y = area
+                    else:
+                        logging.warning(f"[CLICK_NPC] Invalid area format: {area}")
+                        continue
+                    
+                    # Check if NPC is within area bounds
+                    if not (min_x <= target_x <= max_x and min_y <= target_y <= max_y):
+                        logging.debug(f"[CLICK_NPC] NPC {npc_name} at ({target_x}, {target_y}) is outside area bounds, skipping")
+                        continue
                 
                 # Get FRESH coordinates
                 rect = unwrap_rect(target.get("clickbox")) or unwrap_rect(target.get("bounds"))

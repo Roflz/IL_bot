@@ -31,6 +31,10 @@ class SplashPlan(Plan):
     
     id = "SPLASH"
     label = "Splash Plan"
+    description = """Splashing activity plan with banking and Grand Exchange support. Manages magic training through splashing mechanics.
+
+Starting Area: Any bank (travels to splashing location)
+Required Items: Magic equipment, Runes"""
     
     def __init__(self, username: str = None, password: str = None):
         self.state = {"phase": "BANK"}

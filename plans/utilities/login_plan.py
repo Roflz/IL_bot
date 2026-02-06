@@ -11,6 +11,10 @@ class LoginPlan(Plan):
     
     id = "login"
     label = "Login Utility"
+    description = """Simple utility plan that handles logging into the game. Useful as a first step in plan sequences to ensure the character is logged in before other operations.
+
+Starting Area: Login screen
+Required Items: None"""
     
     def __init__(self):
         self.state = {"phase": "LOGIN"}

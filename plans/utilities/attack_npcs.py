@@ -51,6 +51,10 @@ class AttackNpcsPlan(Plan):
     
     id = "ATTACK_NPCS_PLAN"
     label = "Attack NPCs Utility"
+    description = """Utility plan for attacking NPCs at specific locations. Handles complete combat cycle: travel, attack, loot, eat food, and return to bank when inventory is full. Can be used by other plans for combat automation.
+
+Starting Area: Configurable (specified in plan initialization)
+Required Items: Combat equipment, Food (specified in plan initialization)"""
     
     # Return status codes
     SUCCESS = 0

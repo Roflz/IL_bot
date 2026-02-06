@@ -35,6 +35,10 @@ class CraftingPlan(Plan):
     
     id = "CRAFTING"
     label = "Crafting: Edgeville Bank"
+    description = """Crafts jewelry at Edgeville bank for crafting XP. Configurable jewelry type via jewelry_config. Cycles between bank and crafting with automatic world hopping support.
+
+Starting Area: Edgeville Bank
+Required Items: Gold bars, gems (depending on jewelry_config)"""
     
     def __init__(self):
         self.state = {"phase": "BANK", "next_tab_switch_ts": None, "last_smelting_ts": None, "last_world_hop_ts": None}

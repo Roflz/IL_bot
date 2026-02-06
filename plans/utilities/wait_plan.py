@@ -12,6 +12,10 @@ class WaitPlan(Plan):
     
     id = "wait"
     label = "Wait Utility"
+    description = """Simple utility plan that waits for a specified amount of time (in minutes). Useful for adding delays between plans or creating timed sequences. Configurable wait duration via parameters.
+
+Starting Area: Anywhere
+Required Items: None"""
     
     def __init__(self, wait_minutes=1, **kwargs):
         self.state = {"phase": "WAIT"}

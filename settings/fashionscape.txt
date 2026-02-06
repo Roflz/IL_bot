@@ -1,0 +1,34 @@
+Fashionscape:
+
+Head:
+Beanie
+red beret
+headband
+boater hat
+crier hat
+leprechaun hat
+cavalier
+
+Body:
+red/green/blue elegant shirt
+crier coat
+
+Legs:
+red/blue/green elegant legs
+pantaloons
+
+Boots:
+desert boots
+
+Weapon:
+Black Cane
+nunchaku (2 handed)
+dual sai
+
+Shield:
+cabbage round shield
+chronicle
+
+Cape:
+god cloak
+wolf cloak

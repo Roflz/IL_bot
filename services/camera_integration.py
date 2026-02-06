@@ -1985,7 +1985,8 @@ def aim_camera_at_target(
     movement_state: dict = None,
     max_ms: int = 600,
     object_world_coords: dict = None,
-    area_center: dict = None
+    area_center: dict = None,
+    disable_pitch: bool = False
 ) -> bool:
     """
     Main entry point for new camera system with state-based behavior.
@@ -2002,6 +2003,7 @@ def aim_camera_at_target(
         max_ms: Maximum time for camera aiming (default: 600ms)
         object_world_coords: Optional object world coordinates (for OBJECT_INTERACTION state)
         area_center: Optional area center coordinates (for AREA_ACTIVITY state)
+        disable_pitch: If True, pitch will not be adjusted (default: False)
     
     Returns:
         True if camera was adjusted, False otherwise
@@ -2093,7 +2095,8 @@ def aim_camera_at_target(
                 object_world_coords=object_world_coords,
                 area_center=area_center,
                 path_waypoints=path_waypoints,
-                max_ms=max_ms
+                max_ms=max_ms,
+                disable_pitch=disable_pitch
             )
         else:
             # Fallback to original behavior
@@ -2101,7 +2104,8 @@ def aim_camera_at_target(
                 target_world_coords={"x": target_x, "y": target_y},
                 mode=mode,
                 movement_state=movement_state,
-                max_ms=max_ms
+                max_ms=max_ms,
+                disable_pitch=disable_pitch
             )
         
     except Exception as e:
@@ -2117,7 +2121,8 @@ def _aim_camera_with_state(
     object_world_coords: dict = None,
     area_center: dict = None,
     path_waypoints: list = None,
-    max_ms: int = 600
+    max_ms: int = 600,
+    disable_pitch: bool = False
 ) -> bool:
     """
     State-specific camera adjustment with continuous feedback.
@@ -2281,26 +2286,34 @@ def _aim_camera_with_state(
                                 pressed_keys.discard(yaw_key)
                 
                 # Check pitch adjustment (with minimum pitch constraint of 280)
-                pitch_diff = desired_pitch - current_pitch
-                if abs(pitch_diff) > 20:  # Dead zone
-                    pitch_key = "UP" if pitch_diff > 0 else "DOWN"
-                    # Prevent pitch from going below 280
-                    if pitch_key == "DOWN" and current_pitch <= 280:
-                        # Don't allow DOWN if pitch is already at or below minimum
-                        pitch_key = None
-                    if pitch_key and pitch_key not in pressed_keys:
-                        other_pitch_key = "DOWN" if pitch_key == "UP" else "UP"
-                        if other_pitch_key in pressed_keys:
-                            ipc.key_release(other_pitch_key)
-                            pressed_keys.discard(other_pitch_key)
-                        ipc.key_press(pitch_key)
-                        pressed_keys.add(pitch_key)
+                if not disable_pitch:
+                    pitch_diff = desired_pitch - current_pitch
+                    if abs(pitch_diff) > 20:  # Dead zone
+                        pitch_key = "UP" if pitch_diff > 0 else "DOWN"
+                        # Prevent pitch from going below 280
+                        if pitch_key == "DOWN" and current_pitch <= 280:
+                            # Don't allow DOWN if pitch is already at or below minimum
+                            pitch_key = None
+                        if pitch_key and pitch_key not in pressed_keys:
+                            other_pitch_key = "DOWN" if pitch_key == "UP" else "UP"
+                            if other_pitch_key in pressed_keys:
+                                ipc.key_release(other_pitch_key)
+                                pressed_keys.discard(other_pitch_key)
+                            ipc.key_press(pitch_key)
+                            pressed_keys.add(pitch_key)
+                    else:
+                        # Release pitch keys if close enough
+                        for pitch_key in ["UP", "DOWN"]:
+                            if pitch_key in pressed_keys:
+                                ipc.key_release(pitch_key)
+                                pressed_keys.discard(pitch_key)
                 else:
-                    # Release pitch keys if close enough
+                    # Release any pitch keys if pitch is disabled
                     for pitch_key in ["UP", "DOWN"]:
                         if pitch_key in pressed_keys:
                             ipc.key_release(pitch_key)
                             pressed_keys.discard(pitch_key)
+                    pitch_diff = 0  # Set to 0 so pitch_ok check passes
                 
                 # Check zoom adjustment
                 zoom_diff = desired_zoom - current_zoom
@@ -2321,7 +2334,7 @@ def _aim_camera_with_state(
                         angle_diff_rl_check += 2048
                 
                 yaw_ok = desired_yaw_rl is None or abs(angle_diff_rl_check) <= 57
-                pitch_ok = abs(pitch_diff) <= 20
+                pitch_ok = disable_pitch or abs(pitch_diff) <= 20
                 zoom_ok = abs(zoom_diff) <= 10
                 
                 if yaw_ok and pitch_ok and zoom_ok:
@@ -2346,7 +2359,8 @@ def _aim_camera_continuous_feedback(
     target_world_coords: dict,
     mode: str = "intentional",
     movement_state: dict = None,
-    max_ms: int = 600
+    max_ms: int = 600,
+    disable_pitch: bool = False
 ) -> bool:
     """
     Continuous feedback loop for camera adjustment.
@@ -2357,6 +2371,7 @@ def _aim_camera_continuous_feedback(
         mode: "intentional" or "idle"
         movement_state: Optional movement state dict with orientation, movement_direction, etc.
         max_ms: Maximum time for camera aiming
+        disable_pitch: If True, pitch will not be adjusted (default: False)
     
     Returns:
         True if camera was adjusted, False otherwise
@@ -2455,9 +2470,10 @@ def _aim_camera_continuous_feedback(
                 dx = screen_x - target_screen_x
                 dy = screen_y - target_screen_y
                 
-                # Dead zones
-                x_dead_zone = 20
-                y_dead_zone = 20
+                # Dead zones - increased for more lenient camera movement
+                # NPCs within this zone are considered "close enough" to the target position
+                x_dead_zone = 100
+                y_dead_zone = 100
                 
                 # Check if we're close enough
                 if abs(dx) <= x_dead_zone and abs(dy) <= y_dead_zone:
@@ -2486,25 +2502,34 @@ def _aim_camera_continuous_feedback(
                             pressed_keys.discard(yaw_key)
                 
                 # Apply pitch adjustment (with minimum pitch constraint of 280)
-                if needs_pitch:
-                    pitch_key = "UP" if dy > 0 else "DOWN"
-                    # Prevent pitch from going below 280
-                    if pitch_key == "DOWN" and current_pitch <= 280:
-                        # Don't allow DOWN if pitch is already at or below minimum
-                        pitch_key = None
-                    if pitch_key and pitch_key not in pressed_keys:
-                        other_pitch_key = "DOWN" if pitch_key == "UP" else "UP"
-                        if other_pitch_key in pressed_keys:
-                            ipc.key_release(other_pitch_key)
-                            pressed_keys.discard(other_pitch_key)
-                        ipc.key_press(pitch_key)
-                        pressed_keys.add(pitch_key)
+                if not disable_pitch:
+                    if needs_pitch:
+                        pitch_key = "UP" if dy > 0 else "DOWN"
+                        # Prevent pitch from going below 280
+                        if pitch_key == "DOWN" and current_pitch <= 280:
+                            # Don't allow DOWN if pitch is already at or below minimum
+                            pitch_key = None
+                        if pitch_key and pitch_key not in pressed_keys:
+                            other_pitch_key = "DOWN" if pitch_key == "UP" else "UP"
+                            if other_pitch_key in pressed_keys:
+                                ipc.key_release(other_pitch_key)
+                                pressed_keys.discard(other_pitch_key)
+                            ipc.key_press(pitch_key)
+                            pressed_keys.add(pitch_key)
+                    else:
+                        # Release pitch keys if not needed
+                        for pitch_key in ["UP", "DOWN"]:
+                            if pitch_key in pressed_keys:
+                                ipc.key_release(pitch_key)
+                                pressed_keys.discard(pitch_key)
                 else:
-                    # Release pitch keys if not needed
+                    # Release any pitch keys if pitch is disabled
                     for pitch_key in ["UP", "DOWN"]:
                         if pitch_key in pressed_keys:
                             ipc.key_release(pitch_key)
                             pressed_keys.discard(pitch_key)
+                    # Set needs_pitch to False so the dead zone check passes
+                    needs_pitch = False
                 
                 # Wait before next check
                 sleep_exponential(check_interval * 0.8, check_interval * 1.2, 1.0)

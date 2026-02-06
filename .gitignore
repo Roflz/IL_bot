@@ -6,6 +6,9 @@
 .env.local
 .env.*.local
 
+# Credentials directory (contains account credentials)
+credentials/
+
 # YOLO model weight files
 *.pt
 *.onnx

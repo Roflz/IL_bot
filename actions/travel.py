@@ -134,46 +134,24 @@ def _get_next_long_distance_waypoints(destination_key: str, custom_dest_rect: tu
         _long_distance_waypoint_index += 1
         return [current_waypoint]
     
-    # Find the closest waypoint to player's current position
-    # Only check waypoints from current index forward (cannot go backwards)
-    # Consider all waypoints within 25 tile radius of player
-    start_index = _long_distance_waypoint_index  # Cannot go behind current index
-    end_index = len(_long_distance_path_cache)  # Check all remaining waypoints
-    
-    closest_distance = float('inf')
-    closest_index = _long_distance_waypoint_index  # Default to current index
-    radius_limit = 25  # 25 tile radius limit
-    
-    for i in range(start_index, end_index):
-        waypoint = _long_distance_path_cache[i]
-        distance = _calculate_distance(player_x, player_y, waypoint[0], waypoint[1])
-        # Only consider waypoints within 25 tile radius
-        if distance <= radius_limit and distance < closest_distance:
-            closest_distance = distance
-            closest_index = i
-    
-    # Update our cached position in the path to the closest waypoint
-    _long_distance_waypoint_index = closest_index
-    
-    # Set target waypoint to the furthest waypoint ahead in the path that is within 25 tile radius
-    target_index = closest_index  # Start from closest waypoint
+    # Single pass: Find furthest waypoint ahead that's within 25 tiles of player
+    # Start from current index forward (cannot go backwards)
+    radius_limit = 25
+    target_index = _long_distance_waypoint_index
     target_waypoint = _long_distance_path_cache[target_index]
     
-    # Find the furthest waypoint from closest_index forward that is within 25 tiles
-    for i in range(closest_index, len(_long_distance_path_cache)):
+    for i in range(_long_distance_waypoint_index, len(_long_distance_path_cache)):
         waypoint = _long_distance_path_cache[i]
         distance = _calculate_distance(player_x, player_y, waypoint[0], waypoint[1])
         if distance <= radius_limit:
             target_index = i
             target_waypoint = waypoint
         else:
-            # Once we exceed the radius, stop (waypoints are ordered, so we won't find more)
+            # Once we exceed the radius, stop (waypoints are ordered)
             break
     
-    distance_to_target = _calculate_distance(player_x, player_y, target_waypoint[0], target_waypoint[1])
-    
-    # Progress indicator showing current and target waypoints
-    print(f"[TRAVEL] Current waypoint: {closest_index + 1}/{len(_long_distance_path_cache)}, Target: {target_index + 1}/{len(_long_distance_path_cache)}")
+    # Update cached position to target waypoint
+    _long_distance_waypoint_index = target_index
     
     return [target_waypoint]
 
@@ -2061,26 +2039,19 @@ def get_long_distance_waypoints(destination_key: str, custom_dest_rect: tuple = 
             min_x, max_x, min_y, max_y = dest_rect
             is_single_tile = False
         
-        # Handle destination selection (skip for single tiles)
+        # Handle destination selection
         if is_single_tile:
-            # Single tile - use the tile coordinates directly
             destination = (min_x, min_y)
         else:
             # Area - select destination tile within area
             if destination == "random":
                 selected_tile = get_random_walkable_tile(destination_key, dest_rect)
+                destination = selected_tile if selected_tile else ((min_x + max_x) // 2, (min_y + max_y) // 2)
             elif destination == "center_weighted":
                 selected_tile = get_center_weighted_walkable_tile(destination_key, dest_rect)
+                destination = selected_tile if selected_tile else ((min_x + max_x) // 2, (min_y + max_y) // 2)
             else:  # "center" or default
-                selected_tile = None
-        
-        if selected_tile:
-            destination = selected_tile
-        else:
-            # Fallback to center if no tile found or using center mode
-            dest_center_x = (min_x + max_x) // 2
-            dest_center_y = (min_y + max_y) // 2
-            destination = (dest_center_x, dest_center_y)
+                destination = ((min_x + max_x) // 2, (min_y + max_y) // 2)
         
         # Load collision data filtered by start and destination coordinates
         step_start = time.time()

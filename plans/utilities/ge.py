@@ -81,6 +81,10 @@ class GePlan(Plan):
     
     id = "GE_PLAN"
     label = "Grand Exchange Utility"
+    description = """Grand Exchange utility for buying and selling items. Handles complete GE workflow: travel to GE, sell items, check coins, buy items, and close interface. Supports price bumps and custom pricing. Can be used by other plans for item acquisition.
+
+Starting Area: Grand Exchange
+Required Items: Items to sell (if selling), Coins (if buying)"""
     
     # Return status codes
     SUCCESS = 0

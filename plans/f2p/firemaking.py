@@ -29,6 +29,10 @@ from helpers import set_phase_with_camera
 class FiremakingPlan(Plan):
     id = "FIREMAKING"
     label = "Firemaking Plan"
+    description = """Lights logs for firemaking XP at Varrock West Bank. Creates a clear runway and lights logs one-by-one while moving west for efficient training.
+
+Starting Area: Varrock West Bank
+Required Items: Logs, Tinderbox"""
     DONE = 0
 
     def __init__(self):

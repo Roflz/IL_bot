@@ -31,7 +31,7 @@ def ensure_prayer_tab_open() -> bool:
     return True
 
 
-def flick_prayer(prayer_name: str, delay_between_clicks: tuple = (0.3, 10, 4)) -> bool:
+def flick_prayer(prayer_name: str, delay_between_clicks: tuple = (0.1, 5, 4)) -> bool:
     """
     Flick a prayer by clicking it twice (on then off).
     
@@ -52,10 +52,13 @@ def flick_prayer(prayer_name: str, delay_between_clicks: tuple = (0.3, 10, 4)) -
         return False
     
     # First click (turn on)
-    result1 = widgets.click_widget(widget_id)
-    if not result1:
-        logging.warning(f"Failed to click {prayer_name} prayer widget (first click)")
-        return False
+    while not widgets.is_prayer_active(prayer_name):
+        result1 = widgets.click_widget(widget_id)
+        if not result1:
+            logging.warning(f"Failed to click {prayer_name} prayer widget (first click)")
+            return False
+        if wait_until(lambda: widgets.is_prayer_active(prayer_name), max_wait_ms=1000):
+            break
     
     # Sleep between clicks
     sleep_exponential(delay_between_clicks[0], delay_between_clicks[1], delay_between_clicks[2])
@@ -65,10 +68,13 @@ def flick_prayer(prayer_name: str, delay_between_clicks: tuple = (0.3, 10, 4)) -
         return False
     
     # Second click (turn off)
-    result2 = widgets.click_widget(widget_id)
-    if not result2:
-        logging.warning(f"Failed to click {prayer_name} prayer widget (second click)")
-        return False
+    while widgets.is_prayer_active(prayer_name):
+        result2 = widgets.click_widget(widget_id)
+        if not result2:
+            logging.warning(f"Failed to click {prayer_name} prayer widget (second click)")
+            return False
+        if wait_until(lambda: not widgets.is_prayer_active(prayer_name), max_wait_ms=1000):
+            break
     
     logging.info(f"Flicked {prayer_name} prayer (two clicks)")
     return True

@@ -38,6 +38,10 @@ from helpers import set_phase_with_camera
 class FishingPlan(Plan):
     id = "FISHING"
     label = "Fishing Plan"
+    description = """Fishes at ocean and river locations for fishing XP. Automatically banks catches and switches between fishing spots for optimal XP rates.
+
+Starting Area: Any bank (travels to fishing spots)
+Required Items: Fishing equipment (net, harpoon, etc.)"""
 
     def __init__(self):
         self.state = {"phase": "FISH_RIVER_FISH", "after_bank": "GO_TO_OCEAN_FISHING_AREA", "next_tab_switch_ts": None}

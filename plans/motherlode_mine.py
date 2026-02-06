@@ -54,6 +54,10 @@ from services.camera_integration import (
 class MotherlodeMinePlan(Plan):
     id = "MOTHERLODE_MINE"
     label = "Mining: Motherlode Mine"
+    description = """Mines Pay-dirt at the Motherlode Mine and processes it through the hopper system. Automatically deposits ore into the hopper and collects processed ores from the sack. Includes banking support for extended mining sessions.
+
+Starting Area: Motherlode Mine
+Required Items: Pickaxe"""
     DONE = 0
 
     # ---- State keys ----

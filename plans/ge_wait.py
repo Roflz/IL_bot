@@ -13,7 +13,11 @@ from helpers import set_phase_with_camera
 
 class GeTradePlan(Plan):
     id = "GE_TRADE"
-    label = "Grand Exchange Trading"
+    label = "idle logged in"
+    description = """Waits idle at the Grand Exchange, removes and banks equipment, and stays logged in.
+
+Starting Area: Grand Exchange
+Required Items: None"""
 
     def __init__(self):
         self.state = {"phase": "GO_TO_GE"}

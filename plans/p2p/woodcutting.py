@@ -32,6 +32,10 @@ class WoodcuttingPlan(Plan):
     
     id = "WOODCUTTING"
     label = "Woodcutting: Grand Exchange"
+    description = """Cuts normal trees at the Grand Exchange and banks logs for woodcutting XP. Simple and efficient loop with automatic banking support.
+
+Starting Area: Grand Exchange
+Required Items: Axe"""
     
     def __init__(self):
         self.state = {"phase": "BANK", "last_chopping_ts": None, "available_axes_in_bank": None}

@@ -37,6 +37,10 @@ class ProcessingPlan(Plan):
     
     id = "PROCESSING"
     label = "Processing"
+    description = """Processes items like chocolate bars by combining ingredients. Currently supports chocolate bar creation and can be expanded for other processing tasks.
+
+Starting Area: Any bank
+Required Items: Processing ingredients (varies by item type)"""
     
     # Return status codes
     SUCCESS = 0

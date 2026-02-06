@@ -64,6 +64,10 @@ class BankPlanSimple(Plan):
     
     id = "BANK_PLAN_SIMPLE"
     label = "Simplified Bank Setup"
+    description = """Simplified bank utility focused on core banking operations. Deposits inventory and withdraws specified items. Perfect for simple inventory setup without complex equipment logic. Used by many plans for basic banking needs.
+
+Starting Area: Any bank (travels to closest bank)
+Required Items: Specified in plan initialization"""
     
     # Return status codes
     SUCCESS = 0
