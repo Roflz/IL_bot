@@ -30,6 +30,7 @@ from gui.client_detector_pyside import ClientDetector
 from gui.instance_manager_pyside import InstanceManager
 from gui.statistics_pyside import StatisticsDisplay
 from gui.logging_utils_pyside import LoggingUtils
+from gui.home_tab_pyside import HomeTabWidget
 from helpers.ipc import IPCClient
 from utils.stats_monitor import StatsMonitor
 
@@ -44,6 +45,14 @@ class SimpleRecorderGUI(QMainWindow):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setWindowTitle("Simple Recorder - Plan Runner")
         self.setGeometry(100, 100, 1200, 800)
+        # App icon (taskbar, title bar, Alt+Tab)
+        _icon_path = Path(__file__).resolve().parent / "icon.png"
+        if _icon_path.is_file():
+            _icon = QIcon(str(_icon_path))
+            self.setWindowIcon(_icon)
+            app = QApplication.instance()
+            if app:
+                app.setWindowIcon(_icon)
         
         # Set minimum window size
         self.setMinimumSize(800, 600)
@@ -261,6 +270,16 @@ class SimpleRecorderGUI(QMainWindow):
         top_bar_layout = QHBoxLayout()
         top_bar_layout.setContentsMargins(0, 0, 0, 0)
         top_bar_layout.setSpacing(0)
+        
+        # App icon on the left of the menu bar
+        _icon_path = Path(__file__).resolve().parent / "icon.png"
+        if _icon_path.is_file():
+            _icon_label = QLabel()
+            _pix = QPixmap(str(_icon_path)).scaled(24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            _icon_label.setPixmap(_pix)
+            _icon_label.setFixedSize(28, 28)
+            _icon_label.setStyleSheet("background-color: transparent;")
+            top_bar_layout.addWidget(_icon_label)
         
         # Add menu bar (will expand)
         top_bar_layout.addWidget(menubar)
@@ -1133,11 +1152,17 @@ class SimpleRecorderGUI(QMainWindow):
         self.notebook = QTabWidget()
         main_layout.addWidget(self.notebook)
         
+        # Home tab first (default view)
+        self.notebook.addTab(HomeTabWidget(self), "Home")
+        
         # Create Client tab with sub-tabs
         self._create_client_tab()
         
         # Create Instances tab with sub-notebook for instance tabs
         self._create_instances_tab()
+        
+        # Show Home tab on startup
+        self.notebook.setCurrentIndex(0)
         
         # Load configuration first (before initializing components that need config)
         self._load_configuration()
