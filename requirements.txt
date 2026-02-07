@@ -44,5 +44,8 @@ pywinauto>=0.6.8
 # Environment variables (used in account_creation)
 python-dotenv>=1.0.1
 
+# Auth: secure token storage (Supabase sign-in)
+keyring>=24.0.0
+
 # Note: tkinter is typically included with Python installations
 # If not available, install python3-tkinter (Linux) or it comes with Python (Windows/Mac)

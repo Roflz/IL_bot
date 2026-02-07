@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QLabel, QPushButton, QLineEdit, QSpinBox, QCheckBox,
     QListWidget, QTextEdit, QTreeWidget, QTreeWidgetItem, QScrollArea,
     QGroupBox, QFileDialog, QMessageBox, QFrame, QInputDialog, QMenuBar, QMenu,
-    QApplication
+    QApplication, QDialog
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QEvent, QPoint, QSize
 from PySide6.QtGui import QFont, QIcon, QCursor, QPalette, QColor, QPainter, QPixmap
@@ -1169,6 +1169,47 @@ class SimpleRecorderGUI(QMainWindow):
         
         # Initialize component managers that need widgets
         self._init_widget_dependent_components()
+
+    def show_login_dialog_and_refresh(self) -> None:
+        """Clear session, show login dialog; on success set session and refresh Home profile card."""
+        try:
+            from auth.session import clear_session, set_session
+            from auth.token_storage import clear_tokens, get_token
+            from auth.api import get_profile, get_user_from_token, profile_from_jwt
+            from gui.login_dialog_pyside import LoginDialog
+        except ImportError:
+            return
+        clear_session()
+        clear_tokens()
+        dlg = LoginDialog(self)
+        dlg.exec()
+        if dlg.result() != QDialog.DialogCode.Accepted:
+            home = self.notebook.widget(0) if hasattr(self, "notebook") else None
+            if isinstance(home, HomeTabWidget):
+                home.refresh_profile_card()
+            return
+        token = dlg.get_session_token() or get_token()
+        if not token:
+            return
+        def _profile_from_auth_user(u):
+            meta = u.get("user_metadata") or {}
+            return {
+                "user_id": u.get("id"),
+                "email": u.get("email") or "",
+                "display_name": meta.get("full_name") or meta.get("display_name") or "",
+                "subscription_tier": "free",
+            }
+        p1, p2, p3, p4 = (
+            get_profile(token),
+            get_user_from_token(token),
+            (dlg.get_sign_in_user() and _profile_from_auth_user(dlg.get_sign_in_user())),
+            profile_from_jwt(token),
+        )
+        profile = p1 or p2 or p3 or p4 or {"user_id": None, "email": "", "display_name": "Signed in", "subscription_tier": "free"}
+        set_session(profile, token)
+        home = self.notebook.widget(0) if hasattr(self, "notebook") else None
+        if isinstance(home, HomeTabWidget):
+            home.refresh_profile_card()
     
     def _create_client_tab(self):
         """Create the Client tab with sub-tabs (Launcher, Setup & Configuration, Output)."""
