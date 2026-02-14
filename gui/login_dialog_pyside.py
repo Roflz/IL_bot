@@ -29,7 +29,7 @@ class LoginDialog(QDialog):
         layout.setSpacing(12)
 
         if not is_configured():
-            layout.addWidget(QLabel("Supabase is not configured (set SUPABASE_URL and SUPABASE_ANON_KEY)."))
+            layout.addWidget(QLabel("Supabase is not configured."))
             skip_btn = QPushButton("Continue without signing in")
             skip_btn.clicked.connect(self.accept)
             layout.addWidget(skip_btn)
@@ -99,7 +99,7 @@ class LoginDialog(QDialog):
             webbrowser.open(SIGNUP_URL)
             self._error_label.setText("Opened sign-up page in your browser.")
         else:
-            self._error_label.setText("Set FLEZ_BOT_SIGNUP_URL in .env to your sign-up page URL, then click Sign up again.")
+            self._error_label.setText("Sign-up URL is not configured. Set FLEZ_BOT_SIGNUP_URL in .env for a custom sign-up page.")
 
     def _on_forgot_password(self):
         """Send password reset email in-app via Supabase recover."""

@@ -127,16 +127,18 @@ def recover_password(email: str, redirect_to: str | None = None) -> tuple[bool, 
     """
     if not is_configured() or not requests:
         return False, "Auth not configured."
-    url = f"{SUPABASE_URL}/auth/v1/recover"
+    api_url = f"{SUPABASE_URL}/auth/v1/recover"
     headers = {
         "apikey": SUPABASE_ANON_KEY,
         "Content-Type": "application/json",
     }
     payload = {"email": email}
     if redirect_to:
-        payload["redirect_to"] = redirect_to
+        redirect_to = (redirect_to or "").strip()
+        if redirect_to:
+            payload["redirect_to"] = redirect_to
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=15)
+        r = requests.post(api_url, json=payload, headers=headers, timeout=15)
         if r.status_code == 200:
             return True, ""
         try:

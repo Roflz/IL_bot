@@ -11,8 +11,8 @@ For development you can run this file directly from bot_runelite_IL.
 import sys
 from pathlib import Path
 
-# Load .env from repo root FIRST so auth.config sees SUPABASE_URL/SUPABASE_ANON_KEY
-# (when run via "python gui_pyside.py" or from IDE, launcher never runs so .env wasn't loaded)
+# Load .env for optional vars (FLEZ_BOT_SIGNUP_URL, FLEZ_BOT_PASSWORD_RESET_URL)
+# when run via "python gui_pyside.py" or from IDE (launcher loads .env when run from root)
 _bot_root = Path(__file__).resolve().parent
 _repo_root = _bot_root.parent
 try:

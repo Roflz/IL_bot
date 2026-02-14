@@ -116,17 +116,12 @@ def discover_plans():
                     # Check if this class is actually defined in this module
                     if hasattr(attr, '__module__') and attr.__module__ == module_name:
                         plan_class = attr
-                        print(f"[PLAN_DISCOVERY] Found plan class {attr_name} in {plan_name}")
                         break
             
             if plan_class:
                 plans[plan_name] = plan_class
-                print(f"[PLAN_DISCOVERY] Registered plan: {plan_name} -> {plan_class.__name__}")
-            else:
-                print(f"[PLAN_DISCOVERY] No plan class found in {plan_name}")
                 
-        except Exception as e:
-            print(f"[PLAN_DISCOVERY] Error importing {plan_name}: {e}")
+        except Exception:
             continue
     
     # Scan subdirectories for plans (like crafting/)
@@ -166,19 +161,14 @@ def discover_plans():
                             # Check if this class is actually defined in this module
                             if hasattr(attr, '__module__') and attr.__module__ == module_name:
                                 plan_class = attr
-                                print(f"[PLAN_DISCOVERY] Found plan class {attr_name} in {subdir.name}.{plan_name}")
                                 break
                     
                     if plan_class:
                         # Use composite key: subdirectory_name + plan_name (e.g., "p2p_cooking", "p2p_crafting")
                         plan_key = f"{subdir.name}_{plan_name}"
                         plans[plan_key] = plan_class
-                        print(f"[PLAN_DISCOVERY] Registered plan: {plan_key} -> {plan_class.__name__}")
-                    else:
-                        print(f"[PLAN_DISCOVERY] No plan class found in {subdir.name}.{plan_name}")
                         
-                except Exception as e:
-                    print(f"[PLAN_DISCOVERY] Error importing {subdir.name}.{plan_name}: {e}")
+                except Exception:
                     continue
     
     # Scan utilities subdirectory
@@ -222,10 +212,8 @@ def discover_plans():
                 
                 if plan_class:
                     plans[plan_name] = plan_class
-                    print(f"[PLAN_DISCOVERY] Found utility plan: {plan_name}")
                     
-            except Exception as e:
-                print(f"[PLAN_DISCOVERY] Error importing utility {plan_name}: {e}")
+            except Exception:
                 continue
     
     return plans
